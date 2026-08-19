@@ -3,11 +3,11 @@ Simple carrier. Only control single unit for each time (to simplify operations.)
 */
 auto device container1;
 
-const long mySymbol = ((long)@thisx * @maph) + (long)@thisy;
+const long mySymbol = ((long)@thisx * 1000) + (long)@thisy;
 const int threshold = 2;
 const int maxCarry = 20;
 const float timeout = 15;
-const content_t ctrlUnit = @poly;
+const content_t ctrlUnit = @mono;
 const device vault = container1;
 
 float lastAlive = 0;
@@ -52,9 +52,8 @@ void doCarry(content_t carrying) {
         dropAll();
     }
     moveTo(vaultX, vaultY);
-	while ((int)sensor(@unit, carrying) < maxCarry) {
-		ucontrol("itemTake", vault, carrying, maxCarry);
-	}
+    ucontrol("itemTake", vault, carrying, maxCarry);
+    wait(0.2);
     moveTo(coreX, coreY);
     dropAll();
 }
@@ -69,6 +68,7 @@ void main() {
             (volatile int*)coreFound,
             (volatile device*)coreDevice);
     while (true) {
-        doCarry(@thorium);
+        doCarry(@graphite);
+        doCarry(@silicon);
     }
 }

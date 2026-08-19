@@ -1,13 +1,14 @@
+#include "mindc.h"
 
 #define MAX_UNITS 24
 
 auto device vault1, display1;
 
-const near item_t *mineTargets = {@lead};
+const near item_t *mineTargets = {@titanium};
 const unsigned mineTargetLen = 1;
 // 1 - mono-ok, 2 - poly-ok, 4 - mega-ok
-const near unsigned *mineRequire = {6};
-const near unsigned *mineMax = {2, 2, 1};
+const near unsigned *mineRequire = {4};
+const near unsigned *mineMax = {2};
 
 const near item_t *carryTargets = {@titanium};
 const unsigned carryTargetLen = 0, carryCat = 2;

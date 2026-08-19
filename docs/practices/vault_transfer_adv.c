@@ -83,12 +83,12 @@ void main() {
 		flag = (int)sensor(@this, @x) * @maph + (int)sensor(@this, @y);
 		inited = true;
 	}
-	while ((bool)sensor(player, @dead)) {
-		wclear();
-		wwrite("Find player...");
-		wwrite("Please wait");
+	wclear();
+	player = radar("player", "ally", "any", "distance", @this, 1);
+	if ((bool)sensor(player, @dead)) {
+		wwrite("No player");
 		drawflush(display);
-		player = radar("player", "ally", "any", "distance", @this, 1);
+		end();
 	}
 	while (true) {
 		bindTarget(@poly);

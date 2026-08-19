@@ -77,12 +77,10 @@ void carry(device from, device to, content_t type, int count) {
     moving_to(fromX, fromY);
     output("Trying to take item...");
     ucontrol("itemTake", from, type, count);
-    wait(0.25);
     output("Moving to target...");
     moving_to(toX, toY);
     output("Trying to drop item...");
     ucontrol("itemDrop", to, count);
-    wait(0.25);
 }
 
 bool carry_in(bool balanced) {

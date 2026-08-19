@@ -17,7 +17,7 @@ auto device vault1;
 auto device message1;   // Information display
 
 const near unit_t *allowUnits = {(unit_t)@poly};
-const near int *allowMaxBind = {1};
+const near int *allowMaxBind = {3};
 const int allowUnitsSize = 1;
 const near item_t *deployObjects = {(item_t)@thorium};
 const int deployObjectsSize = 1;
@@ -114,8 +114,8 @@ void considerOperation(item_t *selection, int *direction) {
     }
     if (balancing) {
         const bool maxImbalGreater = maxImbal > 0;
-        *selection = maxImbalGreater ? maxImbalItem : minImbalItem;
-        *direction = maxImbalGreater ? 1 : 0;
+        *selection = maxImbalGreater > 0 ? maxImbalItem : minImbalItem;
+        *direction = maxImbalGreater > 0 ? 1 : 0;
     } else {
         const bool isMovingAway = (bool)sensor(switch3, @enabled);
         *selection = isMovingAway ? maxImbalItem : minImbalItem;

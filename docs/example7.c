@@ -7,11 +7,10 @@ auto device switch1;
 
 const float hazardRadius = 50.0;
 const float combatRadius = 5.0;
-const float coreRadius = 10.0;
 
 // Type of units to bind
 const unit_t* bindings = {@flare};
-const int* bindLimit = {20};
+const int* bindLimit = {-1};
 const int bindingsCount = 1;    // Maximum 10
 
 const int serial = ((int)@thisX) * 1000 + ((int)@thisY);
@@ -21,26 +20,20 @@ bool preFetch = true;
 bool coreFound, combatFound;
 int coreX, coreY, combatX, combatY;
 device coreDevice, combatDevice;
-device scannedCombat;
 
 /*
 Control flags:
 1 - Force to execute enabled policy
-2 - Enable 'policyReadyForEnemy' policy
+2 - Enable 'readyForEnemy' policy
 4 - Enable 'policyDirectToCombat' policy
 8 - Enable 'policyCoreProtection' policy
-16 - Enable 'policySelfProtection' policy
 */
 int controlFlags() {
-    return 30;  // 2+4+8+16
+    return 14;  // 2+4+8
 }
 
 bool terminate() {
     return !sensor(switch1, @enabled);
-}
-
-bool combatAvailable() {
-    return scannedCombat == null || sensor(scannedCombat, @dead);
 }
 
 void output(device target, char info) {
@@ -49,47 +42,31 @@ void output(device target, char info) {
 }
 
 // Policy: Ready for the enemy
-bool policyReadyForEnemy() {
+void policyReadyForEnemy() {
     
 }
 
 // Policy: Just move to the enemy
-bool policyDirectToCombat() {
+void policyDirectToCombat() {
 
 }
 
 // Policy: Protect the core!
-// Shoot at combats in order...
-bool policyCoreProtection() {
-    ucontrol("pathFind", coreX, coreY);
-    
-}
+void policyCoreProtection() {
 
-bool policySelfProtection() {
-    int repairX, repairY;
-    bool repairFound;
-    device repairDevice;
-    ulocate("building", "repair", false, (volatile int*)repairX, (volatile int*)repairY, (volatile bool*)repairFound, (volatile device*)repairDevice);
-    if (repairFound) {
-        ucontrol("pathFind", repairX, repairY);
-    }
-    return repairFound;
 }
 
 // Preprocess before executing instruction on every unit
 void preprocess() {
     // If there are combats...
-    if (combatAvailable()) {
-        scannedCombat = uradar("enemy", "any", "any", "health", 0, 0); // Sorted by order
-    }
+    
+
+    device combat = uradar("enemy", "any", "any", "health", 1);
+
 }
 
 // Every time it is called, it processes something.
 void execute() {
-    if (terminate()) {
-        ucontrol("unbind");
-        return;
-    }
     if (preFetch) {
         // Prefetch core and combat information
         ulocate("building", "core", false, (volatile int*)coreX, (volatile int*)coreY, (volatile bool*)coreFound, (volatile device*)coreDevice);
@@ -97,26 +74,6 @@ void execute() {
     }
     // Pre-locate must be executed
     ulocate("spawn", (volatile int*)combatX, (volatile int*)combatY, (volatile bool*)combatFound, (volatile device*)combatDevice);
-
-    // Make executions according to situations
-    preprocess();
-    const int flags = controlFlags();
-    
-    if (flags & 1) {
-        if (flags & 2) policyReadyForEnemy();
-        if (flags & 4) policyDirectToCombat();
-        if (flags & 8) policyCoreProtection();
-    } else {
-        //if (combatAvailable())
-        const bool doSelfProtect = flags & 16 && sensor((device)@unit, @health) <= (float)sensor((device)@unit, @maxHealth) * 0.33;
-        if (doSelfProtect) {
-            if (policySelfProtection()) return;
-        }
-        const bool doCoreProtect = flags & 8 && sensor(coreDevice, @health) <= (float)sensor(coreDevice, @maxHealth) * 0.66;
-        if (doCoreProtect) {
-            if (policyCoreProtection()) return;
-        }
-    }
 }
 
 // This function will return when and only when bindings are completed
@@ -129,14 +86,13 @@ void bindUnits() {
         if (bindRestriction < 0) continue;
         int count = 0;
         device firstUnit = null;
-        while (count < bindRestriction && (@unit == null || (device)@unit != firstUnit)) {
+        while (count < bindRestriction && ubind(bindings[i]) != firstUnit) {
             if (terminate()) break;
-            ubind(bindings[i]);
             if (sensor(firstUnit, @dead)) {
                 firstUnit = null; count = 0; continue;
             }
             const device current = (device)@unit;
-            if ((bool)sensor(current, @controlled) && ((int)sensor(current, @flag) != serial)) continue;
+            if (sensor(current, @controlled) && (sensor(current, @flag) != serial)) continue;
             ucontrol("flag", serial);
             execute();
             count++;
