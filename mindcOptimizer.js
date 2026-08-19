@@ -2937,7 +2937,7 @@ export class Optimizer extends ASTVisitor {
 				 */
 				const symbol = node.symbol;
 				if (symbol && ((!( symbol.isGlobal || (restrictions && (restrictions === 'strict' || restrictions.has(symbol))) ))
-						 || symbol.isConst)) {
+						 || (symbol.isConst && symbol.type !== 'parameter'))) {
 					const constValue = constants.get(node.name);
 					if (constValue !== undefined) {
 						// 替换为常量值
@@ -3487,6 +3487,9 @@ export class Optimizer extends ASTVisitor {
     hasSideEffects(node, special = null, selectedScope = null) {
         if (!node) return false;
 		selectedScope = node.scope ?? (selectedScope ?? this.currentScope);
+		/**
+		 * @type {boolean}
+		 */
 		const inFunction = special && special.inFunction;
 
 		const functionBuiltin = ['set', 'op', 'jump', 'asm'];
@@ -3588,7 +3591,7 @@ export class Optimizer extends ASTVisitor {
 				const variableUses = this.variableUses.get(scopePath);
 				const variableState = variableUses.get(node.name);
 				if (variableState && (!variableState.canOptimize)) {
-					return true;
+					if (!inFunction) return true;
 				}
 				break;
         }
