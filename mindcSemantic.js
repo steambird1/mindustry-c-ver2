@@ -133,6 +133,7 @@ export class SymbolEntry {
 		this.extraMemoryLocation = null;	// For variables having both access-through and implement-as, this will be the memory space where their value is placed.
 		this.isExtraNear = false;			// This should be written by and only by code generator
 
+		this.isAuto = false;
 		this.isAutoDevice = false;	// Must be manually done!
 		this.isVirtualSymbol = false;
 		this.isRecursiveSymbol = false;
@@ -250,7 +251,7 @@ export class SymbolEntry {
 		 * @type {TypeInfo}
 		 */
 		let resultType = this.myType().duplicate();
-		if (this.isAutoDevice) resultType.qualifiers.push('auto');
+		if (this.isAuto || this.isAutoDevice) resultType.qualifiers.push('auto');
 		if (this.isRegister) resultType.qualifiers.push('register');
 		if (this.isConst || this.type.isConst) resultType.qualifiers.push('const');
 		if (this.isVolatile || this.type.isVolatile) resultType.qualifiers.push('volatile');
@@ -596,6 +597,9 @@ export class SemanticAnalyzer extends ASTVisitor {
         super(compiler);
         this.errors = [];
         this.warnings = [];
+		/**
+		 * @type {Scope}
+		 */
         this.currentScope = null;
         this.currentFunction = null;
         this.symbolTable = new Map();
@@ -1427,6 +1431,9 @@ export class SemanticAnalyzer extends ASTVisitor {
 				varSymbol.isStatic = true;
 				//varSymbol.accessThroughPointer = true;	// i.e. [omitted] need memory allocation
 			}
+			if (storageClass === 'auto') {
+				varSymbol.isAuto = true;
+			}
 			/*
 			if (storageClass === 'extern') {
 				varSymbol.accessThroughPointer = true;
@@ -1890,8 +1897,8 @@ export class SemanticAnalyzer extends ASTVisitor {
             
             this.visit(member);
             const indexType = this.getExpressionType(member);
-            if (indexType && indexType.name !== 'int') {
-                this.addWarning(`Array index should be of type 'int'`, member.location);
+            if (indexType && !this.isTypeCompatible(indexType, 'int')) {
+                this.addWarning(`Array index should be of intergal type`, member.location);
             }
             
             node.dataType = objectType.extractSingle();
@@ -1973,16 +1980,41 @@ export class SemanticAnalyzer extends ASTVisitor {
         this.visit(node.callee);
 
         // 检查参数
-		const funcSymbol = this.currentScope.lookup(node.callee.name);
-		let expectedParams = funcSymbol.type.parameters || [], isFunctionPointer = false;
-        if (!funcSymbol || (funcSymbol.kind !== 'function' && 
+		/**
+		 * @type {SymbolEntry?}
+		 */
+		let funcSymbol = null;
+		/**
+		 * @type {TypeInfo}
+		 */
+		let funcType = null;
+		let readableFunctionName = "<unknown function>";
+		if (node.callee.type === 'Identifier') {
+			funcSymbol = this.currentScope.lookup(node.callee.name);
+			funcType = funcSymbol.myType();
+			readableFunctionName = funcSymbol.name;
+		} else if (node.callee.dataType) {
+			funcType = node.callee.dataType;
+			readableFunctionName = funcType.toString();
+		} else {
+			this.addError(`Cannot resolve function`, node.callee.location);
+			return;
+		}
+		
+		let expectedParams = funcType.parameters || [], isFunctionPointer = false;
+        if (funcSymbol && (funcSymbol.kind !== 'function' && 
 			(!funcSymbol.type.type || funcSymbol.type.type.kind !== 'function'))) {
             this.addError(`Undeclared function '${node.callee.name}'`, node.callee.location);
             return;
         }
-		
-		if (funcSymbol.kind !== 'function' && funcSymbol.type.type.kind === 'function') {
-			expectedParams = funcSymbol.type.type.functionTo.type.parameters;
+		if (!funcSymbol && funcType.kind !== 'function') {
+			this.addError(`Object of type '${funcType.toString()}' is not callable`);
+			return;
+		}
+
+		if ((funcSymbol && funcSymbol.kind !== 'function' && funcSymbol.type.type.kind === 'function')
+			|| (!funcSymbol)) {
+			expectedParams = funcType.functionTo.type.parameters;
 			isFunctionPointer = true;
 		}
         node.arguments.forEach((arg, index) => this.visit(arg, {
@@ -1994,7 +2026,7 @@ export class SemanticAnalyzer extends ASTVisitor {
        
         if (node.arguments.length !== expectedParams.length) {
             this.addError(
-                `Function '${node.callee.name}' expects ${expectedParams.length} arguments, but ${node.arguments.length} were provided`,
+                `Function '${readableFunctionName}' expects ${expectedParams.length} arguments, but ${node.arguments.length} were provided`,
                 node.location
             );
             return;
@@ -2014,7 +2046,8 @@ export class SemanticAnalyzer extends ASTVisitor {
         });
 
 		if (isFunctionPointer) {
-			node.dataType = this.getTypeInfo(funcSymbol.type.type.functionTo.type.returnType);
+			node.dataType = this.getTypeInfo(funcSymbol ?
+					funcSymbol.type.type.functionTo.type.returnType : funcType.functionTo.type.returnType);
 		} else {
 			node.dataType = this.getTypeInfo(funcSymbol.type.returnType);
 		}

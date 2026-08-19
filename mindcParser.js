@@ -619,16 +619,19 @@ export class Parser {
         } else {
             // 解析标识符
             const nameToken = this.getCurrentToken();
-			this.expectToken(TokenType.IDENTIFIER);
+			// this.expectToken(TokenType.IDENTIFIER);
             if (nameToken.type != TokenType.IDENTIFIER) {
                 // 如果是函数参数且没有名称（如：void func(int))
                 if (isFunctionParam) {
-                    return ASTBuilder.declarator(null);
+                    declarator = ASTBuilder.declarator(null);   // Possible that there are follow-up pointer info
+                    //return ASTBuilder.declarator(null);
+                } else {
+                    return null;
                 }
-                return null;
+            } else {
+                declarator = ASTBuilder.declarator(nameToken.value);
+                this.consumeToken();
             }
-            
-            declarator = ASTBuilder.declarator(nameToken.value);
             declarator.location = nameToken.location;
         }
         

@@ -2169,6 +2169,8 @@ export class CodeGenerator extends ASTVisitor {
 						let insideType = null;
 						if (left.dataType && left.dataType.pointerTo) {
 							insideType = left.dataType.pointerTo;
+						} else if (traditional) {
+							return precall.setAttribute('isPointer', true).setAttribute('isPointerAccess', true);
 						} else {
 							this.addWarning(`Unknown reference`, left.location);
 						}
@@ -2279,20 +2281,42 @@ export class CodeGenerator extends ASTVisitor {
 	visitFunctionCall(node) {
 		const referrer = typeName => typeName.slice(0, typeName.length - 2);
 		const special = ['item_t', 'liquid_t', 'unit_t', 'block_t'];
-		const recursive = this.recuriveInfo.has(this.currentFunction);
+		let recursive = this.recuriveInfo.has(this.currentFunction);
 		let result = new Instruction();
 		// Prepare for all parameters
-		let relevantFunction = node.callee ? node.callee.symbol : null, isFunctionPointer = false;
+		/**
+		 * @type {SymbolEntry?}
+		 */
+		let relevantFunction = node.callee ? node.callee.symbol : null;
+		let isFunctionPointer = true;
+		/**
+		 * @deprecated
+		 */
 		let detFunctionSymbol = null;
-		if (relevantFunction.kind !== 'function') {
-			relevantFunction = relevantFunction.type.type.functionTo;
-			isFunctionPointer = true;
-		} else {
-			detFunctionSymbol = relevantFunction;
-		}
+		/**
+		 * @type {TypeInfo?}
+		 */
+		let relevantFunctionType = null;
 		if (!relevantFunction) {
-			throw new InternalGenerationFailure(`Unknown function ${node.callee ? node.callee.name : '<error-function>'}`);
+			if (node.callee.dataType && node.callee.dataType.functionTo) {
+				relevantFunctionType = node.callee.dataType.functionTo.type;
+			}
+			// Otherwise, be ready for failure
+		} else if (relevantFunction.kind !== 'function') {
+			relevantFunction = relevantFunction.type.type.functionTo;
+			relevantFunctionType = relevantFunction.myType();
+			if (relevantFunction.isAuto) {
+				recursive = true;
+			}
+		} else {
+			detFunctionSymbol = relevantFunction;	// ?
+			relevantFunctionType = relevantFunction.type;
+			isFunctionPointer = false;
 		}
+		if (!relevantFunctionType) {
+			throw new InternalGenerationFailure(`Unknown function ${node.callee ? (node.callee.name ?? '<unknown-function>') : '<error-function>'}`);
+		}
+		// Warning: function pointer does NOT care about this
 		if (recursive) {
 			result.concat(this.functionManagement.getPreservationCall(this.currentFunction));
 		}
@@ -2311,15 +2335,15 @@ export class CodeGenerator extends ASTVisitor {
 				this.copyObject(paramName, param.instructionReturn, actualType, paramType)
 			]);
 
-		for (let i = 0; i < relevantFunction.type.parameters.length && i < node.arguments.length; i++) {
+		for (let i = 0; i < relevantFunctionType.parameters.length && i < node.arguments.length; i++) {
 			/**
 			 * @type {TypeInfo}
 			 */
 			let actualType;
 			if (isFunctionPointer) {
-				actualType = this.compiler.semanticAnalyzer.getTypeInfo(relevantFunction.type.parameters[i].type);
+				actualType = this.compiler.semanticAnalyzer.getTypeInfo(relevantFunctionType.parameters[i].type);
 			} else {
-				actualType = relevantFunction.owningScope.lookupCurrent(relevantFunction.type.parameters[i].name).type.type;
+				actualType = relevantFunction.owningScope.lookupCurrent(relevantFunctionType.parameters[i].name).type.type;
 			}
 			const param = this.compiler.semanticAnalyzer.isSameType(actualType, this.compiler.semanticAnalyzer.getTypeInfo('content_t'))
 				? this.implicitToContent(node.arguments[i], null, true) 
@@ -2327,13 +2351,6 @@ export class CodeGenerator extends ASTVisitor {
 			if (!param.getAttribute('isTemporary')) {
 				result.concat(param);
 			}
-			
-			/*
-			result.concat(this.generateSymbolWrite(
-				relevantFunction.owningScope.lookupCurrent(relevantFunction.type.parameters[i].name),
-				param.instructionReturn
-			));
-			*/
 			
 			// This is so-called "post-processing"
 			
@@ -2352,7 +2369,9 @@ export class CodeGenerator extends ASTVisitor {
 		// Pre-call ended.
 		// Calling
 		if (isFunctionPointer) {
-			result.concat(this.functionManagement.getRawFunctionCall(node.callee.symbol.getAssemblySymbol(),
+			const callee = this.visitAndRead(node.callee);
+			result.concat(callee);
+			result.concat(this.functionManagement.getRawFunctionCall(callee.instructionReturn,
 				new Map(), this.currentFunction === 'main', recursive ? null : this.currentFunction));
 		} else {
 			result.concat(this.functionManagement.getFunctionCall(
@@ -2376,9 +2395,9 @@ export class CodeGenerator extends ASTVisitor {
 		}
 		
 		// Get a copy of function return
-		if (relevantFunction.type.returnType !== 'void' && !node.getAttribute('disposeReturn')) {
+		if (relevantFunctionType.returnType !== 'void' && !node.getAttribute('disposeReturn')) {
 			//this.getTempVariable();
-			const returnTypeContent = this.semantic.getTypeInfo(relevantFunction.type.returnType);
+			const returnTypeContent = this.semantic.getTypeInfo(relevantFunctionType.returnType);
 			if (!returnTypeContent) {
 				this.addError("Return type unclear");
 			}
