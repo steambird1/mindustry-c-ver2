@@ -440,6 +440,14 @@ export class Parser {
 	// (Major manual change: support for pointer -- the former ones are really awful !!!)
     parseTypeSpecifier() {
         // 解析类型限定符（const, volatile）
+
+        // [Manually added: inline, 19 Aug]
+        let isInline = false;
+        if (this.matchToken(TokenType.INLINE)) {
+            this.consumeToken();
+            isInline = true;
+        }
+
         const qualifiers = this.parseTypeQualifiers();
         /*
         // 检查基本类型
@@ -543,6 +551,8 @@ export class Parser {
             typeNode.setAttribute('qualifiers', qualifiers);
             typeNode.setAttribute('isTypedef', true);
 			typeNode.setAttribute('isCustomType', true);
+            // typeNode.setAttribute('isInline', isInline);
+            typeNode.isInline = isInline;
 			typeNode.storageClass = storageClass;
             this.consumeToken();
 			doneTypeFetch = true;
@@ -791,6 +801,8 @@ export class Parser {
 		// (手动编写)
 		// 注意：如果最后一个是 Identifier，是函数名！
 		let endedAsIdentifier = false;
+
+        if (this.matchTokenTypeAt(currentIndex, [TokenType.INLINE])) currentIndex++;
 
         // 跳过类型说明符
         while (this.matchTokenTypeAt(currentIndex, [

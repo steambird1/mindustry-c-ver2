@@ -4767,6 +4767,8 @@ export class Optimizer extends ASTVisitor {
 	/**
 	 * 检查函数是否适合内联
 	 * @remark This function is probably not needed
+	 * @param {FunctionDeclarationNode} funcNode 
+	 * @param {FunctionCallNode} callNode 
 	 */
 	isSuitableForInlining(funcNode, callNode, context) {
 		// 检查参数数量
@@ -4781,7 +4783,7 @@ export class Optimizer extends ASTVisitor {
 		
 		// 检查函数体大小
 		const functionSize = this.estimateFunctionSize(funcNode);
-		if (functionSize > 25) { // 阈值，可根据需要调整
+		if (functionSize > 25 && (!funcNode.isInline)) { // 阈值，可根据需要调整
 			return false;
 		}
 		
