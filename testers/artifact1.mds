@@ -1,0 +1,144 @@
+cell1 : {null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null}
+cell2 : {null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null}
+cell3 : {null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null}
+cell4 : {null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null}
+# 1
+set null_block null
+set null_pos null
+write null cell1 0
+write cell2 cell1 1
+write 64 cell1 2
+write 0 cell1 3
+write cell1 cell2 0
+write cell3 cell2 1
+write 64 cell2 2
+write 60 cell2 3
+write cell2 cell3 0
+write cell4 cell3 1
+write 64 cell3 2
+write 120 cell3 3
+write cell3 cell4 0
+write null cell4 1
+write 64 cell4 2
+write 180 cell4 3
+set __stackframe_block 0
+set __stackframe_pos 6
+set ___pointerForward @counter
+op add ___pointerForward ___pointerForward 2
+jump 35 always x 0
+jump 34 lessThanEq __step 0
+read __block __ptrblock 2
+op sub __mxstep __block __ptrpos
+jump 30 greaterThanEq __step __mxstep
+op add __ptrpos __ptrpos __step
+set __step 0
+jump 34 always x 0
+read __ptrblock __ptrblock 1
+op sub __step __step __mxstep
+set __ptrpos 4
+jump 23 always x 0
+set @counter __stackpos
+set ___pointerBackward @counter
+op add ___pointerBackward ___pointerBackward 2
+jump 49 always x 0
+jump 48 lessThanEq __step 0
+op sub __mxstep __ptrpos 4
+jump 44 greaterThanEq __step __mxstep
+op sub __ptrpos __ptrpos __step
+set __step 0
+jump 48 always x 0
+read __ptrblock __ptrblock 0
+op sub __step __step __mxstep
+read __ptrpos __ptrblock 4
+jump 38 always x 0
+set @counter __stackpos
+set _subcall @counter
+op add _subcall _subcall 2
+jump 72 always x 0
+set __register_1 global:.function:subcall.x
+set __register_0 global:.function:subcall.y
+set __register_2 true
+jump 57 greaterThan __register_1 __register_0
+set __register_2 false
+jump 64 notEqual __register_2 true
+set __register_1 global:.function:subcall.x
+set __register_0 global:.function:subcall.y
+op sub __register_2 __register_1 __register_0
+op add __register_3 __register_2 1
+set __return __register_3
+jump 71 always x 0
+jump 71 always x 0
+set __register_1 global:.function:subcall.y
+set __register_0 global:.function:subcall.x
+op sub __register_2 __register_1 __register_0
+op sub __register_3 __register_2 1
+set __return __register_3
+jump 71 always x 0
+set @counter __stackpos
+set _main @counter
+op add _main _main 2
+jump 135 always x 0
+set global:.function:main.block:2.tester_block cell1
+set global:.function:main.block:2.tester_pos 4
+set global:.function:main.block:2.testptr_block null_block
+set global:.function:main.block:2.testptr_pos null_pos
+set global:.function:main.block:2.wp_block null_block
+set global:.function:main.block:2.wp_pos null_pos
+set global:.function:main.block:2.w 5
+set global:.function:main.block:2.r 0
+set global:.function:main.block:2.t 0
+set __register_0 global:.function:main.block:2.block:3.q
+set global:.function:subcall.x __register_0
+set __register_1 global:.function:main.block:2.w
+set global:.function:subcall.y __register_1
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter _subcall
+set __register_2 __return
+set __register_3_block global:.function:main.block:2.tester_block
+set __register_3_pos global:.function:main.block:2.tester_pos
+set __internal_stackpos __stackpos
+set __ptrpos __register_3_pos
+set __ptrblock __register_3_block
+set __step 1
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter ___pointerForward
+set __stackpos __internal_stackpos
+set __register_3_pos __ptrpos
+set __register_3_block __ptrblock
+write __register_2 __register_3_block __register_3_pos
+set __register_0 global:.function:main.block:2.w
+set __register_1 __register_0
+op add __register_0 __register_0 1
+set global:.function:main.block:2.w __register_0
+set global:.function:main.block:2.block:3.i 0
+set global:.function:main.block:2.block:3.i 6
+set global:.function:main.block:2.r 0
+set global:.function:main.block:2.t 6
+set global:.function:main.block:2.testptr_block global:.function:main.block:2.tester_block
+set global:.function:main.block:2.testptr_pos global:.function:main.block:2.tester_pos
+set global:.function:main.block:2.testptr_block global:.function:main.block:2.tester_block
+set global:.function:main.block:2.testptr_pos global:.function:main.block:2.tester_pos
+set __register_0_block global:.function:main.block:2.tester_block
+set __register_0_pos global:.function:main.block:2.tester_pos
+set __internal_stackpos __stackpos
+set __ptrpos __register_0_pos
+set __ptrblock __register_0_block
+set __step 1
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter ___pointerForward
+set __stackpos __internal_stackpos
+set __register_0_pos __ptrpos
+set __register_0_block __ptrblock
+set global:.function:main.block:2.wp_block __register_0_block
+set global:.function:main.block:2.wp_pos __register_0_pos
+set global:.function:main.block:2.wp_block __register_0_block
+set global:.function:main.block:2.wp_pos __register_0_pos
+write 1919810 __register_0_block __register_0_pos
+end
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter _main
+@

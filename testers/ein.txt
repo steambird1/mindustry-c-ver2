@@ -1,0 +1,135 @@
+n
+cell1 : {null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null}
+# 1
+set null_block null
+set null_pos null
+write null cell1 0
+write null cell1 1
+write 64 cell1 2
+write 0 cell1 3
+set __stackframe_block cell1
+set __stackframe_pos 4
+set ___pointerForward @counter
+op add ___pointerForward ___pointerForward 2
+jump 26 always x 0
+jump 13 greaterThanEq __mxstep 0
+end
+jump 25 lessThanEq __step 0
+read __block __ptrblock 2
+op sub __mxstep __block __ptrpos
+jump 20 greaterThanEq __step __mxstep
+op add __ptrpos __ptrpos __step
+set __step 0
+jump 25 always x 0
+read __ptrblock __ptrblock 1
+op sub __step __step __mxstep
+op add __step __step 1
+set __ptrpos 4
+jump 11 always x 0
+set @counter __stackpos
+set ___pointerBackward @counter
+op add ___pointerBackward ___pointerBackward 2
+jump 42 always x 0
+jump 31 greaterThanEq __mxstep 0
+end
+jump 41 lessThanEq __step 0
+op sub __mxstep __ptrpos 4
+jump 37 greaterThan __step __mxstep
+op sub __ptrpos __ptrpos __step
+set __step 0
+jump 41 always x 0
+read __ptrblock __ptrblock 0
+op sub __step __step __mxstep
+read __ptrpos __ptrblock 4
+jump 29 always x 0
+set @counter __stackpos
+set _inner2 @counter
+op add _inner2 _inner2 2
+jump 50 always x 0
+print "Test3"
+set __register_0 message1
+printflush __register_0
+wait 2
+set @counter __stackpos
+set _inner @counter
+op add _inner _inner 2
+jump 85 always x 0
+print "Test2"
+set global:.function:inner2.__stackpos.__pointer_block __stackframe_block
+set global:.function:inner2.__stackpos.__pointer_pos __stackframe_pos
+set __internal_stackpos __stackpos
+set __ptrpos __stackframe_pos
+set __ptrblock __stackframe_block
+set __step 1
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter ___pointerForward
+set __stackpos __internal_stackpos
+set __stackframe_pos __ptrpos
+set __stackframe_block __ptrblock
+write __stackpos global:.function:inner2.__stackpos.__pointer_block global:.function:inner2.__stackpos.__pointer_pos
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter _inner2
+read __stackpos global:.function:inner2.__stackpos.__pointer_block global:.function:inner2.__stackpos.__pointer_pos
+set __internal_stackpos __stackpos
+set __ptrpos __stackframe_pos
+set __ptrblock __stackframe_block
+set __step 1
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter ___pointerBackward
+set __stackpos __internal_stackpos
+set __stackframe_pos __ptrpos
+set __stackframe_block __ptrblock
+set __register_0 message1
+printflush __register_0
+wait 2
+set @counter __stackpos
+set _outer @counter
+op add _outer _outer 2
+jump 119 always x 0
+set global:.function:inner.__stackpos.__pointer_block __stackframe_block
+set global:.function:inner.__stackpos.__pointer_pos __stackframe_pos
+set __internal_stackpos __stackpos
+set __ptrpos __stackframe_pos
+set __ptrblock __stackframe_block
+set __step 1
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter ___pointerForward
+set __stackpos __internal_stackpos
+set __stackframe_pos __ptrpos
+set __stackframe_block __ptrblock
+write __stackpos global:.function:inner.__stackpos.__pointer_block global:.function:inner.__stackpos.__pointer_pos
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter _inner
+read __stackpos global:.function:inner.__stackpos.__pointer_block global:.function:inner.__stackpos.__pointer_pos
+set __internal_stackpos __stackpos
+set __ptrpos __stackframe_pos
+set __ptrblock __stackframe_block
+set __step 1
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter ___pointerBackward
+set __stackpos __internal_stackpos
+set __stackframe_pos __ptrpos
+set __stackframe_block __ptrblock
+print "Test1"
+set __register_0 message1
+printflush __register_0
+set @counter __stackpos
+set _main @counter
+op add _main _main 2
+jump 126 always x 0
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter _outer
+end
+set __internal_stackpos __stackpos
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter _main
+set __stackpos __internal_stackpos
+@

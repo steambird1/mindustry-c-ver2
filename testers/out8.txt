@@ -1,0 +1,462 @@
+debug (Y/N)?strict mode (Y/N)?调试输出模式: 0=所有变量, 1=最近10条指令变量, 2=当前指令变量
+选择调试输出模式 (0/1/2): Input code:
+=== 初始化状态 ===
+变量: {}
+内存: {'cell1': [None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None]}
+建筑顺序: ['cell1']
+代码行数: 181
+循环次数: 1
+严格模式: True
+调试状态：1
+==================================================
+[循环 1/1, 行 0] 执行: set __linkscan 0
+  变量状态: {'__linkscan': 0}
+------------------------------
+[循环 1/1, 行 1] 执行: jump 9 always x 0
+  变量状态: {'__linkscan': 0}
+------------------------------
+[循环 1/1, 行 9] 执行: op add __linker_ret @counter 1
+  变量状态: {'__linker_ret': 11, '__linkscan': 0}
+------------------------------
+[循环 1/1, 行 10] 执行: jump 2 always x 0
+  变量状态: {'__linker_ret': 11, '__linkscan': 0}
+------------------------------
+[循环 1/1, 行 2] 执行: getlink __building __linkscan
+  变量状态: {'__linker_ret': 11, '__linkscan': 0, '__building': 'cell1'}
+------------------------------
+[循环 1/1, 行 3] 执行: sensor __buildingtype __building @type
+  变量状态: {'__building': 'cell1', '__linker_ret': 11, '__buildingtype': '@@special@@memory-cell', '__linkscan': 0}
+------------------------------
+[循环 1/1, 行 4] 执行: jump 8 strictEqual __buildingtype @memory-cell
+  变量状态: {'__building': 'cell1', '__linker_ret': 11, '__buildingtype': '@@special@@memory-cell', '__linkscan': 0}
+------------------------------
+[循环 1/1, 行 8] 执行: set @counter __linker_ret
+  变量状态: {'@counter': 11, '__building': 'cell1', '__linker_ret': 11, '__buildingtype': '@@special@@memory-cell', '__linkscan': 0}
+------------------------------
+[循环 1/1, 行 11] 执行: set cell1_id __linkscan
+  变量状态: {'@counter': 11, '__building': 'cell1', '__linker_ret': 11, '__buildingtype': '@@special@@memory-cell', 'cell1_id': 0, '__linkscan': 0}
+------------------------------
+[循环 1/1, 行 12] 执行: op add __linkscan __linkscan 1
+  变量状态: {'@counter': 11, '__building': 'cell1', '__linker_ret': 11, '__buildingtype': '@@special@@memory-cell', 'cell1_id': 0, '__linkscan': 1}
+------------------------------
+[循环 1/1, 行 13] 执行: set null_block null
+  变量状态: {'@counter': 11, '__building': 'cell1', '__linker_ret': 11, '__buildingtype': '@@special@@memory-cell', 'null_block': None, 'cell1_id': 0, '__linkscan': 1}
+------------------------------
+[循环 1/1, 行 14] 执行: set null_pos null
+  变量状态: {'@counter': 11, '__building': 'cell1', '__linker_ret': 11, '__buildingtype': '@@special@@memory-cell', 'null_block': None, 'cell1_id': 0, '__linkscan': 1, 'null_pos': None}
+------------------------------
+[循环 1/1, 行 15] 执行: write -1 cell1 0
+  变量状态: {'@counter': 11, '__building': 'cell1', '__linker_ret': 11, '__buildingtype': '@@special@@memory-cell', 'null_block': None, 'cell1_id': 0, '__linkscan': 1, 'null_pos': None}
+------------------------------
+[循环 1/1, 行 16] 执行: write -1 cell1 1
+  变量状态: {'@counter': 11, '__building': 'cell1', '__linker_ret': 11, '__buildingtype': '@@special@@memory-cell', 'null_block': None, 'cell1_id': 0, '__linkscan': 1, 'null_pos': None}
+------------------------------
+[循环 1/1, 行 17] 执行: write 64 cell1 2
+  变量状态: {'@counter': 11, '__building': 'cell1', '__linker_ret': 11, '__buildingtype': '@@special@@memory-cell', 'null_block': None, 'cell1_id': 0, '__linkscan': 1, 'null_pos': None}
+------------------------------
+[循环 1/1, 行 18] 执行: write 0 cell1 3
+  变量状态: {'@counter': 11, '__building': 'cell1', '__linker_ret': 11, '__buildingtype': '@@special@@memory-cell', 'null_block': None, 'cell1_id': 0, '__linkscan': 1, 'null_pos': None}
+------------------------------
+[循环 1/1, 行 19] 执行: op add ___stackframe_forward @counter 1
+  变量状态: {'__building': 'cell1', 'null_block': None, 'cell1_id': 0, 'null_pos': None, '___stackframe_forward': 21, '@counter': 11, '__linker_ret': 11, '__buildingtype': '@@special@@memory-cell', '__linkscan': 1}
+------------------------------
+[循环 1/1, 行 20] 执行: jump 37 always x 0
+  变量状态: {'__building': 'cell1', 'null_block': None, 'cell1_id': 0, 'null_pos': None, '___stackframe_forward': 21, '@counter': 11, '__linker_ret': 11, '__buildingtype': '@@special@@memory-cell', '__linkscan': 1}
+------------------------------
+[循环 1/1, 行 37] 执行: op add ___stackframe_backward @counter 1
+  变量状态: {'___stackframe_backward': 39, '__building': 'cell1', 'null_block': None, 'cell1_id': 0, 'null_pos': None, '___stackframe_forward': 21, '@counter': 11, '__linker_ret': 11, '__buildingtype': '@@special@@memory-cell', '__linkscan': 1}
+------------------------------
+[循环 1/1, 行 38] 执行: jump 54 always x 0
+  变量状态: {'___stackframe_backward': 39, '__building': 'cell1', 'null_block': None, 'cell1_id': 0, 'null_pos': None, '___stackframe_forward': 21, '@counter': 11, '__linker_ret': 11, '__buildingtype': '@@special@@memory-cell', '__linkscan': 1}
+------------------------------
+[循环 1/1, 行 54] 执行: op add ___pointerForward @counter 1
+  变量状态: {'___stackframe_backward': 39, '__building': 'cell1', 'null_block': None, 'cell1_id': 0, '___pointerForward': 56, 'null_pos': None, '___stackframe_forward': 21, '@counter': 11, '__linker_ret': 11, '__buildingtype': '@@special@@memory-cell', '__linkscan': 1}
+------------------------------
+[循环 1/1, 行 55] 执行: jump 72 always x 0
+  变量状态: {'___stackframe_backward': 39, '__building': 'cell1', 'null_block': None, 'cell1_id': 0, '___pointerForward': 56, 'null_pos': None, '___stackframe_forward': 21, '@counter': 11, '__linker_ret': 11, '__buildingtype': '@@special@@memory-cell', '__linkscan': 1}
+------------------------------
+[循环 1/1, 行 72] 执行: op add ___pointerBackward @counter 1
+  变量状态: {'___stackframe_backward': 39, 'null_block': None, '___pointerBackward': 74, 'cell1_id': 0, '___pointerForward': 56, 'null_pos': None, '___stackframe_forward': 21, '@counter': 11, '__linker_ret': 11, '__buildingtype': '@@special@@memory-cell', '__linkscan': 1}
+------------------------------
+[循环 1/1, 行 73] 执行: jump 89 always x 0
+  变量状态: {'___stackframe_backward': 39, 'null_block': None, '___pointerBackward': 74, 'cell1_id': 0, '___pointerForward': 56, 'null_pos': None, '___stackframe_forward': 21, '@counter': 11, '__linker_ret': 11, '__buildingtype': '@@special@@memory-cell', '__linkscan': 1}
+------------------------------
+[循环 1/1, 行 89] 执行: op add ___memcpy @counter 1
+  变量状态: {'___stackframe_backward': 39, 'null_block': None, '___pointerBackward': 74, 'cell1_id': 0, '___pointerForward': 56, 'null_pos': None, '___stackframe_forward': 21, '___memcpy': 91, '@counter': 11, '__linker_ret': 11, '__linkscan': 1}
+------------------------------
+[循环 1/1, 行 90] 执行: jump 113 always x 0
+  变量状态: {'___stackframe_backward': 39, 'null_block': None, '___pointerBackward': 74, 'cell1_id': 0, '___pointerForward': 56, 'null_pos': None, '___stackframe_forward': 21, '___memcpy': 91, '@counter': 11, '__linker_ret': 11, '__linkscan': 1}
+------------------------------
+[循环 1/1, 行 113] 执行: op add _proc @counter 1
+  变量状态: {'___stackframe_backward': 39, '___pointerBackward': 74, 'null_block': None, '___pointerForward': 56, 'cell1_id': 0, 'null_pos': None, '___stackframe_forward': 21, '___memcpy': 91, '_proc': 115, '__linkscan': 1}
+------------------------------
+[循环 1/1, 行 114] 执行: jump 159 always x 0
+  变量状态: {'___stackframe_backward': 39, '___pointerBackward': 74, 'null_block': None, '___pointerForward': 56, 'cell1_id': 0, 'null_pos': None, '___stackframe_forward': 21, '___memcpy': 91, '_proc': 115, '__linkscan': 1}
+------------------------------
+[循环 1/1, 行 159] 执行: op add _main @counter 1
+  变量状态: {'___stackframe_backward': 39, '_main': 161, '___pointerBackward': 74, 'null_block': None, '___pointerForward': 56, 'null_pos': None, '___stackframe_forward': 21, '___memcpy': 91, '_proc': 115, '__linkscan': 1}
+------------------------------
+[循环 1/1, 行 160] 执行: jump 174 always x 0
+  变量状态: {'___stackframe_backward': 39, '_main': 161, '___pointerBackward': 74, 'null_block': None, '___pointerForward': 56, 'null_pos': None, '___stackframe_forward': 21, '___memcpy': 91, '_proc': 115, '__linkscan': 1}
+------------------------------
+[循环 1/1, 行 174] 执行: set __stackframe_block cell1_id
+  变量状态: {'___stackframe_backward': 39, '_main': 161, '___pointerBackward': 74, 'null_block': None, '___pointerForward': 56, 'cell1_id': 0, 'null_pos': None, '___stackframe_forward': 21, '___memcpy': 91, '_proc': 115, '__stackframe_block': 0}
+------------------------------
+[循环 1/1, 行 175] 执行: set __stackframe_pos 6
+  变量状态: {'___stackframe_backward': 39, '_main': 161, '___pointerBackward': 74, '___pointerForward': 56, 'cell1_id': 0, 'null_pos': None, '___stackframe_forward': 21, '___memcpy': 91, '_proc': 115, '__stackframe_pos': 6, '__stackframe_block': 0}
+------------------------------
+[循环 1/1, 行 176] 执行: set __from_main true
+  变量状态: {'___stackframe_backward': 39, '_main': 161, '__from_main': True, '___pointerBackward': 74, '___pointerForward': 56, 'cell1_id': 0, '___stackframe_forward': 21, '___memcpy': 91, '_proc': 115, '__stackframe_pos': 6, '__stackframe_block': 0}
+------------------------------
+[循环 1/1, 行 177] 执行: set __internal_stackpos __stackpos
+  变量状态: {'___stackframe_backward': 39, '_main': 161, '__from_main': True, '__internal_stackpos': '__stackpos', '___pointerBackward': 74, 'cell1_id': 0, '___pointerForward': 56, '___memcpy': 91, '_proc': 115, '__stackframe_pos': 6, '__stackframe_block': 0}
+------------------------------
+[循环 1/1, 行 178] 执行: op add __stackpos @counter 1
+  变量状态: {'_main': 161, '__from_main': True, '__internal_stackpos': '__stackpos', '___pointerBackward': 74, 'cell1_id': 0, '___pointerForward': 56, '__stackpos': 180, '___memcpy': 91, '_proc': 115, '__stackframe_pos': 6, '__stackframe_block': 0}
+------------------------------
+[循环 1/1, 行 179] 执行: set @counter _main
+  变量状态: {'_main': 161, '__internal_stackpos': '__stackpos', '___pointerBackward': 74, 'cell1_id': 0, '__stackpos': 180, '___memcpy': 91, '_proc': 115, '@counter': 161, '__stackframe_block': 0, '__stackframe_pos': 6, '__from_main': True}
+------------------------------
+[循环 1/1, 行 161] 执行: set g:.f:main.__preserved_stackpos __stackpos
+  变量状态: {'_main': 161, 'g:.f:main.__preserved_stackpos': 180, '__internal_stackpos': '__stackpos', 'cell1_id': 0, '__stackpos': 180, '___memcpy': 91, '_proc': 115, '@counter': 161, '__stackframe_block': 0, '__stackframe_pos': 6, '__from_main': True}
+------------------------------
+[循环 1/1, 行 162] 执行: set g:.f:main.b:4.__tempsym_0_block cell1_id
+  变量状态: {'g:.f:main.b:4.__tempsym_0_block': 0, '_main': 161, 'g:.f:main.__preserved_stackpos': 180, '__internal_stackpos': '__stackpos', 'cell1_id': 0, '__stackpos': 180, '_proc': 115, '@counter': 161, '__stackframe_block': 0, '__stackframe_pos': 6, '__from_main': True}
+------------------------------
+[循环 1/1, 行 163] 执行: set g:.f:main.b:4.__tempsym_0_pos 4
+  变量状态: {'g:.f:main.b:4.__tempsym_0_block': 0, '_main': 161, 'g:.f:main.__preserved_stackpos': 180, '__internal_stackpos': '__stackpos', 'cell1_id': 0, '__stackpos': 180, '@counter': 161, '__stackframe_block': 0, '__stackframe_pos': 6, 'g:.f:main.b:4.__tempsym_0_pos': 4, '__from_main': True}
+------------------------------
+[循环 1/1, 行 164] 执行: write 3 cell1 4
+  变量状态: {'g:.f:main.b:4.__tempsym_0_block': 0, '_main': 161, 'g:.f:main.__preserved_stackpos': 180, '__internal_stackpos': '__stackpos', 'cell1_id': 0, '__stackpos': 180, '@counter': 161, '__stackframe_block': 0, '__stackframe_pos': 6, 'g:.f:main.b:4.__tempsym_0_pos': 4, '__from_main': True}
+------------------------------
+[循环 1/1, 行 165] 执行: write 5 cell1 5
+  变量状态: {'g:.f:main.b:4.__tempsym_0_block': 0, '_main': 161, 'g:.f:main.__preserved_stackpos': 180, '__internal_stackpos': '__stackpos', 'cell1_id': 0, '__stackpos': 180, '@counter': 161, '__stackframe_block': 0, '__stackframe_pos': 6, 'g:.f:main.b:4.__tempsym_0_pos': 4, '__from_main': True}
+------------------------------
+[循环 1/1, 行 166] 执行: set __param_0_block g:.f:main.b:4.__tempsym_0_block
+  变量状态: {'g:.f:main.b:4.__tempsym_0_block': 0, '_main': 161, 'g:.f:main.__preserved_stackpos': 180, '__from_main': True, '__internal_stackpos': '__stackpos', '__param_0_block': 0, 'cell1_id': 0, '__stackpos': 180, '@counter': 161, '__stackframe_pos': 6, 'g:.f:main.b:4.__tempsym_0_pos': 4, '__stackframe_block': 0}
+------------------------------
+[循环 1/1, 行 167] 执行: set __param_0_pos g:.f:main.b:4.__tempsym_0_pos
+  变量状态: {'g:.f:main.b:4.__tempsym_0_block': 0, '_main': 161, 'g:.f:main.__preserved_stackpos': 180, '__internal_stackpos': '__stackpos', '__param_0_block': 0, 'cell1_id': 0, '__stackpos': 180, '@counter': 161, '__stackframe_pos': 6, 'g:.f:main.b:4.__tempsym_0_pos': 4, '__param_0_pos': 4, '__from_main': True}
+------------------------------
+[循环 1/1, 行 168] 执行: set __from_main true
+  变量状态: {'g:.f:main.b:4.__tempsym_0_block': 0, '_main': 161, 'g:.f:main.__preserved_stackpos': 180, '__internal_stackpos': '__stackpos', '__param_0_block': 0, 'cell1_id': 0, '__stackpos': 180, '@counter': 161, 'g:.f:main.b:4.__tempsym_0_pos': 4, '__param_0_pos': 4, '__from_main': True}
+------------------------------
+[循环 1/1, 行 169] 执行: set __internal_stackpos __stackpos
+  变量状态: {'g:.f:main.b:4.__tempsym_0_block': 0, '_main': 161, 'g:.f:main.__preserved_stackpos': 180, '__internal_stackpos': 180, '__param_0_block': 0, 'cell1_id': 0, '__stackpos': 180, '@counter': 161, 'g:.f:main.b:4.__tempsym_0_pos': 4, '__param_0_pos': 4, '__from_main': True}
+------------------------------
+[循环 1/1, 行 170] 执行: op add __stackpos @counter 1
+  变量状态: {'g:.f:main.b:4.__tempsym_0_block': 0, '_main': 161, 'g:.f:main.__preserved_stackpos': 180, '__param_0_block': 0, '__internal_stackpos': 180, 'cell1_id': 0, '__stackpos': 172, '@counter': 161, 'g:.f:main.b:4.__tempsym_0_pos': 4, '__param_0_pos': 4, '__from_main': True}
+------------------------------
+[循环 1/1, 行 171] 执行: set @counter _proc
+  变量状态: {'g:.f:main.b:4.__tempsym_0_block': 0, '_main': 161, 'g:.f:main.__preserved_stackpos': 180, '__param_0_block': 0, '__internal_stackpos': 180, 'cell1_id': 0, '__stackpos': 172, '_proc': 115, '@counter': 115, 'g:.f:main.b:4.__tempsym_0_pos': 4, '__param_0_pos': 4, '__from_main': True}
+------------------------------
+[循环 1/1, 行 115] 执行: set g:.f:proc.__preserved_stackpos __stackpos
+  变量状态: {'g:.f:main.b:4.__tempsym_0_block': 0, 'g:.f:main.__preserved_stackpos': 180, '__param_0_block': 0, '__internal_stackpos': 180, 'cell1_id': 0, '__stackpos': 172, 'g:.f:proc.__preserved_stackpos': 172, '_proc': 115, '@counter': 115, 'g:.f:main.b:4.__tempsym_0_pos': 4, '__param_0_pos': 4, '__from_main': True}
+------------------------------
+[循环 1/1, 行 116] 执行: set g:.f:proc.w.__pointer_block __stackframe_block
+  变量状态: {'g:.f:main.b:4.__tempsym_0_block': 0, 'g:.f:proc.w.__pointer_block': 0, '__internal_stackpos': 180, '__param_0_block': 0, 'cell1_id': 0, '__stackpos': 172, 'g:.f:proc.__preserved_stackpos': 172, '_proc': 115, '@counter': 115, '__stackframe_block': 0, 'g:.f:main.b:4.__tempsym_0_pos': 4, '__param_0_pos': 4, '__from_main': True}
+------------------------------
+[循环 1/1, 行 117] 执行: set g:.f:proc.w.__pointer_pos __stackframe_pos
+  变量状态: {'g:.f:main.b:4.__tempsym_0_block': 0, 'g:.f:proc.w.__pointer_block': 0, '__internal_stackpos': 180, '__param_0_block': 0, 'g:.f:proc.w.__pointer_pos': 6, '__stackpos': 172, 'g:.f:proc.__preserved_stackpos': 172, '_proc': 115, '@counter': 115, '__stackframe_pos': 6, '__stackframe_block': 0, 'g:.f:main.b:4.__tempsym_0_pos': 4, '__param_0_pos': 4, '__from_main': True}
+------------------------------
+[循环 1/1, 行 118] 执行: set __step 2
+  变量状态: {'g:.f:main.b:4.__tempsym_0_block': 0, 'g:.f:proc.w.__pointer_block': 0, '__internal_stackpos': 180, '__param_0_block': 0, '__step': 2, 'g:.f:proc.w.__pointer_pos': 6, '__stackpos': 172, 'g:.f:proc.__preserved_stackpos': 172, '_proc': 115, '@counter': 115, '__stackframe_pos': 6, '__stackframe_block': 0, 'g:.f:main.b:4.__tempsym_0_pos': 4, '__param_0_pos': 4, '__from_main': True}
+------------------------------
+[循环 1/1, 行 119] 执行: set __from_main false
+  变量状态: {'g:.f:proc.w.__pointer_block': 0, '__internal_stackpos': 180, '__step': 2, 'g:.f:proc.w.__pointer_pos': 6, '__stackpos': 172, 'g:.f:proc.__preserved_stackpos': 172, '_proc': 115, '@counter': 115, '__stackframe_pos': 6, '__stackframe_block': 0, 'g:.f:main.b:4.__tempsym_0_pos': 4, '__param_0_pos': 4, '__from_main': False}
+------------------------------
+[循环 1/1, 行 120] 执行: set __internal_stackpos __stackpos
+  变量状态: {'g:.f:proc.w.__pointer_block': 0, '__from_main': False, '__internal_stackpos': 172, '__step': 2, 'g:.f:proc.w.__pointer_pos': 6, '__stackpos': 172, 'g:.f:proc.__preserved_stackpos': 172, '_proc': 115, '@counter': 115, '__stackframe_pos': 6, '__stackframe_block': 0}
+------------------------------
+[循环 1/1, 行 121] 执行: op add __stackpos @counter 1
+  变量状态: {'g:.f:proc.w.__pointer_block': 0, '__from_main': False, '__internal_stackpos': 172, '__step': 2, 'g:.f:proc.w.__pointer_pos': 6, '__stackpos': 123, 'g:.f:proc.__preserved_stackpos': 172, '_proc': 115, '@counter': 115, '__stackframe_pos': 6, '__stackframe_block': 0}
+------------------------------
+[循环 1/1, 行 122] 执行: set @counter ___stackframe_forward
+  变量状态: {'g:.f:proc.w.__pointer_block': 0, '__from_main': False, '__step': 2, '__internal_stackpos': 172, 'g:.f:proc.w.__pointer_pos': 6, '__stackpos': 123, 'g:.f:proc.__preserved_stackpos': 172, '_proc': 115, '___stackframe_forward': 21, '@counter': 21, '__stackframe_pos': 6, '__stackframe_block': 0}
+------------------------------
+[循环 1/1, 行 21] 执行: jump 23 greaterThanEq __mxstep 0
+  变量状态: {'g:.f:proc.w.__pointer_block': 0, '__from_main': False, '__step': 2, '__internal_stackpos': 172, 'g:.f:proc.w.__pointer_pos': 6, '__stackpos': 123, 'g:.f:proc.__preserved_stackpos': 172, '_proc': 115, '___stackframe_forward': 21, '@counter': 21, '__stackframe_pos': 6, '__stackframe_block': 0}
+------------------------------
+[循环 1/1, 行 23] 执行: getlink __curptrblock __stackframe_block
+  变量状态: {'g:.f:proc.w.__pointer_block': 0, '__from_main': False, '__step': 2, '__internal_stackpos': 172, '__curptrblock': 'cell1', 'g:.f:proc.w.__pointer_pos': 6, '__stackpos': 123, 'g:.f:proc.__preserved_stackpos': 172, '_proc': 115, '___stackframe_forward': 21, '@counter': 21, '__stackframe_pos': 6, '__stackframe_block': 0}
+------------------------------
+[循环 1/1, 行 24] 执行: jump 36 lessThanEq __step 0
+  变量状态: {'g:.f:proc.w.__pointer_block': 0, '__curptrblock': 'cell1', '__step': 2, '__internal_stackpos': 172, 'g:.f:proc.w.__pointer_pos': 6, '__stackpos': 123, 'g:.f:proc.__preserved_stackpos': 172, '___stackframe_forward': 21, '@counter': 21, '__stackframe_block': 0, '__stackframe_pos': 6, '__from_main': False}
+------------------------------
+[循环 1/1, 行 25] 执行: read __block __curptrblock 2
+  变量状态: {'__block': 64, 'g:.f:proc.w.__pointer_block': 0, '__curptrblock': 'cell1', '__step': 2, '__internal_stackpos': 172, 'g:.f:proc.w.__pointer_pos': 6, '__stackpos': 123, '___stackframe_forward': 21, '@counter': 21, '__stackframe_block': 0, '__stackframe_pos': 6, '__from_main': False}
+------------------------------
+[循环 1/1, 行 26] 执行: op sub __mxstep __block __stackframe_pos
+  变量状态: {'__block': 64, '__curptrblock': 'cell1', '__step': 2, '__internal_stackpos': 172, 'g:.f:proc.w.__pointer_pos': 6, '__stackpos': 123, '___stackframe_forward': 21, '@counter': 21, '__stackframe_block': 0, '__stackframe_pos': 6, '__mxstep': 58, '__from_main': False}
+------------------------------
+[循环 1/1, 行 27] 执行: jump 31 greaterThanEq __step __mxstep
+  变量状态: {'__block': 64, '__curptrblock': 'cell1', '__from_main': False, '__step': 2, '__internal_stackpos': 172, '__stackpos': 123, '___stackframe_forward': 21, '@counter': 21, '__stackframe_pos': 6, '__mxstep': 58, '__stackframe_block': 0}
+------------------------------
+[循环 1/1, 行 28] 执行: op add __stackframe_pos __stackframe_pos __step
+  变量状态: {'__block': 64, '__curptrblock': 'cell1', '__from_main': False, '__step': 2, '__internal_stackpos': 172, '__stackpos': 123, '___stackframe_forward': 21, '@counter': 21, '__stackframe_pos': 8, '__mxstep': 58, '__stackframe_block': 0}
+------------------------------
+[循环 1/1, 行 29] 执行: set __step 0
+  变量状态: {'__block': 64, '__curptrblock': 'cell1', '__step': 0, '__internal_stackpos': 172, '__stackpos': 123, '___stackframe_forward': 21, '@counter': 21, '__stackframe_pos': 8, '__mxstep': 58, '__stackframe_block': 0}
+------------------------------
+[循环 1/1, 行 30] 执行: jump 36 always x 0
+  变量状态: {'__block': 64, '__curptrblock': 'cell1', '__step': 0, '__internal_stackpos': 172, '__stackpos': 123, '___stackframe_forward': 21, '@counter': 21, '__stackframe_pos': 8, '__mxstep': 58, '__stackframe_block': 0}
+------------------------------
+[循环 1/1, 行 36] 执行: set @counter __stackpos
+  变量状态: {'__block': 64, '__curptrblock': 'cell1', '__step': 0, '__stackpos': 123, '___stackframe_forward': 21, '@counter': 123, '__stackframe_pos': 8, '__mxstep': 58, '__stackframe_block': 0}
+------------------------------
+[循环 1/1, 行 123] 执行: set __stackpos __internal_stackpos
+  变量状态: {'__block': 64, '__curptrblock': 'cell1', '__step': 0, '__internal_stackpos': 172, '__stackpos': 172, '___stackframe_forward': 21, '@counter': 123, '__stackframe_pos': 8, '__mxstep': 58, '__stackframe_block': 0}
+------------------------------
+[循环 1/1, 行 124] 执行: set __srcblock __param_0_block
+  变量状态: {'__block': 64, '__curptrblock': 'cell1', '__step': 0, '__internal_stackpos': 172, '__param_0_block': 0, '__stackpos': 172, '__srcblock': 0, '@counter': 123, '__stackframe_pos': 8, '__mxstep': 58, '__stackframe_block': 0}
+------------------------------
+[循环 1/1, 行 125] 执行: set __srcpos __param_0_pos
+  变量状态: {'__block': 64, '__srcpos': 4, '__curptrblock': 'cell1', '__step': 0, '__internal_stackpos': 172, '__param_0_block': 0, '__stackpos': 172, '__srcblock': 0, '@counter': 123, '__stackframe_pos': 8, '__mxstep': 58, '__param_0_pos': 4}
+------------------------------
+[循环 1/1, 行 126] 执行: set __tgtblock g:.f:proc.w.__pointer_block
+  变量状态: {'__block': 64, '__srcpos': 4, '__curptrblock': 'cell1', 'g:.f:proc.w.__pointer_block': 0, '__step': 0, '__internal_stackpos': 172, '__param_0_block': 0, '__tgtblock': 0, '__stackpos': 172, '__srcblock': 0, '@counter': 123, '__stackframe_pos': 8, '__mxstep': 58, '__param_0_pos': 4}
+------------------------------
+[循环 1/1, 行 127] 执行: set __tgtpos g:.f:proc.w.__pointer_pos
+  变量状态: {'__block': 64, '__srcpos': 4, 'g:.f:proc.w.__pointer_block': 0, '__step': 0, '__internal_stackpos': 172, '__param_0_block': 0, '__tgtblock': 0, 'g:.f:proc.w.__pointer_pos': 6, '__tgtpos': 6, '__stackpos': 172, '__srcblock': 0, '@counter': 123, '__stackframe_pos': 8, '__mxstep': 58, '__param_0_pos': 4}
+------------------------------
+[循环 1/1, 行 128] 执行: set __remain 2
+  变量状态: {'__srcpos': 4, 'g:.f:proc.w.__pointer_block': 0, '__param_0_block': 0, '__step': 0, '__internal_stackpos': 172, '__tgtblock': 0, 'g:.f:proc.w.__pointer_pos': 6, '__tgtpos': 6, '__stackpos': 172, '__srcblock': 0, '@counter': 123, '__remain': 2, '__stackframe_pos': 8, '__mxstep': 58, '__param_0_pos': 4}
+------------------------------
+[循环 1/1, 行 129] 执行: set __from_main false
+  变量状态: {'__srcpos': 4, 'g:.f:proc.w.__pointer_block': 0, '__param_0_block': 0, '__step': 0, '__internal_stackpos': 172, '__tgtblock': 0, 'g:.f:proc.w.__pointer_pos': 6, '__stackpos': 172, '__srcblock': 0, '@counter': 123, '__remain': 2, '__stackframe_pos': 8, '__tgtpos': 6, '__param_0_pos': 4, '__from_main': False}
+------------------------------
+[循环 1/1, 行 130] 执行: set __internal_stackpos __stackpos
+  变量状态: {'__srcpos': 4, 'g:.f:proc.w.__pointer_block': 0, '__step': 0, '__param_0_block': 0, '__internal_stackpos': 172, '__tgtblock': 0, 'g:.f:proc.w.__pointer_pos': 6, '__stackpos': 172, '__srcblock': 0, '@counter': 123, '__remain': 2, '__tgtpos': 6, '__param_0_pos': 4, '__from_main': False}
+------------------------------
+[循环 1/1, 行 131] 执行: op add __stackpos @counter 1
+  变量状态: {'__srcpos': 4, 'g:.f:proc.w.__pointer_block': 0, '__internal_stackpos': 172, '__param_0_block': 0, '__tgtblock': 0, 'g:.f:proc.w.__pointer_pos': 6, '__stackpos': 133, '__srcblock': 0, '@counter': 123, '__remain': 2, '__tgtpos': 6, '__param_0_pos': 4, '__from_main': False}
+------------------------------
+[循环 1/1, 行 132] 执行: set @counter ___memcpy
+  变量状态: {'__srcpos': 4, 'g:.f:proc.w.__pointer_block': 0, '__internal_stackpos': 172, '__tgtblock': 0, '__param_0_block': 0, 'g:.f:proc.w.__pointer_pos': 6, '__stackpos': 133, '___memcpy': 91, '__srcblock': 0, '__remain': 2, '@counter': 91, '__tgtpos': 6, '__param_0_pos': 4, '__from_main': False}
+------------------------------
+[循环 1/1, 行 91] 执行: getlink __srcblock __srcblock
+  变量状态: {'__srcpos': 4, 'g:.f:proc.w.__pointer_block': 0, '__param_0_block': 0, '__tgtblock': 0, '__internal_stackpos': 172, 'g:.f:proc.w.__pointer_pos': 6, '__stackpos': 133, '___memcpy': 91, '__srcblock': 'cell1', '__remain': 2, '@counter': 91, '__tgtpos': 6, '__param_0_pos': 4, '__from_main': False}
+------------------------------
+[循环 1/1, 行 92] 执行: getlink __tgtblock __tgtblock
+  变量状态: {'__srcpos': 4, 'g:.f:proc.w.__pointer_block': 0, '__internal_stackpos': 172, '__tgtblock': 'cell1', 'g:.f:proc.w.__pointer_pos': 6, '__stackpos': 133, '___memcpy': 91, '__remain': 2, '@counter': 91, '__srcblock': 'cell1', '__tgtpos': 6, '__param_0_pos': 4, '__from_main': False}
+------------------------------
+[循环 1/1, 行 93] 执行: jump 112 lessThanEq __remain 0
+  变量状态: {'g:.f:proc.w.__pointer_block': 0, '__internal_stackpos': 172, '__tgtblock': 'cell1', 'g:.f:proc.w.__pointer_pos': 6, '__stackpos': 133, '___memcpy': 91, '__remain': 2, '@counter': 91, '__srcblock': 'cell1', '__tgtpos': 6, '__from_main': False}
+------------------------------
+[循环 1/1, 行 94] 执行: read __tmp __srcblock __srcpos
+  变量状态: {'__srcpos': 4, '__internal_stackpos': 172, '__tgtblock': 'cell1', 'g:.f:proc.w.__pointer_pos': 6, '__stackpos': 133, '___memcpy': 91, '__remain': 2, '@counter': 91, '__srcblock': 'cell1', '__tmp': 3, '__tgtpos': 6, '__from_main': False}
+------------------------------
+[循环 1/1, 行 95] 执行: write __tmp __tgtblock __tgtpos
+  变量状态: {'__srcpos': 4, '__internal_stackpos': 172, '__tgtblock': 'cell1', '__stackpos': 133, '___memcpy': 91, '__remain': 2, '@counter': 91, '__srcblock': 'cell1', '__tmp': 3, '__tgtpos': 6, '__from_main': False}
+------------------------------
+[循环 1/1, 行 96] 执行: read __srcmax __srcblock 2
+  变量状态: {'__srcpos': 4, '__internal_stackpos': 172, '__tgtblock': 'cell1', '__srcmax': 64, '__stackpos': 133, '___memcpy': 91, '__srcblock': 'cell1', '@counter': 91, '__remain': 2, '__tmp': 3, '__tgtpos': 6, '__from_main': False}
+------------------------------
+[循环 1/1, 行 97] 执行: op sub __srcmax __srcmax 1
+  变量状态: {'__srcpos': 4, '__internal_stackpos': 172, '__tgtblock': 'cell1', '__srcmax': 63, '__stackpos': 133, '___memcpy': 91, '__srcblock': 'cell1', '@counter': 91, '__remain': 2, '__tmp': 3, '__tgtpos': 6}
+------------------------------
+[循环 1/1, 行 98] 执行: op add __srcpos __srcpos 1
+  变量状态: {'__srcpos': 5, '__tgtblock': 'cell1', '__srcmax': 63, '__stackpos': 133, '___memcpy': 91, '__srcblock': 'cell1', '@counter': 91, '__remain': 2, '__tmp': 3, '__tgtpos': 6}
+------------------------------
+[循环 1/1, 行 99] 执行: op add __tgtpos __tgtpos 1
+  变量状态: {'__srcpos': 5, '__tgtblock': 'cell1', '__srcmax': 63, '___memcpy': 91, '__srcblock': 'cell1', '@counter': 91, '__remain': 2, '__tmp': 3, '__tgtpos': 7}
+------------------------------
+[循环 1/1, 行 100] 执行: jump 104 lessThan __srcpos __srcmax
+  变量状态: {'__srcpos': 5, '__tgtblock': 'cell1', '__srcmax': 63, '__remain': 2, '__srcblock': 'cell1', '__tmp': 3, '__tgtpos': 7}
+------------------------------
+[循环 1/1, 行 104] 执行: read __tgtmax __tgtblock 2
+  变量状态: {'__srcpos': 5, '__tgtblock': 'cell1', '__tgtmax': 64, '__srcmax': 63, '__remain': 2, '__srcblock': 'cell1', '__tmp': 3, '__tgtpos': 7}
+------------------------------
+[循环 1/1, 行 105] 执行: op sub __tgtmax __tgtmax 1
+  变量状态: {'__srcpos': 5, '__tgtblock': 'cell1', '__tgtmax': 63, '__srcmax': 63, '__srcblock': 'cell1', '__remain': 2, '__tmp': 3, '__tgtpos': 7}
+------------------------------
+[循环 1/1, 行 106] 执行: jump 110 lessThan __tgtpos __tgtmax
+  变量状态: {'__srcpos': 5, '__tgtblock': 'cell1', '__tgtmax': 63, '__srcmax': 63, '__srcblock': 'cell1', '__tmp': 3, '__tgtpos': 7}
+------------------------------
+[循环 1/1, 行 110] 执行: op sub __remain __remain 1
+  变量状态: {'__srcpos': 5, '__tgtblock': 'cell1', '__tgtmax': 63, '__srcmax': 63, '__srcblock': 'cell1', '__remain': 1, '__tmp': 3, '__tgtpos': 7}
+------------------------------
+[循环 1/1, 行 111] 执行: jump 91 always x 0
+  变量状态: {'__srcpos': 5, '__tgtblock': 'cell1', '__tgtmax': 63, '__srcmax': 63, '__srcblock': 'cell1', '__remain': 1, '__tmp': 3, '__tgtpos': 7}
+------------------------------
+[循环 1/1, 行 91] 执行: getlink __srcblock __srcblock
+  变量状态: {'__srcpos': 5, '__srcblock': 'cell1', '__srcmax': 63, '__remain': 1, '__tgtblock': 'cell1', '__tgtmax': 63, '__tgtpos': 7}
+------------------------------
+[循环 1/1, 行 92] 执行: getlink __tgtblock __tgtblock
+  变量状态: {'__srcpos': 5, '__srcmax': 63, '__remain': 1, '__srcblock': 'cell1', '__tgtblock': 'cell1', '__tgtmax': 63, '__tgtpos': 7}
+------------------------------
+[循环 1/1, 行 93] 执行: jump 112 lessThanEq __remain 0
+  变量状态: {'__srcpos': 5, '__srcmax': 63, '__remain': 1, '__srcblock': 'cell1', '__tgtblock': 'cell1', '__tgtmax': 63, '__tgtpos': 7}
+------------------------------
+[循环 1/1, 行 94] 执行: read __tmp __srcblock __srcpos
+  变量状态: {'__srcpos': 5, '__tgtblock': 'cell1', '__tgtmax': 63, '__srcmax': 63, '__remain': 1, '__srcblock': 'cell1', '__tmp': 5, '__tgtpos': 7}
+------------------------------
+[循环 1/1, 行 95] 执行: write __tmp __tgtblock __tgtpos
+  变量状态: {'__srcpos': 5, '__tgtblock': 'cell1', '__tgtmax': 63, '__srcmax': 63, '__remain': 1, '__srcblock': 'cell1', '__tmp': 5, '__tgtpos': 7}
+------------------------------
+[循环 1/1, 行 96] 执行: read __srcmax __srcblock 2
+  变量状态: {'__srcpos': 5, '__tgtblock': 'cell1', '__tgtmax': 63, '__srcmax': 64, '__remain': 1, '__srcblock': 'cell1', '__tmp': 5, '__tgtpos': 7}
+------------------------------
+[循环 1/1, 行 97] 执行: op sub __srcmax __srcmax 1
+  变量状态: {'__srcpos': 5, '__tgtblock': 'cell1', '__tgtmax': 63, '__srcmax': 63, '__remain': 1, '__srcblock': 'cell1', '__tmp': 5, '__tgtpos': 7}
+------------------------------
+[循环 1/1, 行 98] 执行: op add __srcpos __srcpos 1
+  变量状态: {'__srcpos': 6, '__tgtblock': 'cell1', '__tgtmax': 63, '__srcmax': 63, '__remain': 1, '__srcblock': 'cell1', '__tmp': 5, '__tgtpos': 7}
+------------------------------
+[循环 1/1, 行 99] 执行: op add __tgtpos __tgtpos 1
+  变量状态: {'__srcblock': 'cell1', '__remain': 1, '__srcpos': 6, '__tmp': 5, '__srcmax': 63, '__tgtblock': 'cell1', '__tgtpos': 8}
+------------------------------
+[循环 1/1, 行 100] 执行: jump 104 lessThan __srcpos __srcmax
+  变量状态: {'__srcpos': 6, '__tgtblock': 'cell1', '__srcmax': 63, '__remain': 1, '__srcblock': 'cell1', '__tmp': 5, '__tgtpos': 8}
+------------------------------
+[循环 1/1, 行 104] 执行: read __tgtmax __tgtblock 2
+  变量状态: {'__srcpos': 6, '__tgtblock': 'cell1', '__tgtmax': 64, '__srcmax': 63, '__remain': 1, '__srcblock': 'cell1', '__tmp': 5, '__tgtpos': 8}
+------------------------------
+[循环 1/1, 行 105] 执行: op sub __tgtmax __tgtmax 1
+  变量状态: {'__srcpos': 6, '__tgtblock': 'cell1', '__tgtmax': 63, '__srcmax': 63, '__srcblock': 'cell1', '__remain': 1, '__tmp': 5, '__tgtpos': 8}
+------------------------------
+[循环 1/1, 行 106] 执行: jump 110 lessThan __tgtpos __tgtmax
+  变量状态: {'__srcpos': 6, '__tgtblock': 'cell1', '__tgtmax': 63, '__srcmax': 63, '__srcblock': 'cell1', '__tmp': 5, '__tgtpos': 8}
+------------------------------
+[循环 1/1, 行 110] 执行: op sub __remain __remain 1
+  变量状态: {'__srcpos': 6, '__tgtblock': 'cell1', '__tgtmax': 63, '__srcmax': 63, '__srcblock': 'cell1', '__remain': 0, '__tmp': 5, '__tgtpos': 8}
+------------------------------
+[循环 1/1, 行 111] 执行: jump 91 always x 0
+  变量状态: {'__srcpos': 6, '__tgtblock': 'cell1', '__tgtmax': 63, '__srcmax': 63, '__srcblock': 'cell1', '__remain': 0, '__tmp': 5, '__tgtpos': 8}
+------------------------------
+[循环 1/1, 行 91] 执行: getlink __srcblock __srcblock
+  变量状态: {'__srcpos': 6, '__srcblock': 'cell1', '__srcmax': 63, '__remain': 0, '__tgtblock': 'cell1', '__tgtmax': 63, '__tgtpos': 8}
+------------------------------
+[循环 1/1, 行 92] 执行: getlink __tgtblock __tgtblock
+  变量状态: {'__srcpos': 6, '__srcmax': 63, '__remain': 0, '__srcblock': 'cell1', '__tgtblock': 'cell1', '__tgtmax': 63, '__tgtpos': 8}
+------------------------------
+[循环 1/1, 行 93] 执行: jump 112 lessThanEq __remain 0
+  变量状态: {'__srcpos': 6, '__srcmax': 63, '__remain': 0, '__srcblock': 'cell1', '__tgtblock': 'cell1', '__tgtmax': 63, '__tgtpos': 8}
+------------------------------
+[循环 1/1, 行 112] 执行: set @counter __stackpos
+  变量状态: {'__srcpos': 6, '__tgtblock': 'cell1', '__tgtmax': 63, '__srcmax': 63, '__stackpos': 133, '__remain': 0, '__srcblock': 'cell1', '@counter': 133, '__tgtpos': 8}
+------------------------------
+[循环 1/1, 行 133] 执行: set __stackpos __internal_stackpos
+  变量状态: {'__srcpos': 6, '__internal_stackpos': 172, '__tgtblock': 'cell1', '__tgtmax': 63, '__srcmax': 63, '__stackpos': 172, '__remain': 0, '__srcblock': 'cell1', '@counter': 133, '__tgtpos': 8}
+------------------------------
+[循环 1/1, 行 134] 执行: set __register_0_block g:.f:proc.w_block
+  变量状态: {'__internal_stackpos': 172, '__tgtblock': 'cell1', '__tgtmax': 63, '__stackpos': 172, '__remain': 0, '__srcblock': 'cell1', '@counter': 133, '__tgtpos': 8, '__register_0_block': 'g:.f:proc.w_block'}
+------------------------------
+[循环 1/1, 行 135] 执行: set __register_0_pos g:.f:proc.w_pos
+  变量状态: {'__internal_stackpos': 172, '__tgtblock': 'cell1', '__tgtmax': 63, '__register_0_pos': 'g:.f:proc.w_pos', '__stackpos': 172, '__remain': 0, '__srcblock': 'cell1', '@counter': 133, '__tgtpos': 8, '__register_0_block': 'g:.f:proc.w_block'}
+------------------------------
+[循环 1/1, 行 136] 执行: set __ptrpos __register_0_pos
+  变量状态: {'__internal_stackpos': 172, '__tgtblock': 'cell1', '__tgtmax': 63, '__register_0_pos': 'g:.f:proc.w_pos', '__ptrpos': 'g:.f:proc.w_pos', '__stackpos': 172, '__remain': 0, '__srcblock': 'cell1', '@counter': 133, '__tgtpos': 8, '__register_0_block': 'g:.f:proc.w_block'}
+------------------------------
+[循环 1/1, 行 137] 执行: set __ptrblock __register_0_block
+  变量状态: {'__ptrblock': 'g:.f:proc.w_block', '__register_0_pos': 'g:.f:proc.w_pos', '__internal_stackpos': 172, '__tgtblock': 'cell1', '__ptrpos': 'g:.f:proc.w_pos', '__stackpos': 172, '__srcblock': 'cell1', '__remain': 0, '@counter': 133, '__register_0_block': 'g:.f:proc.w_block'}
+------------------------------
+[循环 1/1, 行 138] 执行: set __step 1
+  变量状态: {'__ptrblock': 'g:.f:proc.w_block', '__register_0_pos': 'g:.f:proc.w_pos', '__internal_stackpos': 172, '__tgtblock': 'cell1', '__step': 1, '__ptrpos': 'g:.f:proc.w_pos', '__stackpos': 172, '__remain': 0, '__srcblock': 'cell1', '@counter': 133, '__register_0_block': 'g:.f:proc.w_block'}
+------------------------------
+[循环 1/1, 行 139] 执行: set __from_main false
+  变量状态: {'__ptrblock': 'g:.f:proc.w_block', '__from_main': False, '__register_0_pos': 'g:.f:proc.w_pos', '__internal_stackpos': 172, '__tgtblock': 'cell1', '__step': 1, '__ptrpos': 'g:.f:proc.w_pos', '__stackpos': 172, '__remain': 0, '@counter': 133, '__register_0_block': 'g:.f:proc.w_block'}
+------------------------------
+[循环 1/1, 行 140] 执行: set __internal_stackpos __stackpos
+  变量状态: {'__ptrblock': 'g:.f:proc.w_block', '__from_main': False, '__register_0_pos': 'g:.f:proc.w_pos', '__internal_stackpos': 172, '__step': 1, '__ptrpos': 'g:.f:proc.w_pos', '__stackpos': 172, '__remain': 0, '@counter': 133, '__register_0_block': 'g:.f:proc.w_block'}
+------------------------------
+[循环 1/1, 行 141] 执行: op add __stackpos @counter 1
+  变量状态: {'__ptrblock': 'g:.f:proc.w_block', '__from_main': False, '__step': 1, '__register_0_pos': 'g:.f:proc.w_pos', '__internal_stackpos': 172, '__ptrpos': 'g:.f:proc.w_pos', '__stackpos': 143, '@counter': 133, '__register_0_block': 'g:.f:proc.w_block'}
+------------------------------
+[循环 1/1, 行 142] 执行: set @counter ___pointerForward
+  变量状态: {'__ptrblock': 'g:.f:proc.w_block', '__step': 1, '__register_0_pos': 'g:.f:proc.w_pos', '__internal_stackpos': 172, '___pointerForward': 56, '__ptrpos': 'g:.f:proc.w_pos', '__stackpos': 143, '@counter': 56, '__register_0_block': 'g:.f:proc.w_block', '__from_main': False}
+------------------------------
+[循环 1/1, 行 56] 执行: jump 58 greaterThanEq __mxstep 0
+  变量状态: {'__ptrblock': 'g:.f:proc.w_block', '__step': 1, '__register_0_pos': 'g:.f:proc.w_pos', '__internal_stackpos': 172, '___pointerForward': 56, '__ptrpos': 'g:.f:proc.w_pos', '__stackpos': 143, '@counter': 56, '__register_0_block': 'g:.f:proc.w_block', '__mxstep': 58, '__from_main': False}
+------------------------------
+[循环 1/1, 行 58] 执行: getlink __curptrblock __ptrblock
+  变量状态: {'__ptrblock': 'g:.f:proc.w_block', '__curptrblock': 'cell1', '__step': 1, '__register_0_pos': 'g:.f:proc.w_pos', '__internal_stackpos': 172, '___pointerForward': 56, '__ptrpos': 'g:.f:proc.w_pos', '__stackpos': 143, '@counter': 56, '__register_0_block': 'g:.f:proc.w_block', '__mxstep': 58, '__from_main': False}
+------------------------------
+[循环 1/1, 行 59] 执行: jump 71 lessThanEq __step 0
+  变量状态: {'__ptrblock': 'g:.f:proc.w_block', '__curptrblock': 'cell1', '__step': 1, '__register_0_pos': 'g:.f:proc.w_pos', '__internal_stackpos': 172, '___pointerForward': 56, '__ptrpos': 'g:.f:proc.w_pos', '__stackpos': 143, '@counter': 56, '__register_0_block': 'g:.f:proc.w_block', '__mxstep': 58, '__from_main': False}
+------------------------------
+[循环 1/1, 行 60] 执行: read __block __curptrblock 2
+  变量状态: {'__block': 64, '__ptrblock': 'g:.f:proc.w_block', '__curptrblock': 'cell1', '__from_main': False, '__step': 1, '__internal_stackpos': 172, '___pointerForward': 56, '__stackpos': 143, '@counter': 56, '__mxstep': 58, '__register_0_block': 'g:.f:proc.w_block'}
+------------------------------
+[循环 1/1, 行 61] 执行: op sub __mxstep __block __ptrpos
+  变量状态: {'__block': 64, '__ptrblock': 'g:.f:proc.w_block', '__curptrblock': 'cell1', '__step': 1, '__internal_stackpos': 172, '___pointerForward': 56, '__ptrpos': 'g:.f:proc.w_pos', '__stackpos': 143, '@counter': 56, '__mxstep': 0, '__from_main': False}
+------------------------------
+[循环 1/1, 行 62] 执行: jump 66 greaterThanEq __step __mxstep
+  变量状态: {'__block': 64, '__ptrblock': 'g:.f:proc.w_block', '__curptrblock': 'cell1', '__internal_stackpos': 172, '__step': 1, '___pointerForward': 56, '__ptrpos': 'g:.f:proc.w_pos', '__stackpos': 143, '@counter': 56, '__mxstep': 0, '__from_main': False}
+------------------------------
+[循环 1/1, 行 66] 执行: read __ptrblock __curptrblock 1
+  变量状态: {'__block': 64, '__ptrblock': -1, '__curptrblock': 'cell1', '__step': 1, '__internal_stackpos': 172, '___pointerForward': 56, '__ptrpos': 'g:.f:proc.w_pos', '__stackpos': 143, '@counter': 56, '__mxstep': 0}
+------------------------------
+[循环 1/1, 行 67] 执行: op sub __step __step __mxstep
+  变量状态: {'__block': 64, '__ptrblock': -1, '__curptrblock': 'cell1', '__step': 1, '___pointerForward': 56, '__ptrpos': 'g:.f:proc.w_pos', '__stackpos': 143, '@counter': 56, '__mxstep': 0}
+------------------------------
+[循环 1/1, 行 68] 执行: op add __step __step 1
+  变量状态: {'__block': 64, '__ptrblock': -1, '__curptrblock': 'cell1', '__step': 2, '___pointerForward': 56, '__ptrpos': 'g:.f:proc.w_pos', '@counter': 56, '__mxstep': 0}
+------------------------------
+[循环 1/1, 行 69] 执行: set __ptrpos 4
+  变量状态: {'__block': 64, '__ptrblock': -1, '__curptrblock': 'cell1', '__step': 2, '__mxstep': 0, '__ptrpos': 4}
+------------------------------
+[循环 1/1, 行 70] 执行: jump 56 always x 0
+  变量状态: {'__block': 64, '__ptrblock': -1, '__curptrblock': 'cell1', '__step': 2, '__mxstep': 0, '__ptrpos': 4}
+------------------------------
+[循环 1/1, 行 56] 执行: jump 58 greaterThanEq __mxstep 0
+  变量状态: {'__block': 64, '__ptrblock': -1, '__curptrblock': 'cell1', '__step': 2, '__mxstep': 0, '__ptrpos': 4}
+------------------------------
+[循环 1/1, 行 58] 执行: getlink __curptrblock __ptrblock
+  变量状态: {'__block': 64, '__ptrblock': -1, '__curptrblock': None, '__step': 2, '__mxstep': 0, '__ptrpos': 4}
+------------------------------
+[循环 1/1, 行 59] 执行: jump 71 lessThanEq __step 0
+  变量状态: {'__block': 64, '__ptrblock': -1, '__curptrblock': None, '__step': 2, '__mxstep': 0, '__ptrpos': 4}
+------------------------------
+[循环 1/1, 行 60] 执行: read __block __curptrblock 2
+执行错误 (行 60): 内存建筑 'None' 未初始化
+==================================================
+=== 执行完成 ===
+
+最终变量结果:
+@counter = 56
+___memcpy = 91
+___pointerBackward = 74
+___pointerForward = 56
+___stackframe_backward = 39
+___stackframe_forward = 21
+__block = 64
+__building = cell1
+__buildingtype = @@special@@memory-cell
+__curptrblock = None
+__from_main = False
+__internal_stackpos = 172
+__linker_ret = 11
+__linkscan = 1
+__mxstep = 0
+__param_0_block = 0
+__param_0_pos = 4
+__ptrblock = -1
+__ptrpos = 4
+__register_0_block = g:.f:proc.w_block
+__register_0_pos = g:.f:proc.w_pos
+__remain = 0
+__srcblock = cell1
+__srcmax = 63
+__srcpos = 6
+__stackframe_block = 0
+__stackframe_pos = 8
+__stackpos = 143
+__step = 2
+__tgtblock = cell1
+__tgtmax = 63
+__tgtpos = 8
+__tmp = 5
+_main = 161
+_proc = 115
+cell1_id = 0
+g:.f:main.__preserved_stackpos = 180
+g:.f:main.b:4.__tempsym_0_block = 0
+g:.f:main.b:4.__tempsym_0_pos = 4
+g:.f:proc.__preserved_stackpos = 172
+g:.f:proc.w.__pointer_block = 0
+g:.f:proc.w.__pointer_pos = 6
+null_block = None
+null_pos = None
+
+内存状态: {'cell1': [-1, -1, 64, 0, 3, 5, 3, 5, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None]}

@@ -1,0 +1,487 @@
+debug (Y/N)?strict mode (Y/N)?调试输出模式: 0=所有变量, 1=最近10条指令变量, 2=当前指令变量
+选择调试输出模式 (0/1/2): Input code:
+=== 初始化状态 ===
+变量: {}
+内存: {'cell1': [None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None], 'cell2': [None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None], 'cell3': [None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None], 'cell4': [None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None]}
+建筑顺序: ['cell1', 'cell2', 'cell3', 'cell4']
+代码行数: 144
+循环次数: 1
+严格模式: True
+调试状态：2
+==================================================
+[循环 1/1, 行 0] 执行: set __linkscan 0
+  变量状态: {'__linkscan': 0}
+------------------------------
+[循环 1/1, 行 1] 执行: jump 10 always x 0
+  变量状态: {}
+------------------------------
+[循环 1/1, 行 10] 执行: op add __linker_ret @counter 1
+  变量状态: {'__linker_ret': 12}
+------------------------------
+[循环 1/1, 行 11] 执行: jump 2 always x 0
+  变量状态: {}
+------------------------------
+[循环 1/1, 行 2] 执行: getlink __building __linkscan
+  变量状态: {'__linkscan': 0, '__building': 'cell1'}
+------------------------------
+[循环 1/1, 行 3] 执行: sensor __buildingtype __building @type
+  变量状态: {'__buildingtype': '@@special@@memory-cell', '__building': 'cell1'}
+------------------------------
+[循环 1/1, 行 4] 执行: jump 9 strictEqual __buildingtype @memory-cell
+  变量状态: {'__buildingtype': '@@special@@memory-cell'}
+------------------------------
+[循环 1/1, 行 9] 执行: set @counter __linker_ret
+  变量状态: {'__linker_ret': 12, '@counter': 12}
+------------------------------
+[循环 1/1, 行 12] 执行: set cell1_id __linkscan
+  变量状态: {'__linkscan': 0, 'cell1_id': 0}
+------------------------------
+[循环 1/1, 行 13] 执行: op add __linkscan __linkscan 1
+  变量状态: {'__linkscan': 1}
+------------------------------
+[循环 1/1, 行 14] 执行: set null_block null
+  变量状态: {'null_block': None}
+------------------------------
+[循环 1/1, 行 15] 执行: set null_pos null
+  变量状态: {'null_pos': None}
+------------------------------
+[循环 1/1, 行 16] 执行: write -1 cell1 0
+  变量状态: {}
+------------------------------
+[循环 1/1, 行 17] 执行: write -1 cell1 1
+  变量状态: {}
+------------------------------
+[循环 1/1, 行 18] 执行: write 64 cell1 2
+  变量状态: {}
+------------------------------
+[循环 1/1, 行 19] 执行: write 0 cell1 3
+  变量状态: {}
+------------------------------
+[循环 1/1, 行 20] 执行: op add ___stackframe_forward @counter 1
+  变量状态: {'___stackframe_forward': 22}
+------------------------------
+[循环 1/1, 行 21] 执行: jump 40 always x 0
+  变量状态: {}
+------------------------------
+[循环 1/1, 行 40] 执行: op add ___stackframe_backward @counter 1
+  变量状态: {'___stackframe_backward': 42}
+------------------------------
+[循环 1/1, 行 41] 执行: jump 59 always x 0
+  变量状态: {}
+------------------------------
+[循环 1/1, 行 59] 执行: op add ___pointerForward @counter 1
+  变量状态: {'___pointerForward': 61}
+------------------------------
+[循环 1/1, 行 60] 执行: jump 79 always x 0
+  变量状态: {}
+------------------------------
+[循环 1/1, 行 79] 执行: op add _main @counter 1
+  变量状态: {'_main': 81}
+------------------------------
+[循环 1/1, 行 80] 执行: jump 138 always x 0
+  变量状态: {}
+------------------------------
+[循环 1/1, 行 138] 执行: set __stackframe_block cell1_id
+  变量状态: {'__stackframe_block': 0, 'cell1_id': 0}
+------------------------------
+[循环 1/1, 行 139] 执行: set __stackframe_pos 4
+  变量状态: {'__stackframe_pos': 4}
+------------------------------
+[循环 1/1, 行 140] 执行: set __internal_stackpos __stackpos
+  变量状态: {'__internal_stackpos': '__stackpos'}
+------------------------------
+[循环 1/1, 行 141] 执行: op add __stackpos @counter 1
+  变量状态: {'__stackpos': 143}
+------------------------------
+[循环 1/1, 行 142] 执行: set @counter _main
+  变量状态: {'_main': 81, '@counter': 81}
+------------------------------
+[循环 1/1, 行 81] 执行: set g:.f:main.__preserved_stackpos __stackpos
+  变量状态: {'__stackpos': 143, 'g:.f:main.__preserved_stackpos': 143}
+------------------------------
+[循环 1/1, 行 82] 执行: set g:.f:main.b:1.a.__pointer_block __stackframe_block
+  变量状态: {'g:.f:main.b:1.a.__pointer_block': 0, '__stackframe_block': 0}
+------------------------------
+[循环 1/1, 行 83] 执行: set g:.f:main.b:1.a.__pointer_pos __stackframe_pos
+  变量状态: {'g:.f:main.b:1.a.__pointer_pos': 4, '__stackframe_pos': 4}
+------------------------------
+[循环 1/1, 行 84] 执行: set __step 2
+  变量状态: {'__step': 2}
+------------------------------
+[循环 1/1, 行 85] 执行: set __internal_stackpos __stackpos
+  变量状态: {'__internal_stackpos': 143, '__stackpos': 143}
+------------------------------
+[循环 1/1, 行 86] 执行: op add __stackpos @counter 1
+  变量状态: {'__stackpos': 88}
+------------------------------
+[循环 1/1, 行 87] 执行: set @counter ___stackframe_forward
+  变量状态: {'___stackframe_forward': 22, '@counter': 22}
+------------------------------
+[循环 1/1, 行 22] 执行: getlink __curb null.__pointer_block
+  变量状态: {'__curb': 'cell1'}
+------------------------------
+[循环 1/1, 行 23] 执行: write __internal_stackpos __curb null.__pointer_pos
+  变量状态: {'__internal_stackpos': 143, '__curb': 'cell1'}
+------------------------------
+[循环 1/1, 行 24] 执行: jump 26 greaterThanEq __mxstep 0
+  变量状态: {}
+------------------------------
+[循环 1/1, 行 26] 执行: getlink __curptrblock __stackframe_block
+  变量状态: {'__curptrblock': 'cell1', '__stackframe_block': 0}
+------------------------------
+[循环 1/1, 行 27] 执行: jump 39 lessThanEq __step 0
+  变量状态: {'__step': 2}
+------------------------------
+[循环 1/1, 行 28] 执行: read __block __curptrblock 2
+  变量状态: {'__block': 64, '__curptrblock': 'cell1'}
+------------------------------
+[循环 1/1, 行 29] 执行: op sub __mxstep __block __stackframe_pos
+  变量状态: {'__block': 64, '__mxstep': 60, '__stackframe_pos': 4}
+------------------------------
+[循环 1/1, 行 30] 执行: jump 34 greaterThanEq __step __mxstep
+  变量状态: {'__mxstep': 60, '__step': 2}
+------------------------------
+[循环 1/1, 行 31] 执行: op add __stackframe_pos __stackframe_pos __step
+  变量状态: {'__stackframe_pos': 6, '__step': 2}
+------------------------------
+[循环 1/1, 行 32] 执行: set __step 0
+  变量状态: {'__step': 0}
+------------------------------
+[循环 1/1, 行 33] 执行: jump 39 always x 0
+  变量状态: {}
+------------------------------
+[循环 1/1, 行 39] 执行: set @counter __stackpos
+  变量状态: {'__stackpos': 88, '@counter': 88}
+------------------------------
+[循环 1/1, 行 88] 执行: set __stackpos __internal_stackpos
+  变量状态: {'__internal_stackpos': 143, '__stackpos': 143}
+------------------------------
+[循环 1/1, 行 89] 执行: set g:.f:main.b:1.b.__pointer_block __stackframe_block
+  变量状态: {'__stackframe_block': 0, 'g:.f:main.b:1.b.__pointer_block': 0}
+------------------------------
+[循环 1/1, 行 90] 执行: set g:.f:main.b:1.b.__pointer_pos __stackframe_pos
+  变量状态: {'__stackframe_pos': 6, 'g:.f:main.b:1.b.__pointer_pos': 6}
+------------------------------
+[循环 1/1, 行 91] 执行: set __step 2
+  变量状态: {'__step': 2}
+------------------------------
+[循环 1/1, 行 92] 执行: set __internal_stackpos __stackpos
+  变量状态: {'__internal_stackpos': 143, '__stackpos': 143}
+------------------------------
+[循环 1/1, 行 93] 执行: op add __stackpos @counter 1
+  变量状态: {'__stackpos': 95}
+------------------------------
+[循环 1/1, 行 94] 执行: set @counter ___stackframe_forward
+  变量状态: {'___stackframe_forward': 22, '@counter': 22}
+------------------------------
+[循环 1/1, 行 22] 执行: getlink __curb null.__pointer_block
+  变量状态: {'__curb': 'cell1'}
+------------------------------
+[循环 1/1, 行 23] 执行: write __internal_stackpos __curb null.__pointer_pos
+  变量状态: {'__internal_stackpos': 143, '__curb': 'cell1'}
+------------------------------
+[循环 1/1, 行 24] 执行: jump 26 greaterThanEq __mxstep 0
+  变量状态: {'__mxstep': 60}
+------------------------------
+[循环 1/1, 行 26] 执行: getlink __curptrblock __stackframe_block
+  变量状态: {'__curptrblock': 'cell1', '__stackframe_block': 0}
+------------------------------
+[循环 1/1, 行 27] 执行: jump 39 lessThanEq __step 0
+  变量状态: {'__step': 2}
+------------------------------
+[循环 1/1, 行 28] 执行: read __block __curptrblock 2
+  变量状态: {'__block': 64, '__curptrblock': 'cell1'}
+------------------------------
+[循环 1/1, 行 29] 执行: op sub __mxstep __block __stackframe_pos
+  变量状态: {'__block': 64, '__mxstep': 58, '__stackframe_pos': 6}
+------------------------------
+[循环 1/1, 行 30] 执行: jump 34 greaterThanEq __step __mxstep
+  变量状态: {'__mxstep': 58, '__step': 2}
+------------------------------
+[循环 1/1, 行 31] 执行: op add __stackframe_pos __stackframe_pos __step
+  变量状态: {'__stackframe_pos': 8, '__step': 2}
+------------------------------
+[循环 1/1, 行 32] 执行: set __step 0
+  变量状态: {'__step': 0}
+------------------------------
+[循环 1/1, 行 33] 执行: jump 39 always x 0
+  变量状态: {}
+------------------------------
+[循环 1/1, 行 39] 执行: set @counter __stackpos
+  变量状态: {'__stackpos': 95, '@counter': 95}
+------------------------------
+[循环 1/1, 行 95] 执行: set __stackpos __internal_stackpos
+  变量状态: {'__internal_stackpos': 143, '__stackpos': 143}
+------------------------------
+[循环 1/1, 行 96] 执行: getlink __curb null.__pointer_block
+  变量状态: {'__curb': 'cell1'}
+------------------------------
+[循环 1/1, 行 97] 执行: write g:.f:main.__preserved_stackpos __curb null.__pointer_pos
+  变量状态: {'__curb': 'cell1', 'g:.f:main.__preserved_stackpos': 143}
+------------------------------
+[循环 1/1, 行 98] 执行: getlink __curb g:.f:main.b:1.b.__pointer_block
+  变量状态: {'g:.f:main.b:1.b.__pointer_block': 0, '__curb': 'cell1'}
+------------------------------
+[循环 1/1, 行 99] 执行: write g:.f:main.b:1.a.__pointer_block __curb g:.f:main.b:1.b.__pointer_pos
+  变量状态: {'g:.f:main.b:1.b.__pointer_pos': 6, 'g:.f:main.b:1.a.__pointer_block': 0, '__curb': 'cell1'}
+------------------------------
+[循环 1/1, 行 100] 执行: set __ptrpos g:.f:main.b:1.b.__pointer_pos
+  变量状态: {'__ptrpos': 6, 'g:.f:main.b:1.b.__pointer_pos': 6}
+------------------------------
+[循环 1/1, 行 101] 执行: set __ptrblock g:.f:main.b:1.b.__pointer_block
+  变量状态: {'__ptrblock': 0, 'g:.f:main.b:1.b.__pointer_block': 0}
+------------------------------
+[循环 1/1, 行 102] 执行: set __step 1
+  变量状态: {'__step': 1}
+------------------------------
+[循环 1/1, 行 103] 执行: set __internal_stackpos __stackpos
+  变量状态: {'__internal_stackpos': 143, '__stackpos': 143}
+------------------------------
+[循环 1/1, 行 104] 执行: op add __stackpos @counter 1
+  变量状态: {'__stackpos': 106}
+------------------------------
+[循环 1/1, 行 105] 执行: set @counter ___pointerForward
+  变量状态: {'___pointerForward': 61, '@counter': 61}
+------------------------------
+[循环 1/1, 行 61] 执行: getlink __curb null.__pointer_block
+  变量状态: {'__curb': 'cell1'}
+------------------------------
+[循环 1/1, 行 62] 执行: write __internal_stackpos __curb null.__pointer_pos
+  变量状态: {'__internal_stackpos': 143, '__curb': 'cell1'}
+------------------------------
+[循环 1/1, 行 63] 执行: jump 65 greaterThanEq __mxstep 0
+  变量状态: {'__mxstep': 58}
+------------------------------
+[循环 1/1, 行 65] 执行: getlink __curptrblock __ptrblock
+  变量状态: {'__curptrblock': 'cell1', '__ptrblock': 0}
+------------------------------
+[循环 1/1, 行 66] 执行: jump 78 lessThanEq __step 0
+  变量状态: {'__step': 1}
+------------------------------
+[循环 1/1, 行 67] 执行: read __block __curptrblock 2
+  变量状态: {'__block': 64, '__curptrblock': 'cell1'}
+------------------------------
+[循环 1/1, 行 68] 执行: op sub __mxstep __block __ptrpos
+  变量状态: {'__block': 64, '__mxstep': 58, '__ptrpos': 6}
+------------------------------
+[循环 1/1, 行 69] 执行: jump 73 greaterThanEq __step __mxstep
+  变量状态: {'__mxstep': 58, '__step': 1}
+------------------------------
+[循环 1/1, 行 70] 执行: op add __ptrpos __ptrpos __step
+  变量状态: {'__ptrpos': 7, '__step': 1}
+------------------------------
+[循环 1/1, 行 71] 执行: set __step 0
+  变量状态: {'__step': 0}
+------------------------------
+[循环 1/1, 行 72] 执行: jump 78 always x 0
+  变量状态: {}
+------------------------------
+[循环 1/1, 行 78] 执行: set @counter __stackpos
+  变量状态: {'__stackpos': 106, '@counter': 106}
+------------------------------
+[循环 1/1, 行 106] 执行: set __stackpos __internal_stackpos
+  变量状态: {'__internal_stackpos': 143, '__stackpos': 143}
+------------------------------
+[循环 1/1, 行 107] 执行: getlink __curb __ptr_block
+  变量状态: {'__curb': 'cell1'}
+------------------------------
+[循环 1/1, 行 108] 执行: write g:.f:main.b:1.a.__pointer_pos __curb __ptr_pos
+  变量状态: {'g:.f:main.b:1.a.__pointer_pos': 4, '__curb': 'cell1'}
+------------------------------
+[循环 1/1, 行 109] 执行: set g:.f:main.b:1.c_block g:.f:main.b:1.b.__pointer_block
+  变量状态: {'g:.f:main.b:1.c_block': 0, 'g:.f:main.b:1.b.__pointer_block': 0}
+------------------------------
+[循环 1/1, 行 110] 执行: set g:.f:main.b:1.c_pos g:.f:main.b:1.b.__pointer_pos
+  变量状态: {'g:.f:main.b:1.b.__pointer_pos': 6, 'g:.f:main.b:1.c_pos': 6}
+------------------------------
+[循环 1/1, 行 111] 执行: set __register_0_pos 4
+  变量状态: {'__register_0_pos': 4}
+------------------------------
+[循环 1/1, 行 112] 执行: set __register_0_block cell1_id
+  变量状态: {'__register_0_block': 0, 'cell1_id': 0}
+------------------------------
+[循环 1/1, 行 113] 执行: set __ptrpos __register_0_pos
+  变量状态: {'__ptrpos': 4, '__register_0_pos': 4}
+------------------------------
+[循环 1/1, 行 114] 执行: set __ptrblock __register_0_block
+  变量状态: {'__register_0_block': 0, '__ptrblock': 0}
+------------------------------
+[循环 1/1, 行 115] 执行: set __step 5
+  变量状态: {'__step': 5}
+------------------------------
+[循环 1/1, 行 116] 执行: set __internal_stackpos __stackpos
+  变量状态: {'__internal_stackpos': 143, '__stackpos': 143}
+------------------------------
+[循环 1/1, 行 117] 执行: op add __stackpos @counter 1
+  变量状态: {'__stackpos': 119}
+------------------------------
+[循环 1/1, 行 118] 执行: set @counter ___pointerForward
+  变量状态: {'___pointerForward': 61, '@counter': 61}
+------------------------------
+[循环 1/1, 行 61] 执行: getlink __curb null.__pointer_block
+  变量状态: {'__curb': 'cell1'}
+------------------------------
+[循环 1/1, 行 62] 执行: write __internal_stackpos __curb null.__pointer_pos
+  变量状态: {'__internal_stackpos': 143, '__curb': 'cell1'}
+------------------------------
+[循环 1/1, 行 63] 执行: jump 65 greaterThanEq __mxstep 0
+  变量状态: {'__mxstep': 58}
+------------------------------
+[循环 1/1, 行 65] 执行: getlink __curptrblock __ptrblock
+  变量状态: {'__curptrblock': 'cell1', '__ptrblock': 0}
+------------------------------
+[循环 1/1, 行 66] 执行: jump 78 lessThanEq __step 0
+  变量状态: {'__step': 5}
+------------------------------
+[循环 1/1, 行 67] 执行: read __block __curptrblock 2
+  变量状态: {'__block': 64, '__curptrblock': 'cell1'}
+------------------------------
+[循环 1/1, 行 68] 执行: op sub __mxstep __block __ptrpos
+  变量状态: {'__block': 64, '__mxstep': 60, '__ptrpos': 4}
+------------------------------
+[循环 1/1, 行 69] 执行: jump 73 greaterThanEq __step __mxstep
+  变量状态: {'__mxstep': 60, '__step': 5}
+------------------------------
+[循环 1/1, 行 70] 执行: op add __ptrpos __ptrpos __step
+  变量状态: {'__ptrpos': 9, '__step': 5}
+------------------------------
+[循环 1/1, 行 71] 执行: set __step 0
+  变量状态: {'__step': 0}
+------------------------------
+[循环 1/1, 行 72] 执行: jump 78 always x 0
+  变量状态: {}
+------------------------------
+[循环 1/1, 行 78] 执行: set @counter __stackpos
+  变量状态: {'__stackpos': 119, '@counter': 119}
+------------------------------
+[循环 1/1, 行 119] 执行: set __stackpos __internal_stackpos
+  变量状态: {'__internal_stackpos': 143, '__stackpos': 143}
+------------------------------
+[循环 1/1, 行 120] 执行: set __register_0_pos __ptrpos
+  变量状态: {'__ptrpos': 9, '__register_0_pos': 9}
+------------------------------
+[循环 1/1, 行 121] 执行: set __register_0_block __ptrblock
+  变量状态: {'__register_0_block': 0, '__ptrblock': 0}
+------------------------------
+[循环 1/1, 行 122] 执行: set g:.f:main.b:1.__tempsym_ptr_0_block __register_0_block
+  变量状态: {'__register_0_block': 0, 'g:.f:main.b:1.__tempsym_ptr_0_block': 0}
+------------------------------
+[循环 1/1, 行 123] 执行: set g:.f:main.b:1.__tempsym_ptr_0_pos __register_0_pos
+  变量状态: {'__register_0_pos': 9, 'g:.f:main.b:1.__tempsym_ptr_0_pos': 9}
+------------------------------
+[循环 1/1, 行 124] 执行: getlink __curb g:.f:main.b:1.b.__pointer_block
+  变量状态: {'g:.f:main.b:1.b.__pointer_block': 0, '__curb': 'cell1'}
+------------------------------
+[循环 1/1, 行 125] 执行: read __register_1_block __curb g:.f:main.b:1.b.__pointer_pos
+  变量状态: {'__register_1_block': 0, 'g:.f:main.b:1.b.__pointer_pos': 6, '__curb': 'cell1'}
+------------------------------
+[循环 1/1, 行 126] 执行: set __ptrpos g:.f:main.b:1.b.__pointer_pos
+  变量状态: {'__ptrpos': 6, 'g:.f:main.b:1.b.__pointer_pos': 6}
+------------------------------
+[循环 1/1, 行 127] 执行: set __ptrblock g:.f:main.b:1.b.__pointer_block
+  变量状态: {'__ptrblock': 0, 'g:.f:main.b:1.b.__pointer_block': 0}
+------------------------------
+[循环 1/1, 行 128] 执行: set __step 1
+  变量状态: {'__step': 1}
+------------------------------
+[循环 1/1, 行 129] 执行: set __internal_stackpos __stackpos
+  变量状态: {'__internal_stackpos': 143, '__stackpos': 143}
+------------------------------
+[循环 1/1, 行 130] 执行: op add __stackpos @counter 1
+  变量状态: {'__stackpos': 132}
+------------------------------
+[循环 1/1, 行 131] 执行: set @counter ___pointerForward
+  变量状态: {'___pointerForward': 61, '@counter': 61}
+------------------------------
+[循环 1/1, 行 61] 执行: getlink __curb null.__pointer_block
+  变量状态: {'__curb': 'cell1'}
+------------------------------
+[循环 1/1, 行 62] 执行: write __internal_stackpos __curb null.__pointer_pos
+  变量状态: {'__internal_stackpos': 143, '__curb': 'cell1'}
+------------------------------
+[循环 1/1, 行 63] 执行: jump 65 greaterThanEq __mxstep 0
+  变量状态: {'__mxstep': 60}
+------------------------------
+[循环 1/1, 行 65] 执行: getlink __curptrblock __ptrblock
+  变量状态: {'__curptrblock': 'cell1', '__ptrblock': 0}
+------------------------------
+[循环 1/1, 行 66] 执行: jump 78 lessThanEq __step 0
+  变量状态: {'__step': 1}
+------------------------------
+[循环 1/1, 行 67] 执行: read __block __curptrblock 2
+  变量状态: {'__block': 64, '__curptrblock': 'cell1'}
+------------------------------
+[循环 1/1, 行 68] 执行: op sub __mxstep __block __ptrpos
+  变量状态: {'__block': 64, '__mxstep': 58, '__ptrpos': 6}
+------------------------------
+[循环 1/1, 行 69] 执行: jump 73 greaterThanEq __step __mxstep
+  变量状态: {'__mxstep': 58, '__step': 1}
+------------------------------
+[循环 1/1, 行 70] 执行: op add __ptrpos __ptrpos __step
+  变量状态: {'__ptrpos': 7, '__step': 1}
+------------------------------
+[循环 1/1, 行 71] 执行: set __step 0
+  变量状态: {'__step': 0}
+------------------------------
+[循环 1/1, 行 72] 执行: jump 78 always x 0
+  变量状态: {}
+------------------------------
+[循环 1/1, 行 78] 执行: set @counter __stackpos
+  变量状态: {'__stackpos': 132, '@counter': 132}
+------------------------------
+[循环 1/1, 行 132] 执行: set __stackpos __internal_stackpos
+  变量状态: {'__internal_stackpos': 143, '__stackpos': 143}
+------------------------------
+[循环 1/1, 行 133] 执行: getlink __curb __ptrblock
+  变量状态: {'__ptrblock': 0, '__curb': 'cell1'}
+------------------------------
+[循环 1/1, 行 134] 执行: read __register_1_pos __curb __ptrpos
+  变量状态: {'__ptrpos': 7, '__register_1_pos': None, '__curb': 'cell1'}
+------------------------------
+[循环 1/1, 行 135] 执行: getlink __curb __register_1_block
+  变量状态: {'__register_1_block': 0, '__curb': 'cell1'}
+------------------------------
+[循环 1/1, 行 136] 执行: write g:.f:main.b:1.__tempsym_ptr_0 __curb __register_1_pos
+执行错误 (行 136): 严格模式下不允许向内存写入非数字值: g:.f:main.b:1.__tempsym_ptr_0
+==================================================
+=== 执行完成 ===
+
+最终变量结果:
+@counter = 132
+___pointerForward = 61
+___stackframe_backward = 42
+___stackframe_forward = 22
+__block = 64
+__building = cell1
+__buildingtype = @@special@@memory-cell
+__curb = cell1
+__curptrblock = cell1
+__internal_stackpos = 143
+__linker_ret = 12
+__linkscan = 1
+__mxstep = 58
+__ptrblock = 0
+__ptrpos = 7
+__register_0_block = 0
+__register_0_pos = 9
+__register_1_block = 0
+__register_1_pos = None
+__stackframe_block = 0
+__stackframe_pos = 8
+__stackpos = 143
+__step = 0
+_main = 81
+cell1_id = 0
+g:.f:main.__preserved_stackpos = 143
+g:.f:main.b:1.__tempsym_ptr_0_block = 0
+g:.f:main.b:1.__tempsym_ptr_0_pos = 9
+g:.f:main.b:1.a.__pointer_block = 0
+g:.f:main.b:1.a.__pointer_pos = 4
+g:.f:main.b:1.b.__pointer_block = 0
+g:.f:main.b:1.b.__pointer_pos = 6
+g:.f:main.b:1.c_block = 0
+g:.f:main.b:1.c_pos = 6
+null_block = None
+null_pos = None
+
+内存状态: {'cell1': [143, -1, 64, 0, None, None, 0, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None], 'cell2': [None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None], 'cell3': [None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None], 'cell4': [None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None]}

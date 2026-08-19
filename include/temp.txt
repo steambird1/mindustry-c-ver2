@@ -1,0 +1,17 @@
+
+const device self();
+const int thisx();
+const int thisy();
+const int links();
+const int ipt();
+const double PI();
+const double E();
+const double DEGTORAD();
+const double RADTODEG();
+const double time();
+const double getTime();
+const double tick();
+const double second();
+const double minute();
+const int waveNumber();
+const double waveTime();

@@ -1,0 +1,341 @@
+set null_block null
+set null_pos null
+write null cell1 0
+write null cell1 1
+write 64 cell1 2
+write 0 cell1 3
+set __stackframe_block cell1
+set __stackframe_pos 4
+set global:.coreX null
+set global:.coreY null
+set global:.coreFound null
+set global:.coreDevice null
+set ___pointerForward @counter
+op add ___pointerForward ___pointerForward 2
+jump 30 always x 0
+jump 17 greaterThanEq __mxstep 0
+end
+jump 29 lessThanEq __step 0
+read __block __ptrblock 2
+op sub __mxstep __block __ptrpos
+jump 24 greaterThanEq __step __mxstep
+op add __ptrpos __ptrpos __step
+set __step 0
+jump 29 always x 0
+read __ptrblock __ptrblock 1
+op sub __step __step __mxstep
+op add __step __step 1
+set __ptrpos 4
+jump 15 always x 0
+set @counter __stackpos
+set ___pointerBackward @counter
+op add ___pointerBackward ___pointerBackward 2
+jump 46 always x 0
+jump 35 greaterThanEq __mxstep 0
+end
+jump 45 lessThanEq __step 0
+op sub __mxstep __ptrpos 4
+jump 41 greaterThan __step __mxstep
+op sub __ptrpos __ptrpos __step
+set __step 0
+jump 45 always x 0
+read __ptrblock __ptrblock 0
+op sub __step __step __mxstep
+read __ptrpos __ptrblock 4
+jump 33 always x 0
+set @counter __stackpos
+set _output @counter
+op add _output _output 2
+jump 54 always x 0
+set __register_0 global:.function:output.info
+print __register_0
+set __register_0 message1
+printflush __register_0
+set @counter __stackpos
+set _movingTo @counter
+op add _movingTo _movingTo 2
+jump 108 always x 0
+set __register_0 global:.function:movingTo.x
+set __register_1 global:.function:movingTo.y
+ucontrol move __register_0 __register_1 x x x
+jump 107 notEqual true true
+sensor __register_0 @unit @x
+op floor __register_1 __register_0 x
+set global:.function:movingTo.block:22.block:24.curX __register_1
+sensor __register_0 @unit @y
+op floor __register_1 __register_0 x
+set global:.function:movingTo.block:22.block:24.curY __register_1
+set global:.function:output.info "Waiting poly to move to destination..."
+set global:.function:output.__stackpos.__pointer_block __stackframe_block
+set global:.function:output.__stackpos.__pointer_pos __stackframe_pos
+set __internal_stackpos __stackpos
+set __ptrpos __stackframe_pos
+set __ptrblock __stackframe_block
+set __step 1
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter ___pointerForward
+set __stackpos __internal_stackpos
+set __stackframe_pos __ptrpos
+set __stackframe_block __ptrblock
+write __stackpos global:.function:output.__stackpos.__pointer_block global:.function:output.__stackpos.__pointer_pos
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter _output
+read __stackpos global:.function:output.__stackpos.__pointer_block global:.function:output.__stackpos.__pointer_pos
+set __internal_stackpos __stackpos
+set __ptrpos __stackframe_pos
+set __ptrblock __stackframe_block
+set __step 1
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter ___pointerBackward
+set __stackpos __internal_stackpos
+set __stackframe_pos __ptrpos
+set __stackframe_block __ptrblock
+set __register_4 global:.function:movingTo.x
+op sub __register_5 global:.function:movingTo.block:22.block:24.curX __register_4
+op abs __register_6 __register_5 x
+op lessThan __register_7 __register_6 3
+set __register_0 global:.function:movingTo.y
+op sub __register_1 global:.function:movingTo.block:22.block:24.curY __register_0
+op abs __register_2 __register_1 x
+op lessThan __register_3 __register_2 3
+op land __register_8 __register_7 __register_3
+jump 106 notEqual __register_8 true
+jump 107 always x 0
+jump 60 always x 0
+set @counter __stackpos
+set _mining @counter
+op add _mining _mining 2
+jump 294 always x 0
+set global:.function:mining.block:25.oreX null
+set global:.function:mining.block:25.oreY null
+set global:.function:mining.block:25.oreFound null
+set global:.function:mining.block:25.oreDevice null
+set __register_1 global:.function:mining.type
+ulocate ore core true __register_1 global:.function:mining.block:25.oreX global:.function:mining.block:25.oreY global:.function:mining.block:25.oreFound global:.function:mining.block:25.oreDevice
+set __register_0 global:.function:mining.block:25.oreFound
+jump 264 notEqual __register_0 true
+set global:.function:output.info "Instructing poly to move..."
+set global:.function:output.__stackpos.__pointer_block __stackframe_block
+set global:.function:output.__stackpos.__pointer_pos __stackframe_pos
+set __internal_stackpos __stackpos
+set __ptrpos __stackframe_pos
+set __ptrblock __stackframe_block
+set __step 1
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter ___pointerForward
+set __stackpos __internal_stackpos
+set __stackframe_pos __ptrpos
+set __stackframe_block __ptrblock
+write __stackpos global:.function:output.__stackpos.__pointer_block global:.function:output.__stackpos.__pointer_pos
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter _output
+read __stackpos global:.function:output.__stackpos.__pointer_block global:.function:output.__stackpos.__pointer_pos
+set __internal_stackpos __stackpos
+set __ptrpos __stackframe_pos
+set __ptrblock __stackframe_block
+set __step 1
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter ___pointerBackward
+set __stackpos __internal_stackpos
+set __stackframe_pos __ptrpos
+set __stackframe_block __ptrblock
+set __register_0 global:.function:mining.block:25.oreX
+set global:.function:movingTo.x __register_0
+set __register_1 global:.function:mining.block:25.oreY
+set global:.function:movingTo.y __register_1
+set global:.function:movingTo.__stackpos.__pointer_block __stackframe_block
+set global:.function:movingTo.__stackpos.__pointer_pos __stackframe_pos
+set __internal_stackpos __stackpos
+set __ptrpos __stackframe_pos
+set __ptrblock __stackframe_block
+set __step 1
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter ___pointerForward
+set __stackpos __internal_stackpos
+set __stackframe_pos __ptrpos
+set __stackframe_block __ptrblock
+write __stackpos global:.function:movingTo.__stackpos.__pointer_block global:.function:movingTo.__stackpos.__pointer_pos
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter _movingTo
+read __stackpos global:.function:movingTo.__stackpos.__pointer_block global:.function:movingTo.__stackpos.__pointer_pos
+set __internal_stackpos __stackpos
+set __ptrpos __stackframe_pos
+set __ptrblock __stackframe_block
+set __step 1
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter ___pointerBackward
+set __stackpos __internal_stackpos
+set __stackframe_pos __ptrpos
+set __stackframe_block __ptrblock
+set global:.function:output.info "Now mining..."
+set global:.function:output.__stackpos.__pointer_block __stackframe_block
+set global:.function:output.__stackpos.__pointer_pos __stackframe_pos
+set __internal_stackpos __stackpos
+set __ptrpos __stackframe_pos
+set __ptrblock __stackframe_block
+set __step 1
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter ___pointerForward
+set __stackpos __internal_stackpos
+set __stackframe_pos __ptrpos
+set __stackframe_block __ptrblock
+write __stackpos global:.function:output.__stackpos.__pointer_block global:.function:output.__stackpos.__pointer_pos
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter _output
+read __stackpos global:.function:output.__stackpos.__pointer_block global:.function:output.__stackpos.__pointer_pos
+set __internal_stackpos __stackpos
+set __ptrpos __stackframe_pos
+set __ptrblock __stackframe_block
+set __step 1
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter ___pointerBackward
+set __stackpos __internal_stackpos
+set __stackframe_pos __ptrpos
+set __stackframe_block __ptrblock
+set __register_0 global:.function:mining.block:25.oreX
+set __register_1 global:.function:mining.block:25.oreY
+ucontrol mine __register_0 __register_1 x x x
+wait 0.1
+set global:.function:mining.block:25.block:30.mined 0
+set global:.function:mining.block:25.block:30.startTime @time
+set __register_4 global:.function:mining.block:25.block:30.mined
+set __register_3 global:.function:mining.storage
+op lessThan __register_5 __register_4 __register_3
+op sub __register_1 @time global:.function:mining.block:25.block:30.startTime
+set __register_0 global:.function:mining.deadline
+op lessThanEq __register_2 __register_1 __register_0
+op land __register_6 __register_5 __register_2
+jump 230 notEqual __register_6 true
+set __register_0 global:.function:mining.type
+sensor __register_1 @unit __register_0
+set global:.function:mining.block:25.block:30.mined __register_1
+print "Now mined:"
+set __register_0 global:.function:mining.block:25.block:30.mined
+print __register_0
+set __register_0 message1
+printflush __register_0
+ucontrol idle x x x x x
+jump 212 always x 0
+set __register_0 global:.coreX
+set global:.function:movingTo.x __register_0
+set __register_1 global:.coreY
+set global:.function:movingTo.y __register_1
+set global:.function:movingTo.__stackpos.__pointer_block __stackframe_block
+set global:.function:movingTo.__stackpos.__pointer_pos __stackframe_pos
+set __internal_stackpos __stackpos
+set __ptrpos __stackframe_pos
+set __ptrblock __stackframe_block
+set __step 1
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter ___pointerForward
+set __stackpos __internal_stackpos
+set __stackframe_pos __ptrpos
+set __stackframe_block __ptrblock
+write __stackpos global:.function:movingTo.__stackpos.__pointer_block global:.function:movingTo.__stackpos.__pointer_pos
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter _movingTo
+read __stackpos global:.function:movingTo.__stackpos.__pointer_block global:.function:movingTo.__stackpos.__pointer_pos
+set __internal_stackpos __stackpos
+set __ptrpos __stackframe_pos
+set __ptrblock __stackframe_block
+set __step 1
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter ___pointerBackward
+set __stackpos __internal_stackpos
+set __stackframe_pos __ptrpos
+set __stackframe_block __ptrblock
+set __register_0 global:.coreDevice
+set __register_1 global:.function:mining.storage
+ucontrol itemDrop __register_0 __register_1 x x x
+jump 293 always x 0
+set global:.function:output.info "No! there's no such mineral in this graph."
+set global:.function:output.__stackpos.__pointer_block __stackframe_block
+set global:.function:output.__stackpos.__pointer_pos __stackframe_pos
+set __internal_stackpos __stackpos
+set __ptrpos __stackframe_pos
+set __ptrblock __stackframe_block
+set __step 1
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter ___pointerForward
+set __stackpos __internal_stackpos
+set __stackframe_pos __ptrpos
+set __stackframe_block __ptrblock
+write __stackpos global:.function:output.__stackpos.__pointer_block global:.function:output.__stackpos.__pointer_pos
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter _output
+read __stackpos global:.function:output.__stackpos.__pointer_block global:.function:output.__stackpos.__pointer_pos
+set __internal_stackpos __stackpos
+set __ptrpos __stackframe_pos
+set __ptrblock __stackframe_block
+set __step 1
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter ___pointerBackward
+set __stackpos __internal_stackpos
+set __stackframe_pos __ptrpos
+set __stackframe_block __ptrblock
+set @counter __stackpos
+set _main @counter
+op add _main _main 2
+jump 336 always x 0
+set global:.function:output.info "Binding poly..."
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter _output
+ubind @poly
+wait 3
+ulocate building core false @copper global:.coreX global:.coreY global:.coreFound global:.coreDevice
+set __register_0 global:.coreFound
+op equal __register_0 __register_0 false
+set __register_1 false
+jump 309 equal 0 __register_0
+set __register_1 true
+jump 316 notEqual __register_1 true
+set global:.function:output.info "No! there's no core found by the logical processor."
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter _output
+set __return null
+jump 335 always x 0
+set __register_2 global:.coreDevice
+sensor __register_3 __register_2 @copper
+set __register_0 global:.coreDevice
+sensor __register_1 __register_0 @lead
+op lessThan __register_4 __register_3 __register_1
+jump 328 notEqual __register_4 true
+set global:.function:mining.type @copper
+set global:.function:mining.storage 30
+set global:.function:mining.deadline 40000
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter _mining
+jump 335 always x 0
+set global:.function:mining.type @lead
+set global:.function:mining.storage 30
+set global:.function:mining.deadline 40000
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter _mining
+end
+set __internal_stackpos __stackpos
+set __stackpos @counter
+op add __stackpos __stackpos 2
+set @counter _main
+set __stackpos __internal_stackpos

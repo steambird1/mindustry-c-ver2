@@ -1,0 +1,6 @@
+sensor result block1 @copper
+wait 0.5
+ubind @poly
+ucontrol move 0 0 0 0 0
+uradar enemy any any distance 0 1 result
+ucontrol within 0 0 0 0 0
