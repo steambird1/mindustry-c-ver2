@@ -3207,10 +3207,10 @@ export class Optimizer extends ASTVisitor {
 					canInline: funcNode.body !== null,
                     node: funcNode,
                     scope: symbol.scope,
-                    size: this.estimateFunctionSize(funcNode),
 					writtenVarsUnknown: true,
-					writtenVars: []
-                });
+					writtenVars: [],
+					...this.estimateFunctionSize(funcNode)
+                });	
             }
         });
         
@@ -3292,7 +3292,9 @@ export class Optimizer extends ASTVisitor {
 			const inlineEstimate = (info.calls + paraSize) * info.size;
 			const noInlineEstimate = (info.size + paraSize + 4 + (4 + paraSize) * info.calls);
             if (info.calls === 1 || info.isInline || inlineEstimate <= noInlineEstimate) {
-                inlineCandidates.push(funcName);
+				const bad = ((info.size > (this.compiler.config.getAttribute('maxInlineSize') ?? 25) && (!info.isInline)) 
+					|| (info.maxDepth > (this.compiler.config.getAttribute('maxInlineDepth') ?? 5)));
+                if (!bad) inlineCandidates.push(funcName);
             }
         });
         
@@ -4104,9 +4106,10 @@ export class Optimizer extends ASTVisitor {
     estimateFunctionSize(funcNode) {
         if (!funcNode.body) return 0;
         
-        let size = 0;
-        const countStatements = (node) => {
+        let size = 0, maxDepth = 0;
+        const countStatements = (node, depth = 0) => {
             if (!node) return;
+			if (depth > maxDepth) maxDepth = depth;
             
             switch (node.type) {
                 case 'ExpressionStatement':
@@ -4123,7 +4126,7 @@ export class Optimizer extends ASTVisitor {
             }
             
             if (node.children) {
-                node.children.forEach(child => countStatements(child));
+                node.children.forEach(child => countStatements(child, depth + 1));
             }
 
 			const fieldsToCheck = [
@@ -4135,16 +4138,16 @@ export class Optimizer extends ASTVisitor {
 
 			for (const field of fieldsToCheck) {
 				if (Array.isArray(node[field])) {
-					node[field].forEach(item => countStatements(item));
+					node[field].forEach(item => countStatements(item), depth + 1);
 				} else if (node[field] && typeof node[field] === 'object') {
-					countStatements(node[field]);
+					countStatements(node[field], depth + 1);
 				}
 			}
 
         };
         
         countStatements(funcNode.body);
-        return size;
+        return { size, maxDepth };
     }
 
     shouldInlineFunction(funcName) {
@@ -4546,6 +4549,8 @@ export class Optimizer extends ASTVisitor {
 								const returnAssigner = ASTBuilder.assignmentExpression('=', returnAssignerIdent, stmt.argument);
 								stmt.argument.parent = returnAssigner;
 								returnAssignerIdent.parent = returnAssigner;
+								returnAssignerIdent.symbol = returnerIdent.symbol;
+								returnAssigner.symbol = returnerIdent.symbol;
 								actualStmt = returnAssigner;
 								
 								// Not that easy. In fact, you have to migrate the whole 'parentNode'...
@@ -4780,12 +4785,7 @@ export class Optimizer extends ASTVisitor {
 		if (context.currentFunction === funcNode.name) {
 			return false; // 递归调用不内联
 		}
-		
-		// 检查函数体大小
-		const functionSize = this.estimateFunctionSize(funcNode);
-		if (functionSize > 25 && (!funcNode.isInline)) { // 阈值，可根据需要调整
-			return false;
-		}
+		// Size is checked elsewhere
 		
 		return true;
 	}
@@ -5095,6 +5095,7 @@ export class Optimizer extends ASTVisitor {
 	 */
 	cloneAST(node) {
 		if (!node) return null;
+		// console.log("Now cloning AST",node);	// debug ...
 		
 		// 创建新节点
 		const clone = new ASTNode(node.type, node.location);
@@ -5110,28 +5111,21 @@ export class Optimizer extends ASTVisitor {
 		// 复制特定字段
 		switch (node.type) {
 			case 'Program':
-				if (node.functions) clone.functions = [];
-				if (node.globalDeclarations) clone.globalDeclarations = [];
-				if (node.typeDefinitions) clone.typeDefinitions = [];
 				break;
 				
 			case 'FunctionDeclaration':
 				clone.name = node.name;
-				clone.returnType = node.returnType ? this.cloneAST(node.returnType) : null;
-				clone.parameters = node.parameters ? node.parameters.map(p => this.cloneAST(p)) : [];
 				clone.isInline = node.isInline || false;
 				break;
 				
 			case 'VariableDeclaration':
 				clone.type = node.type ? this.cloneAST(node.type) : null;
-				clone.declarators = node.declarators ? node.declarators.map(d => this.cloneAST(d)) : [];
 				clone.storageClass = node.storageClass;
 				break;
 				
 			case 'VariableDeclarator':
 			case 'Declarator':
 				clone.name = node.name;
-				if (node.initializer) clone.initializer = this.cloneAST(node.initializer);
 				break;
 				
 			case 'Identifier':
@@ -5151,61 +5145,40 @@ export class Optimizer extends ASTVisitor {
 			case 'AssignmentExpression':
 			case 'BinaryExpression':
 				clone.operator = node.operator;
-				clone.left = node.left ? this.cloneAST(node.left) : null;
-				clone.right = node.right ? this.cloneAST(node.right) : null;
 				break;
 				
 			case 'UnaryExpression':
 				clone.operator = node.operator;
-				clone.argument = node.argument ? this.cloneAST(node.argument) : null;
 				clone.prefix = node.prefix !== undefined ? node.prefix : true;
 				break;
 				
 			case 'IfStatement':
-				clone.test = node.test ? this.cloneAST(node.test) : null;
-				clone.consequent = node.consequent ? this.cloneAST(node.consequent) : null;
-				clone.alternate = node.alternate ? this.cloneAST(node.alternate) : null;
 				break;
 				
 			case 'WhileStatement':
-				clone.test = node.test ? this.cloneAST(node.test) : null;
-				clone.body = node.body ? this.cloneAST(node.body) : null;
 				break;
 				
 			case 'ForStatement':
-				clone.init = node.init ? this.cloneAST(node.init) : null;
-				clone.test = node.test ? this.cloneAST(node.test) : null;
-				clone.update = node.update ? this.cloneAST(node.update) : null;
-				clone.body = node.body ? this.cloneAST(node.body) : null;
 				break;
 				
 			case 'ReturnStatement':
-				clone.argument = node.argument ? this.cloneAST(node.argument) : null;
 				break;
 				
 			case 'CompoundStatement':
-				clone.statements = node.statements ? node.statements.map(s => this.cloneAST(s)) : [];
 				break;
 				
 			case 'ExpressionStatement':
-				clone.expression = node.expression ? this.cloneAST(node.expression) : null;
 				break;
 				
 			case 'FunctionCall':
-				clone.callee = node.callee ? this.cloneAST(node.callee) : null;
-				clone.arguments = node.arguments ? node.arguments.map(a => this.cloneAST(a)) : [];
 				break;
 				
 			case 'BuiltinCall':
 				clone.functionName = node.functionName;
-				clone.arguments = node.arguments ? node.arguments.map(a => this.cloneAST(a)) : [];
 				break;
 				
 			case 'MemberExpression':
-				if (node.getChild(0)) clone.addChild(this.cloneAST(node.getChild(0)));
-				if (node.getChild(1)) clone.addChild(this.cloneAST(node.getChild(1)));
 				clone.setAttribute('computed', node.getAttribute('computed') || false);
-				clone.setAttribute('operator', node.getAttribute('operator'));
 				break;
 				
 			default:
@@ -5218,8 +5191,8 @@ export class Optimizer extends ASTVisitor {
 		}
 		
 		const fieldsToCheck = [
-				'functions', 'globalDeclarations', 'typeDefinitions',
-				'statements', 'expression', 'test', 'consequent', 'alternate',
+				'functions', 'globalDeclarations', 'typeDefinitions', 'returnType',
+				'statements', 'expression', 'test', 'consequent', 'alternate', 'parameters',
 				'body', 'init', 'update', 'argument', 'left', 'right',
 				'declarators', 'arguments', 'callee', 'initializer'
 			];

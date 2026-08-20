@@ -584,7 +584,9 @@ export class Parser {
         const declarator = this.parseDeclarator(true);
         if (declarator) decName = declarator.name;	// Function declaration / function pointer has no name
         
-        return {
+        let ast = new ASTNode('Parameter');
+
+        ast = {...ast,
             type: paramType,
             name: decName,
             pointerDepth: declarator.pointerDepth,
@@ -592,6 +594,8 @@ export class Parser {
             arrayDimensions: declarator.arrayDimensions,
             location: declarator.location || paramType.location
         };
+
+        return ast;
     }
 
 	parseDeclarator(isFunctionParam = false) {
