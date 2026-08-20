@@ -1027,7 +1027,7 @@ export class SemanticAnalyzer extends ASTVisitor {
                 structType.size = maxMemberSize;
                 // 联合体所有成员偏移量都是0
                 defNode.members.forEach((member, index) => {
-                    const memberTypeName = this.getTypeNameFromTypeNode(member.type);
+                    const memberTypeName = this.getTypeNameFromDeclarator(member);
                     const memberType = this.getTypeInfo(memberTypeName);
                     if (memberType) {
                         const memberInfo = new MemberInfo(
