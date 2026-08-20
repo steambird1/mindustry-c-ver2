@@ -930,10 +930,10 @@ export class Optimizer extends ASTVisitor {
 					if (!(info && info.optimizingLoop)) {
 						if (conditionValue) {
 							// 条件总是为真，可以标记then分支总是执行
-							this.warnings.push(`Condition always true in if statement`, node.test.location);
+							this.addWarning(`Condition always true in if statement`, node.test.location);
 						} else {
 							// 条件总是为假，可以标记else分支总是执行（如果有）
-							this.warnings.push(`Condition always false in if statement`, node.test.location);
+							this.addWarning(`Condition always false in if statement`, node.test.location);
 						}
 					}			
 					
@@ -1018,7 +1018,7 @@ export class Optimizer extends ASTVisitor {
 				if (conditionValue == 0) {
 					// 条件总是为假，循环永远不会执行
 					node.setAttribute('neverExecuted', true);
-					this.warnings.push(`Loop never executed (while(false))`, node.test.location);
+					this.addWarning(`Loop never executed (while(false))`, node.test.location);
 				}
 			}
 			
@@ -1083,7 +1083,7 @@ export class Optimizer extends ASTVisitor {
 			}
 			
 			if (node.getAttribute('infiniteLoop')) {
-				this.warnings.push(`Infinite loop detected (while(true))`, node.test.location);
+				this.addWarning(`Infinite loop detected (while(true))`, node.test.location);
 			}
 		} else {
 			if (!node.getAttribute('iteration')) {
@@ -1325,7 +1325,7 @@ export class Optimizer extends ASTVisitor {
 				} else {
 					// 条件总是为假，循环永远不会执行
 					node.setAttribute('neverExecuted', true);
-					this.warnings.push(`Loop never executed (for with constant false condition)`, node.test.location);
+					this.addWarning(`Loop never executed (for with constant false condition)`, node.test.location);
 				}
 			}
 			
@@ -1397,7 +1397,7 @@ export class Optimizer extends ASTVisitor {
 			}
 			// Warning for infinite for loop
 			if (node.getAttribute('infiniteLoop')) {
-				this.warnings.push(`Infinite loop detected (for with constant true condition)`, node.location);
+				this.addWarning(`Infinite loop detected (for with constant true condition)`, node.location);
 			}
 		} else {
 			if (!node.getAttribute('iteration')) {
@@ -2233,7 +2233,7 @@ export class Optimizer extends ASTVisitor {
 		
 		// 替换循环
 		this.replaceNode(forNode, replacementNode);
-		this.warnings.push(`Replaced never-executed loop with initialization only`);
+		this.addWarning(`Replaced never-executed loop with initialization only`);
 		return true;
 	}
 
@@ -2387,7 +2387,7 @@ export class Optimizer extends ASTVisitor {
 		// 替换循环节点
 		this.replaceNode(loopNode, replacementNode);
 		
-		this.warnings.push(`Optimized deterministic loop with ${iterationCount} iterations to direct assignments`);
+		this.addWarning(`Optimized deterministic loop with ${iterationCount} iterations to direct assignments`);
 		return true;
 	}
 
@@ -2495,7 +2495,7 @@ export class Optimizer extends ASTVisitor {
 				replacementStatements.push(exprStmt);
 			}
 			*/
-			this.warnings.push(`Partially unrolled loop: ${firstSideEffect} side-effect-free iterations converted to direct assignments`);
+			this.addWarning(`Partially unrolled loop: ${firstSideEffect} side-effect-free iterations converted to direct assignments`);
 		}
 		
 		// 修改原循环，减少迭代次数
@@ -2815,7 +2815,7 @@ export class Optimizer extends ASTVisitor {
                     this.removeNodeFromParent(astNode);
                     this.modified = true;
 					if (this.extraConfig.getAttribute('warningAll'))
-                    	this.warnings.push(`Removed unused variable '${symbol.name}' in scope ${scope.getPath()}`);
+                    	this.addWarning(`Removed unused variable '${symbol.name}' in scope ${scope.getPath()}`);
                 }
             }
         });
@@ -3270,7 +3270,7 @@ export class Optimizer extends ASTVisitor {
 						this.removeNodeFromParent(funcNode);
 						this.modified = true;
 						if (this.extraConfig.getAttribute('warningAll')) {
-							this.warnings.push(`Removed unused function '${funcName}'`);
+							this.addWarning(`Removed unused function '${funcName}'`);
 						}
 						
 					}
@@ -3435,7 +3435,7 @@ export class Optimizer extends ASTVisitor {
             case '*': case '*=': return left * right;
             case '/': case '/=':
 				if (right === 0) {
-					this.errors.push('Explicit division by zero');
+					this.addError('Explicit division by zero');
 					return undefined;
 				}
 				if (isInt) return Math.floor(left / right);
@@ -3443,7 +3443,7 @@ export class Optimizer extends ASTVisitor {
 				return left / right;
             case '%': case '%=':
 				if (right === 0) {
-					this.errors.push('Explicit modulo by zero');
+					this.addError('Explicit modulo by zero');
 					return undefined;
 				}
 				return left % right;
@@ -4201,7 +4201,7 @@ export class Optimizer extends ASTVisitor {
 		if (funcInfo.calls === 0) {
 			this.globalScope.removeSymbol(funcName);	// Manually added
 			this.removeNodeFromParent(funcInfo.node);
-			this.warnings.push(`Removed unused function '${funcName}' after inlining`);
+			this.addWarning(`Removed unused function '${funcName}' after inlining`);
 		}
 	}
 
@@ -4760,7 +4760,7 @@ export class Optimizer extends ASTVisitor {
 		}
 		
 		this.modified = true;
-		this.warnings.push(`Inlined function '${funcNode.name}'`);
+		this.addWarning(`Inlined function '${funcNode.name}'`);
 		return true;
 	}
 
@@ -4943,7 +4943,7 @@ export class Optimizer extends ASTVisitor {
 				// 检查声明符
 				if (!decl.declarators || decl.declarators.length === 0) {
 					this.modified = true;
-					this.warnings.push('Removed empty global variable declaration');
+					this.addWarning('Removed empty global variable declaration');
 					return false;
 				}
 				
@@ -4969,7 +4969,7 @@ export class Optimizer extends ASTVisitor {
 				
 				if (usefulDeclarators.length === 0) {
 					this.modified = true;
-					this.warnings.push(`Removed global variable declaration with no used variables`);
+					this.addWarning(`Removed global variable declaration with no used variables`);
 					return false;
 				}
 				
@@ -4998,7 +4998,7 @@ export class Optimizer extends ASTVisitor {
 				
 				if (!isTypeUsed && typeDef.type !== 'TypedefDeclaration') {
 					this.modified = true;
-					// this.warnings.push(`Removed unused type definition '${typeName}'`);
+					// this.addWarning(`Removed unused type definition '${typeName}'`);
 					return false;
 				}
 				
@@ -5018,7 +5018,7 @@ export class Optimizer extends ASTVisitor {
 					// 函数声明（不是定义），可以删除
 					this.modified = true;
 					if (this.extraConfig.getAttribute('warningAll'))
-						this.warnings.push(`Removed unused function declaration '${func.name}'`);
+						this.addWarning(`Removed unused function declaration '${func.name}'`);
 					return false;
 				}
 				
@@ -5413,7 +5413,7 @@ export class Optimizer extends ASTVisitor {
 			if (hasUnconditionalControlFlow) {
 				// 标记为已修改
 				modified = true;
-				this.warnings.push(`Removed dead code after unconditional control flow in compound statement`);
+				this.addWarning(`Removed dead code after unconditional control flow in compound statement`);
 				continue;
 			}
 			
@@ -5478,18 +5478,18 @@ export class Optimizer extends ASTVisitor {
 					// 删除else分支
 					ifStmt.alternate = null;
 					modified = true;
-					this.warnings.push(`Removed else branch from always-true if statement`);
+					this.addWarning(`Removed else branch from always-true if statement`);
 				}
 			} else {
 				// 条件为假，只保留else分支（如果有）
 				if (ifStmt.alternate) {
 					// 用else分支替换整个if语句
 					// 注意：这里我们只标记修改，实际替换在调用者中处理
-					this.warnings.push(`If statement with always-false condition can be replaced with else branch`);
+					this.addWarning(`If statement with always-false condition can be replaced with else branch`);
 				} else {
 					// 没有else分支，整个if语句都可以删除
 					// 注意：这里我们只标记修改，实际删除在调用者中处理
-					this.warnings.push(`If statement with always-false condition and no else branch can be removed`);
+					this.addWarning(`If statement with always-false condition and no else branch can be removed`);
 				}
 			}
 		}
@@ -5506,7 +5506,7 @@ export class Optimizer extends ASTVisitor {
 				// 条件总是为真
 				if (ifStmt.alternate) {
 					// 有else分支，可以删除else分支
-					this.warnings.push(`Removing else branch from always-true if statement`);
+					this.addWarning(`Removing else branch from always-true if statement`);
 					
 					// 检查else分支是否有副作用
 					const elseHasSideEffects = ifStmt.getAttribute('alternateHasSideEffects');
@@ -5525,7 +5525,7 @@ export class Optimizer extends ASTVisitor {
 				// 条件总是为假
 				if (ifStmt.consequent) {
 					// 有then分支，可以删除then分支
-					this.warnings.push(`Removing then branch from always-false if statement`);
+					this.addWarning(`Removing then branch from always-false if statement`);
 					
 					// 检查then分支是否有副作用
 					const thenHasSideEffects = ifStmt.getAttribute('consequentHasSideEffects');
@@ -5659,7 +5659,7 @@ export class Optimizer extends ASTVisitor {
 		
 		if (neverExecuted) {
 			// 循环永远不会执行
-			this.warnings.push(`Removing never-executed loop`);
+			this.addWarning(`Removing never-executed loop`);
 			
 			// 检查初始化部分是否有副作用
 			// 对于while循环，没有独立的初始化部分，但条件可能有副作用
@@ -5717,7 +5717,7 @@ export class Optimizer extends ASTVisitor {
 		
 		if (neverExecuted) {
 			// 循环永远不会执行
-			this.warnings.push(`Removing never-executed for loop`);
+			this.addWarning(`Removing never-executed for loop`);
 			
 			// 检查初始化和条件是否有副作用
 			const initHasSideEffects = forStmt.getAttribute('initHasSideEffects');
@@ -5755,7 +5755,7 @@ export class Optimizer extends ASTVisitor {
 		if (wasOptimized && iterationCount !== undefined) {
 			if (iterationCount === 1) {
 				// 只有一次迭代，可以展开
-				this.warnings.push(`Unrolling single-iteration for loop`);
+				this.addWarning(`Unrolling single-iteration for loop`);
 				
 				// 创建复合语句代替循环
 				const compoundStmt = ASTBuilder.compoundStatement();
@@ -5932,7 +5932,7 @@ export class Optimizer extends ASTVisitor {
 					
 					if (node.statements.length !== originalLength) {
 						modified = true;
-						this.warnings.push(`Removed empty statements from compound statement`);
+						this.addWarning(`Removed empty statements from compound statement`);
 					}
 					
 					// 递归清理每个语句

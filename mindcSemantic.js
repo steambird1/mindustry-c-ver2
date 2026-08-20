@@ -1373,10 +1373,6 @@ export class SemanticAnalyzer extends ASTVisitor {
 		const warningStorages = ['volatile'];
 		const warningKinds = ['pointer', 'array'];
 
-		if ((varType.qualifiers.includes(warningStorages) || warningKinds.includes(varType.kind)) && warningTypes.includes(varType.name)) {
-			this.addWarning(`Variable ${declarator.name} (with type ${varType.toString()}) cannot be stored in memory`, declarator.location);
-		}
-
         node.declarators.forEach(declarator => {
             // 检查变量是否已声明
             const existingSymbol = this.currentScope.lookupCurrent(declarator.name);
@@ -1429,6 +1425,15 @@ export class SemanticAnalyzer extends ASTVisitor {
                 finalType = arrayType;
 				//pointerAccess = true;
             }
+
+			const extractToBottom = /**
+			@param {TypeInfo} extr
+			@returns {TypeInfo}
+			*/ extr => extr.isStrictPointerImpl() ? extractToBottom(extr.extractSingle()) : extr;
+
+			if ((finalType.qualifiers.some(q => warningStorages.includes(q)) || warningKinds.includes(finalType.kind)) && warningTypes.includes(extractToBottom(finalType).name)) {
+				this.addWarning(`Variable ${declarator.name} (with type ${varType.toString()}) cannot be stored in memory`, declarator.location);
+			}
 
             // 创建变量符号
             const varSymbol = new SymbolEntry(
