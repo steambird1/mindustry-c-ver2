@@ -1,0 +1,209 @@
+cell1 : {null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null}
+cell2 : {null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null}
+cell3 : {null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null}
+cell4 : {null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null}
+# 1
+set __linkscan 0
+jump 10 always x 0
+getlink __building __linkscan
+sensor __buildingtype __building @type
+jump 9 strictEqual __buildingtype @memory-cell
+jump 9 strictEqual __buildingtype @memory-bank
+jump 9 strictEqual __buildingtype @world-cell
+op add __linkscan __linkscan 1
+jump 2 always x 0
+set @counter __linker_ret
+op add __linker_ret @counter 1
+jump 2 always x 0
+set cell1_id __linkscan
+op add __linkscan __linkscan 1
+set null_block null
+set null_pos null
+write -1 cell1 0
+write -1 cell1 1
+write 64 cell1 2
+write 0 cell1 3
+op add ___stackframe_forward @counter 1
+jump 38 always x 0
+jump 24 greaterThanEq __mxstep 0
+end
+getlink __curptrblock __stackframe_block
+jump 37 lessThanEq __step 0
+read __block __curptrblock 2
+op sub __mxstep __block __stackframe_pos
+jump 32 greaterThanEq __step __mxstep
+op add __stackframe_pos __stackframe_pos __step
+set __step 0
+jump 37 always x 0
+read __stackframe_block __curptrblock 1
+op sub __step __step __mxstep
+op add __step __step 1
+set __stackframe_pos 4
+jump 22 always x 0
+set @counter __stackpos
+op add ___stackframe_backward @counter 1
+jump 55 always x 0
+jump 42 greaterThanEq __mxstep 0
+end
+getlink __curptrblock __stackframe_block
+jump 54 lessThanEq __step 0
+op sub __mxstep __stackframe_pos 4
+jump 49 greaterThan __step __mxstep
+op sub __stackframe_pos __stackframe_pos __step
+set __step 0
+jump 54 always x 0
+read __stackframe_block __curptrblock 0
+op sub __step __step __mxstep
+getlink __curptrblock __stackframe_block
+read __stackframe_pos __curptrblock 4
+jump 40 always x 0
+set @counter __stackpos
+op add _fib @counter 1
+jump 186 always x 0
+set g:.f:fib.__preserved_stackpos __stackpos
+set __builtin_return_pos 135
+op add _fib__builtin_mem @counter 1
+set __set_stackpos true
+jump 67 equal __set_stackpos true
+set __step 7
+set __internal_stackpos __stackpos
+op add __stackpos @counter 1
+set @counter ___stackframe_backward
+set __stackpos __internal_stackpos
+set g:.f:fib.x.__pointer_block __stackframe_block
+set g:.f:fib.x.__pointer_pos __stackframe_pos
+set __step 1
+set __internal_stackpos __stackpos
+op add __stackpos @counter 1
+set @counter ___stackframe_forward
+set __stackpos __internal_stackpos
+set g:.f:fib.__stackpos.__pointer_block __stackframe_block
+set g:.f:fib.__stackpos.__pointer_pos __stackframe_pos
+set __step 1
+set __internal_stackpos __stackpos
+op add __stackpos @counter 1
+set @counter ___stackframe_forward
+set __stackpos __internal_stackpos
+set g:.f:fib.b:1.__tempsym_0.__pointer_block __stackframe_block
+set g:.f:fib.b:1.__tempsym_0.__pointer_pos __stackframe_pos
+set __step 1
+set __internal_stackpos __stackpos
+op add __stackpos @counter 1
+set @counter ___stackframe_forward
+set __stackpos __internal_stackpos
+set g:.f:fib.b:1.__tempsym_1.__pointer_block __stackframe_block
+set g:.f:fib.b:1.__tempsym_1.__pointer_pos __stackframe_pos
+set __step 1
+set __internal_stackpos __stackpos
+op add __stackpos @counter 1
+set @counter ___stackframe_forward
+set __stackpos __internal_stackpos
+set g:.f:fib.b:1.__tempsym_2.__pointer_block __stackframe_block
+set g:.f:fib.b:1.__tempsym_2.__pointer_pos __stackframe_pos
+set __step 1
+set __internal_stackpos __stackpos
+op add __stackpos @counter 1
+set @counter ___stackframe_forward
+set __stackpos __internal_stackpos
+set g:.f:fib.b:1.__tempsym_3.__pointer_block __stackframe_block
+set g:.f:fib.b:1.__tempsym_3.__pointer_pos __stackframe_pos
+set __step 1
+set __internal_stackpos __stackpos
+op add __stackpos @counter 1
+set @counter ___stackframe_forward
+set __stackpos __internal_stackpos
+set g:.f:fib.b:1.__tempsym_4.__pointer_block __stackframe_block
+set g:.f:fib.b:1.__tempsym_4.__pointer_pos __stackframe_pos
+set __step 1
+set __internal_stackpos __stackpos
+op add __stackpos @counter 1
+set @counter ___stackframe_forward
+set __stackpos __internal_stackpos
+jump 120 equal __set_stackpos false
+getlink __curb g:.f:fib.__stackpos.__pointer_block
+write g:.f:fib.__preserved_stackpos __curb g:.f:fib.__stackpos.__pointer_pos
+jump 134 always x 0
+getlink __curb g:.f:fib.__stackpos.__pointer_block
+read g:.f:fib.__preserved_stackpos __curb g:.f:fib.__stackpos.__pointer_pos
+getlink __curb g:.f:fib.x.__pointer_block
+read g:.f:fib.x __curb g:.f:fib.x.__pointer_pos
+getlink __curb g:.f:fib.b:1.__tempsym_0.__pointer_block
+read g:.f:fib.b:1.__tempsym_0 __curb g:.f:fib.b:1.__tempsym_0.__pointer_pos
+getlink __curb g:.f:fib.b:1.__tempsym_1.__pointer_block
+read g:.f:fib.b:1.__tempsym_1 __curb g:.f:fib.b:1.__tempsym_1.__pointer_pos
+getlink __curb g:.f:fib.b:1.__tempsym_2.__pointer_block
+read g:.f:fib.b:1.__tempsym_2 __curb g:.f:fib.b:1.__tempsym_2.__pointer_pos
+getlink __curb g:.f:fib.b:1.__tempsym_3.__pointer_block
+read g:.f:fib.b:1.__tempsym_3 __curb g:.f:fib.b:1.__tempsym_3.__pointer_pos
+getlink __curb g:.f:fib.b:1.__tempsym_4.__pointer_block
+read g:.f:fib.b:1.__tempsym_4 __curb g:.f:fib.b:1.__tempsym_4.__pointer_pos
+set @counter __builtin_return_pos
+op add _fib__builtin_prsv @counter 1
+jump 150 always x 0
+getlink __curb g:.f:fib.x.__pointer_block
+write g:.f:fib.x __curb g:.f:fib.x.__pointer_pos
+getlink __curb g:.f:fib.b:1.__tempsym_0.__pointer_block
+write g:.f:fib.b:1.__tempsym_0 __curb g:.f:fib.b:1.__tempsym_0.__pointer_pos
+getlink __curb g:.f:fib.b:1.__tempsym_1.__pointer_block
+write g:.f:fib.b:1.__tempsym_1 __curb g:.f:fib.b:1.__tempsym_1.__pointer_pos
+getlink __curb g:.f:fib.b:1.__tempsym_2.__pointer_block
+write g:.f:fib.b:1.__tempsym_2 __curb g:.f:fib.b:1.__tempsym_2.__pointer_pos
+getlink __curb g:.f:fib.b:1.__tempsym_3.__pointer_block
+write g:.f:fib.b:1.__tempsym_3 __curb g:.f:fib.b:1.__tempsym_3.__pointer_pos
+getlink __curb g:.f:fib.b:1.__tempsym_4.__pointer_block
+write g:.f:fib.b:1.__tempsym_4 __curb g:.f:fib.b:1.__tempsym_4.__pointer_pos
+set @counter __builtin_return_pos
+jump 153 greaterThanEq g:.f:fib.x 3
+set __return g:.f:fib.x
+jump 180 always x 0
+op add __builtin_return_pos @counter 1
+set @counter _fib__builtin_prsv
+op sub g:.f:fib.b:1.__tempsym_0 g:.f:fib.x 1
+set g:.f:fib.x g:.f:fib.b:1.__tempsym_0
+set __internal_stackpos __stackpos
+op add __stackpos @counter 1
+set @counter _fib
+set __stackpos __internal_stackpos
+set __set_stackpos false
+op add __builtin_return_pos @counter 1
+set @counter _fib__builtin_mem
+set g:.f:fib.b:1.__tempsym_1 __return
+op add __builtin_return_pos @counter 1
+set @counter _fib__builtin_prsv
+op sub g:.f:fib.b:1.__tempsym_2 g:.f:fib.x 2
+set g:.f:fib.x g:.f:fib.b:1.__tempsym_2
+set __internal_stackpos __stackpos
+op add __stackpos @counter 1
+set @counter _fib
+set __stackpos __internal_stackpos
+set __set_stackpos false
+op add __builtin_return_pos @counter 1
+set @counter _fib__builtin_mem
+set g:.f:fib.b:1.__tempsym_3 __return
+op add g:.f:fib.b:1.__tempsym_4 g:.f:fib.b:1.__tempsym_1 g:.f:fib.b:1.__tempsym_3
+set __return g:.f:fib.b:1.__tempsym_4
+jump 180 always x 0
+set __step 7
+set __internal_stackpos __stackpos
+op add __stackpos @counter 1
+set @counter ___stackframe_backward
+set __stackpos __internal_stackpos
+set @counter g:.f:fib.__preserved_stackpos
+op add _main @counter 1
+jump 197 always x 0
+set g:.f:main.__preserved_stackpos __stackpos
+set g:.f:fib.x 5
+set g:.f:main.__preserved_stackpos __stackpos
+op add __stackpos @counter 1
+set @counter _fib
+set __stackpos g:.f:main.__preserved_stackpos
+set g:.f:main.b:3.__tempsym_0 __return
+print g:.f:main.b:3.__tempsym_0
+end
+set __stackframe_block cell1_id
+set __stackframe_pos 4
+set __internal_stackpos __stackpos
+op add __stackpos @counter 1
+set @counter _main
+set __stackpos __internal_stackpos
+@

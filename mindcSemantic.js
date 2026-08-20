@@ -12,8 +12,9 @@ export class VariableLinker {
 	/**
 	 * 
 	 * @param {string} variableName 
+	 * @param {SymbolEntry} entry
 	 */
-	constructor(variableName) {
+	constructor(variableName, entry) {
 		/**
 		 * @type {VariableLinker[]}
 		 */
@@ -33,6 +34,7 @@ export class VariableLinker {
 		 */
 		this.name = variableName;
 		this.rejecting = false;
+		this.entry = entry;
 	}
 
 	/**
@@ -172,7 +174,7 @@ export class SymbolEntry {
         this.isDead = false;
 
 		// Optimizer tag used now
-		this.variableReferrer = new VariableLinker(name);
+		this.variableReferrer = new VariableLinker(name, this);
     }
 	
 	// 标记为常量

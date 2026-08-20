@@ -66,6 +66,7 @@ export class Optimizer extends ASTVisitor {
         this.errors = [];
         this.warnings = [];
 		this.inlinedScopeId = 0;
+		this.inlineCounter = 0;
         
         // 优化状态
         this.functionCallGraph = new Map();
@@ -266,7 +267,7 @@ export class Optimizer extends ASTVisitor {
 		}
 		varRef = varRef.duplicate();
 		varRef.name = targetName;
-		varRef.variableReferrer = new VariableLinker(targetName);
+		varRef.variableReferrer = new VariableLinker(targetName, varRef);
 		targetScope.addSymbol(varRef);
 		const scopePath = scope.getPath();
 		const targetPath = targetScope.getPath();
@@ -2334,7 +2335,10 @@ export class Optimizer extends ASTVisitor {
 				// 变量没有确定的最终值，不能完全优化
 				return false;
 			}
-			varFinalValues.set(varName, finalValue);
+			if (scopePath == loopNode.scope.getPath()) {
+				// Inside variables are ignored
+				varFinalValues.set(varName, finalValue);
+			}
 			
 			// 检查变量的使用情况
 			const usage = variableUses.get(varName);
@@ -2907,8 +2911,10 @@ export class Optimizer extends ASTVisitor {
 					const target = symbol.variableReferrer.getName();
 					console.log(`Replaced identifier for shrunk expression as:`,target,`at:`,node);
 					node.setAttribute('originalName', node.name);
+					node.setAttribute('originalSymbol', symbol);
 					// node.setAttribute('performedReplacement', target);
 					node.name = target;
+					node.symbol = symbol.variableReferrer.parent.entry ?? node.symbol;
 					// node.setAttribute('candidateRemoval', 2);
 					// symbol.variableReferrer.registerCandidate(node);
 					this.modified = true;				// This creates only candidate removal
@@ -4430,9 +4436,9 @@ export class Optimizer extends ASTVisitor {
 					// To prepare for returning, the corresponding content must be put elsewhere
 					targetNode.statements.splice(index, 1);
 					// For returning, create a special symbol
-					returnerName = `${funcNode.name}:@:${this.inlinedScopeId}`;
+					returnerName = `${funcNode.name}:@${this.inlineCounter++}:${this.inlinedScopeId}`;
 					const returnerSymbol = new SymbolEntry(returnerName, callNode.dataType, tmpScope, 'variable', null, callNode.dataType.size ?? 1);
-					tmpScope.addSymbol(returnerSymbol);
+					tmpScope.parent.addSymbol(returnerSymbol);	// So that the code block can have access
 					/**
 					 * @todo Create an identifier for returning...
 					 */

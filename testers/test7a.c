@@ -20,5 +20,6 @@ int main() {
 			w += unused();
 		}
 	}
+	print(n,w,t,q,i,j);
 	return 0;	
 } 
