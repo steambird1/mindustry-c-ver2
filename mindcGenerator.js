@@ -547,7 +547,6 @@ export class CodeGenerator extends ASTVisitor {
 	operatesRead(instruction, returner) {
 		return this.operatesWith(instruction.raw_replace_all('op_read', '{opw}'), returner);
 	}
-
 	/**
 	 * Do **NOT** use this with `visitAndRead()` or it will return unexpected results.
 	 * This function perform re-reading of return results to ensure correctness for operations
@@ -1762,9 +1761,36 @@ export class CodeGenerator extends ASTVisitor {
 					varResult
 				));
 				*/
+
+				const referrer = typeName => typeName.slice(0, typeName.length - 2);
+				const special = ['item_t', 'liquid_t', 'unit_t', 'block_t'];
+				const categorize = single => {
+					if (single.dataType) {
+						if (this.semantic.isTypeCompatibleForAny(single.dataType, special, true)) {
+							return 1;
+						} else if (this.semantic.isTypeCompatible(single.dataType, 'content_t', true)) {
+							return 2;
+						}
+					}
+					return 0;
+				};
+				const extra = new Instruction();
+				let lret = '{op_r0}', rret = '{op_r1}';
+				const lcat = categorize(left), rcat = categorize(right);
+				const setExtra = single => {
+					const tmpVar = this.getTempVariable();
+					extra.concat(InstructionBuilder.lookup(referrer(left.dataType.name), tmpVar, single));
+					return tmpVar;
+				};
+				if (lcat != rcat) {
+					if (lcat == 1) lret = setExtra(lret);
+					if (rcat == 1) rret = setExtra(rret);
+				}
+
 				result.concat_returns(this.operates(
 					this.operatesReads([left, right], new Instruction([
-						InstructionBuilder.op(operatorTranslation.get(node.operator), '{op}', '{op_r0}', '{op_r1}')
+						extra,
+						InstructionBuilder.op(operatorTranslation.get(node.operator), '{op}', lret, rret)
 					])),
 					varResult
 				));
