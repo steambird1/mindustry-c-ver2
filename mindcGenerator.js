@@ -1894,23 +1894,7 @@ export class CodeGenerator extends ASTVisitor {
 		} else {
 			// struct will be copied through memcpy.
 			// Note that arrays or pointers are "byref".
-			if (node.right.type === 'InitializerList') {
-				// Pre-evaluated pointer with initializer list, perform something like memcpy
-				let result = new Instruction();
-				const leftPointer = this.processLValGetter(node.left, true, true);	// Because we want the array information
-				node.setAttribute('generatedLVal', leftPointer);
-				const listData = this.visitAndRead(node.right, {
-					assignmentTarget: leftPointer.instructionReturn
-				});
-				result.concat(leftPointer);
-				result.concat(listData);
-				result.concat(this.memory.outputMemcpyCall(leftPointer.instructionReturn, listData.instructionReturn,
-					node.right.dataType.size ?? 0, this.functionManagement
-				));
-				result.setAttribute('isPointer', true);	// Must be a pointer...
-				result.instructionReturn = leftPointer.instructionReturn;
-				return result;
-			} else if (node.right.dataType && (node.right.dataType.kind === 'struct' || node.right.dataType.kind === 'union')) {
+			if (node.right.dataType && (node.right.dataType.kind === 'struct' || node.right.dataType.kind === 'union')) {
 				const leftPointer = this.processLValGetter(node.left, true, true);
 				const structData = this.visitAndRead(node.right, {
 					assignmentTarget: leftPointer.instructionReturn
@@ -1926,6 +1910,30 @@ export class CodeGenerator extends ASTVisitor {
 						structData.instructionReturn));
 				}
 				
+			} else if (node.right.type === 'InitializerList') {
+				// Pre-evaluated pointer with initializer list, perform something like memcpy
+				let result = new Instruction();
+				const leftPointer = this.processLValGetter(node.left, true, true);	// Because we want the array information
+				node.setAttribute('generatedLVal', leftPointer);
+				const listData = this.visitAndRead(node.right, {
+					assignmentTarget: leftPointer.instructionReturn
+				});
+				result.concat(leftPointer);
+				result.concat(listData);
+				if (node.left.dataType && node.left.dataType.kind === 'pointer') {
+					const lret = leftPointer.instructionReturn, rret = listData.instructionReturn;
+					result.concat(new Instruction([
+						InstructionBuilder.set(`${lret}_block`, `${rret}_block`),
+						InstructionBuilder.set(`${lret}_pos`, `${rret}_pos`)
+					]));
+				} else {
+					result.concat(this.memory.outputMemcpyCall(leftPointer.instructionReturn, listData.instructionReturn,
+						node.right.dataType.size ?? 0, this.functionManagement
+					));
+				}
+				result.setAttribute('isPointer', true);	// Must be a pointer...
+				result.instructionReturn = leftPointer.instructionReturn;
+				return result;
 			} else if (node.left.dataType && node.right.dataType && !this.semantic.isSameType(node.left.dataType, node.right.dataType)) {
 				if (special.includes(node.right.dataType.name) && node.left.dataType.name === 'content_t') {
 					value = this.implicitToContent(node.right, referrer(node.right.dataType.name));

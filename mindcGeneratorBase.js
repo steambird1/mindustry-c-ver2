@@ -644,10 +644,11 @@ export class FunctionRegisterer {
 	/**
 	 * Allocating heap memory for function symbols.
 	 * @param {string} functionName 
-	 * @param {boolean | null} setStackpos 
+	 * @param {boolean | null} [setStackpos=true] 
+	 * @param {boolean} [noRecursive=false] 
 	 * @returns {Instruction}
 	 */
-	getFunctionStackAssignment(functionName, setStackpos = true) {
+	getFunctionStackAssignment(functionName, setStackpos = true, noRecursive = false) {
 		const dynamicSetStackpos = (setStackpos === null);
 		/**
 		 * @type {functionInfo}
@@ -721,7 +722,7 @@ export class FunctionRegisterer {
 			heapPreparation.concat(outResetStackpos());
 			heapPreparation.concat(new InstructionReferrer(terminate, 'set_stackpos_term'));
 		} else if (setStackpos) {
-			heapPreparation.concat(outSetStackpos());
+			if (!noRecursive) heapPreparation.concat(outSetStackpos());
 		} else {
 			heapPreparation.concat(outResetStackpos());
 		}
@@ -849,7 +850,7 @@ export class FunctionRegisterer {
 						result.concat(new InstructionReferrer(skipPrsv, 'noprsv'));
 						return result;
 					})()
-				) : this.getFunctionStackAssignment(name, true);
+				) : this.getFunctionStackAssignment(name, true, true);
 			
 			connector.concat(heapPreparation);
 			connector.concat(func.body);
