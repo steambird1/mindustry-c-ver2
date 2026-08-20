@@ -4556,7 +4556,9 @@ export class Optimizer extends ASTVisitor {
 								stmt.argument.parent = returnAssigner;
 								returnAssignerIdent.parent = returnAssigner;
 								returnAssignerIdent.symbol = returnerIdent.symbol;
+								returnAssignerIdent.dataType = returnerIdent.symbol.extractType();
 								returnAssigner.symbol = returnerIdent.symbol;
+								returnAssigner.dataType = returnerIdent.symbol.extractType();
 								actualStmt = returnAssigner;
 								
 								// Not that easy. In fact, you have to migrate the whole 'parentNode'...

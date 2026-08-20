@@ -268,12 +268,14 @@ export class SymbolEntry {
 		if (this.kind !== 'function') {
 			// Let it crash otherwise.
 			resultType = this.myType().duplicate();
+			// if (resultType.isTypeInfo) {
 			if (this.isAuto || this.isAutoDevice) resultType.qualifiers.push('auto');
 			if (this.isRegister) resultType.qualifiers.push('register');
-			if (this.isConst || this.type.isConst) resultType.qualifiers.push('const');
-			if (this.isVolatile || this.type.isVolatile) resultType.qualifiers.push('volatile');
+			if (this.isConst || resultType.isConst()) resultType.qualifiers.push('const');
+			if (this.isVolatile || resultType.isVolatile()) resultType.qualifiers.push('volatile');
 			if (this.isExtern) resultType.qualifiers.push('extern');
 			if (this.isStatic) resultType.qualifiers.push('static');
+			// }	// I guess it should crash otherwise. If there's no judgment, it will
 		} else {
 			resultType = new TypeInfo(this.name, 'function', 1);
 			resultType.functionTo = this;
