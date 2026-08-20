@@ -191,6 +191,7 @@ export class SymbolEntry {
 	/**
 	 * 
 	 * @returns {TypeInfo | null | {returnType: string; parameters: any[]}}
+	 * @deprecated Use it only when you don't care about memory attributes.
 	 */
 	myType() {
 		if (!this.type) return null;
@@ -261,13 +262,20 @@ export class SymbolEntry {
 		/**
 		 * @type {TypeInfo}
 		 */
-		let resultType = this.myType().duplicate();
-		if (this.isAuto || this.isAutoDevice) resultType.qualifiers.push('auto');
-		if (this.isRegister) resultType.qualifiers.push('register');
-		if (this.isConst || this.type.isConst) resultType.qualifiers.push('const');
-		if (this.isVolatile || this.type.isVolatile) resultType.qualifiers.push('volatile');
-		if (this.isExtern) resultType.qualifiers.push('extern');
-		if (this.isStatic) resultType.qualifiers.push('static');
+		let resultType;
+		if (this.kind !== 'function') {
+			// Let it crash otherwise.
+			resultType = this.myType().duplicate();
+			if (this.isAuto || this.isAutoDevice) resultType.qualifiers.push('auto');
+			if (this.isRegister) resultType.qualifiers.push('register');
+			if (this.isConst || this.type.isConst) resultType.qualifiers.push('const');
+			if (this.isVolatile || this.type.isVolatile) resultType.qualifiers.push('volatile');
+			if (this.isExtern) resultType.qualifiers.push('extern');
+			if (this.isStatic) resultType.qualifiers.push('static');
+		} else {
+			resultType = new TypeInfo(this.name, 'function', 1);
+			resultType.functionTo = this;
+		}
 		return resultType;
 	}
 
@@ -538,8 +546,12 @@ export class TypeInfo {
 			result += `[${this.arraySize ?? ''}]`;
 		}
 		if (this.kind === 'function') {
-			result += '{' + this.functionTo.type.returnType.toString() + ' || ';
-			result += (this.functionTo.type.parameters.map(param => (param.type.toString()))).join(',') + '}';
+			if (this.functionTo) {
+				result += '{' + this.functionTo.type.returnType.toString() + ' || ';
+				result += (this.functionTo.type.parameters.map(param => (param.type.toString()))).join(',') + '}';
+			} else {
+				result = `{ ??${this.name} }`;
+			}
 		}
         return result;
     }
@@ -1649,8 +1661,8 @@ export class SemanticAnalyzer extends ASTVisitor {
         node.symbol = symbol; // 将符号关联到节点
 
         // 设置节点类型
-        if (symbol.kind === 'variable' || symbol.kind === 'parameter') {
-            node.dataType = this.getTypeInfo(symbol.type.type);
+        if (symbol.kind !== 'type') {
+            node.dataType = this.getTypeInfo(symbol.extractType());
         }
     }
 
