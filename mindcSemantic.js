@@ -2,8 +2,11 @@ import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 	VariableDeclarationNode, CastExpression, ConditionalExpressionNode, NumericLiteralNode, StringLiteralNode,
 	CharacterLiteralNode, NullLiteralNode, ASTVisitor, __convert, objectList,
 	liquidList, unitList, buildingList,
-	InitializerListNode
+	InitializerListNode,
+	TypeSpecifierNode,
+	DeclaratorNode
  } from "./mindcBase.js";
+import { Instruction, MemoryBlockInfo } from "./mindcGeneratorBase.js";
 
 export class VariableLinker {
 	/**
@@ -121,6 +124,9 @@ export class SymbolEntry {
         this.writeCount = 0; // 写入次数
 		// Unused end
 	
+		/**
+		 * @type {MemoryBlockInfo?}
+		 */
         this.memoryLocation = null;
 		this.accessThroughPointer = false;	// In-memory variable, must be accessed through memory blocks
 											// THIS ALSO MEANS THAT: you can and should always dereference it to get the real value
@@ -132,6 +138,11 @@ export class SymbolEntry {
 
 		this.extraMemoryLocation = null;	// For variables having both access-through and implement-as, this will be the memory space where their value is placed.
 		this.isExtraNear = false;			// This should be written by and only by code generator
+
+		/**
+		 * @type { {stackSymbols: SymbolEntry[], regStructMem: Map<string, string> }? }
+		 */
+		this.memberHandler = null;
 
 		this.isAuto = false;
 		this.isAutoDevice = false;	// Must be manually done!
@@ -277,6 +288,18 @@ export class SymbolEntry {
 		 */
 		let checkScope = s => (s ? (s == scope || checkScope(s.parent)) : false);
 		return checkScope(this.scope);
+	}
+
+	/**
+	 * @returns {string?}
+	 */
+	getFunctionRegion() {
+		const search = scope => {
+			if (scope.type === 'f') return scope.astNode.name;
+			else if (!scope.parent) return null;
+			else return search(scope);
+		};
+		return this.scope ? search(this.scope) : null;
 	}
 }
 
@@ -971,7 +994,8 @@ export class SemanticAnalyzer extends ASTVisitor {
         
         if (defNode.members && defNode.members.length > 0) {
             defNode.members.forEach(member => {
-                const memberTypeName = this.getTypeNameFromTypeNode(member.type);
+                // const memberTypeName = this.getTypeNameFromTypeNode(member.type);
+				const memberTypeName = this.getTypeNameFromDeclarator(member);
                 const memberType = this.getTypeInfo(memberTypeName);
                 
                 if (!memberType) {
@@ -1520,6 +1544,21 @@ export class SemanticAnalyzer extends ASTVisitor {
 		node.dataType = this.typeTable.get('null_t');
 	}
 
+	/**
+	 * Get type name from a declarator, not only a type node.
+	 * NOTE: CANNOT be a function.
+	 * 
+	 * @param {DeclaratorNode} decl 
+	 */
+	getTypeNameFromDeclarator(decl) {
+		const simpleType = this.getTypeNameFromTypeNode(decl.type);
+		let suffix = '';
+		if (decl.arrayDimensions && decl.arrayDimensions.length) {
+			suffix = ' ' + decl.arrayDimensions.map(dim => `[${dim.value}]`).join('');
+		}
+		return simpleType + suffix;
+	}
+
 	// 5th conversation
 	// 新增辅助方法：从类型节点中提取类型名称
 	// 7th (1 Dec)
@@ -1527,6 +1566,11 @@ export class SemanticAnalyzer extends ASTVisitor {
 	// Priority adjusted manually !!!
 	// Also add pointer dereference manually
 	// This function doesn't case const qualifier
+	/**
+	 * 
+	 * @param {TypeSpecifierNode} typeNode 
+	 * @returns 
+	 */
     getTypeNameFromTypeNode(typeNode) {
         if (!typeNode) return null;
         
@@ -1864,6 +1908,19 @@ export class SemanticAnalyzer extends ASTVisitor {
         const member = node.getChild(1);
         const computed = node.getAttribute('computed');
 		const operator = node.getAttribute('operator'); // '.' 或 '->'
+
+		const regOffset = (offset, parent = null) => {
+			if (object.type === 'MemberExpression') {
+				// this.visit(object);	// ? should have visited !!
+				if (typeof object.getAttribute('totalMemberOffset') === 'number') {
+					node.setAttribute('totalMemberOffset', object.getAttribute('totalMemberOffset') + offset);
+					node.setAttribute('totalSource', object.hasAttribute('totalSource') ? object.getAttribute('totalSource') : object);
+				}
+			} else {
+				node.setAttribute('totalMemberOffset', offset);
+				node.setAttribute('totalSource', object);
+			}
+		};
         
         this.visit(object);
         const objectType = this.getExpressionType(object);
@@ -1900,6 +1957,10 @@ export class SemanticAnalyzer extends ASTVisitor {
             if (indexType && !this.isTypeCompatible(indexType, 'int')) {
                 this.addWarning(`Array index should be of intergal type`, member.location);
             }
+			if (member.type === 'NumericLiteral' && member.value) {
+				const objectSize = objectType.extractSingle().size ?? 1;
+				regOffset(objectSize * member.value);
+			}
             
             node.dataType = objectType.extractSingle();
 			return;
@@ -1959,15 +2020,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 		// 设置节点属性，便于代码生成阶段使用
 		node.setAttribute('memberOffset', memberInfo.offset);
 		node.setAttribute('memberName', memberName);
-		
-		if (object.type === 'MemberExpression') {
-			this.visit(object);
-			if (typeof object.getAttribute('totalMemberOffset') === 'number') {
-				node.setAttribute('totalMemberOffset', object.getAttribute('totalMemberOffset') + memberInfo.offset);
-			}
-		} else {
-			node.setAttribute('totalMemberOffset', memberInfo.offset);
-		}
+		regOffset(memberInfo.offset);
 
 		// 如果是通过指针访问，记录解引用信息
 		if (operator === '->') {

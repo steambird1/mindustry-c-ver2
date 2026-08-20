@@ -83,9 +83,16 @@ export class CodeGenerator extends ASTVisitor {
 			if (this.memory.memoryBlocks.length == 0) {
 				noMemory = true;
 			}
-			this.recuriveInfo = this.findRecursiveFunctions(this.functionCallGraph);
+			this.recursiveInfo = this.findRecursiveFunctions(this.functionCallGraph);
 			this.currentScope = this.semantic.globalScope;
-			if (ast.scope) this.processHeapMemory(ast.scope);
+			/**
+			 * @type {SymbolEntry[]}
+			 */
+			let globalRegs = [];
+			if (ast.scope) {
+				globalRegs = this.processHeapMemory(ast.scope);
+				// Configure these global ones by writing into results
+			}
 			else this.addWarning('Program has no global scope');
 			/*
 			this.semantic.typeTable.forEach(elem => {
@@ -112,6 +119,15 @@ export class CodeGenerator extends ASTVisitor {
 				this.memory.forwarding(this.RValueMax);
 				result.concat(this.functionManagement.getSystemInitializer(this.memory));
 			}
+			
+			globalRegs.forEach(symbol => {
+				symbol.memberHandler.stackSymbols.forEach(tmps => {
+					const tmpAssembly = tmps.getAssemblySymbol();
+					const ref = symbol.memberHandler.regStructMem.get(tmpAssembly);
+					result.concat(tmps.memoryLocation.getAssignmentInstruction(ref));
+				});
+			});
+
 			if (mainSymbol) {
 				result.concat(this.functionManagement.getFunctionCall('main', new Map(), this.memory, true));
 			} else {
@@ -141,21 +157,30 @@ export class CodeGenerator extends ASTVisitor {
 	 * accessThroughPointer - This value is stored in heap memory area (e.g. volatile int)
 	 * implementAsPointer - This value is a pointer
 	 * (These can be used simultaneously)
+	 * 
+	 * @returns {SymbolEntry[]}
 	 */
-	processHeapMemory(scope, staticAllocOnly = false, mustAlloc = false, insideFunctionName = "") {
+	 processHeapMemory(scope, staticAllocOnly = false, mustAlloc = false, insideFunctionName = "") {
 		
 		if (scope.astNode && scope.astNode.type === 'FunctionDeclaration') {
-			if (this.recuriveInfo.has(scope.astNode.name)) {
+			if (this.recursiveInfo.has(scope.astNode.name)) {
 				mustAlloc = true;
 			}
 		}
-			
-		scope.getAllSymbols().forEach(
-			/**
+		/**
+		 * @type {SymbolEntry[]}
+		 */
+		let regStructHandling = [];
+		
+		// let extraCommand = new Instruction([]);
+		const handler = /**
 			 * 
 			 * @param {SymbolEntry} symbol 
 			 */
 			symbol => {
+
+			const doImmediateAlloc = !staticAllocOnly || symbol.isStatic || symbol.isVirtualSymbol;
+
 			// Update symbol size information
 			if ((mustAlloc || symbol.isAddressed || symbol.isVolatile) && symbol.kind !== 'function') {
 				/*
@@ -175,11 +200,27 @@ export class CodeGenerator extends ASTVisitor {
 				//case 'struct':	// Not allocating memory space for structures for now
 				case 'parameter':
 				//case 'union':
+					if (symbol.kind === 'parameter') {
+						const funcRegion = symbol.getFunctionRegion();
+						if (!this.recursiveInfo.has(funcRegion)) {
+							break;	// Not necessary!
+						}
+					}
 					const symbolType = symbol.myType();
 					symbol.size = symbolType.size;
 					switch (symbolType.kind) {
 						case 'struct':
 						case 'union': 
+							// Notice: configuring them as virtual symbols right away causes errors!
+							const { stackSymbols, singular, regStructMem } = this.handleStructExtra([symbol], scope, false);
+							stackSymbols.forEach(symb => {
+								// Assign memory space for these symbols first (as long as it is necessary)
+								handler(symb);
+							});
+							if (doImmediateAlloc) symbol.memberHandler = { stackSymbols, regStructMem };
+							// Otherwise the allocation is NOT handled until reaching the top of the function call.
+
+							regStructHandling.push(symbol);
 							break;
 						case 'device':
 						case 'null':
@@ -271,7 +312,7 @@ export class CodeGenerator extends ASTVisitor {
 
 				symbol.needMemoryAllocation = true;
 				// The memory space is otherwise dynamically allocated
-				if (!staticAllocOnly || symbol.isStatic || symbol.isVirtualSymbol) {
+				if (doImmediateAlloc) {
 					// if () {
 					const result = allocator(symbol.size, symbol.isNearPointer, symbol.getAssemblySymbol());
 					if (!result.success) {	// This is actually unused
@@ -295,10 +336,13 @@ export class CodeGenerator extends ASTVisitor {
 					}
 				}
 			}
-		});
+		};
+		scope.getAllSymbols().forEach(symb => void(handler(symb)));
 		scope.children.forEach(child => {
 			this.processHeapMemory(child, true, mustAlloc);
 		});
+
+		return regStructHandling;
 	}
 
 	requireRValueMemory(size) {
@@ -595,6 +639,70 @@ export class CodeGenerator extends ASTVisitor {
 
 	/**
 	 * 
+	 * @param {SymbolEntry[]} symbols 
+	 * @param {Scope} scope
+	 * @param {boolean} [setVirtual=true] 
+	 */
+	handleStructExtra(symbols, scope, setVirtual = true) {
+		/**
+		 * @type {SymbolEntry[]}
+		 */
+		let stackSymbols = [];
+		/**
+		 * @type {Map<string, string>}
+		 */
+		let regStructMem = new Map();
+		let tempSymbolId = 0;
+
+		const recWork =
+			/**
+			 * 
+			 * @param {TypeInfo} symType 
+			 * @param {string} startName 
+			 */ 
+			(symType, startName) => {
+				if (symType && symType.isTypeInfo && symType.isRegStruct()) {
+					symType.members.forEach(
+						/**
+						 * 
+						 * @param {MemberInfo} member 
+						 */
+						member => {
+							if (member.type.isPointerImpl()) {
+								const tmpSymbol = new SymbolEntry(`__rsstack_${tempSymbolId++}`, member.type, scope, 'variable', null, member.type.size);
+								tmpSymbol.isVirtualSymbol = setVirtual;
+
+								regStructMem.set(tmpSymbol.getAssemblySymbol(), `${startName}.${member.name}`);
+								stackSymbols.push(tmpSymbol);
+							} else if (member.type.isRegStruct()) {
+								recWork(member.type, `${startName}.${member.name}`);
+							}
+						}
+					)
+				}
+		};
+
+		symbols.forEach(/**
+				 * 
+				 * @param {SymbolEntry} symbol 
+				 */
+				symbol => {
+				// Symbol values
+					const symType = symbol.myType();
+					if (symType.isTypeInfo) recWork(symType, symbol.getAssemblySymbol());
+			});
+		const singular = new Instruction([]);
+		regStructMem.forEach((value, key) => {
+			singular.concat(new Instruction([
+				InstructionBuilder.set(`${value}_block`, `${key}_block`),
+				InstructionBuilder.set(`${value}_pos`, `${key}_pos`)
+			]))
+		});
+		return { stackSymbols, singular, regStructMem };
+	}
+
+	/**
+	 * 
 	 * @param {ProgramNode} node 
 	 * @returns {Instruction}
 	 */
@@ -609,16 +717,30 @@ export class CodeGenerator extends ASTVisitor {
 				mainSymbol = funcSymbol;
 			}
 			let stackSymbols = [];
-			funcSymbol.owningScope.recursivelyGetAllSymbols().forEach(symbol => {
+			const currentSymbols = funcSymbol.owningScope.recursivelyGetAllSymbols();
+			currentSymbols.forEach(
+				/**
+				 * 
+				 * @param {SymbolEntry} symbol 
+				 */
+				symbol => {
 				// Symbol values
-				if ((symbol.accessThroughPointer || symbol.needMemoryAllocation) && !(symbol.isStatic)) {
-					stackSymbols.push(symbol);
-				}
+					const symType = symbol.myType();
+					if ((symbol.accessThroughPointer || symbol.needMemoryAllocation) && !(symbol.isStatic)) {
+						stackSymbols.push(symbol);
+					}
 			});
-			this.functionManagement.addFunction(func.name, new Instruction(), funcSymbol.owningScope, stackSymbols, func.name === 'main', this.recuriveInfo.has(func.name));
+			const { stackSymbols: extraSymbols, singular, regStructMem } = this.handleStructExtra(currentSymbols);
+			stackSymbols = [...stackSymbols, ...extraSymbols];
+			this.functionManagement.addFunction(func.name, new Instruction(), funcSymbol.owningScope, stackSymbols, func.name === 'main', this.recursiveInfo.has(func.name));
+			/**
+			 * @type {Instruction}
+			 */
 			const funcBody = this.visit(func);	// Note: visit comes first
-			this.functionManagement.functionCollection.get(func.name).body = funcBody;
-			
+			const actualBody = new Instruction([]);
+			actualBody.concat(singular);
+			actualBody.concat(funcBody);
+			this.functionManagement.functionCollection.get(func.name).body = actualBody;
 		});
 		/**
 		 * @type {SymbolEntry[]}
@@ -854,7 +976,7 @@ export class CodeGenerator extends ASTVisitor {
 	 * @remark This function doesn't do registration itself. It simply calls for body information.
 	 */
 	visitFunctionDeclaration(node) {
-		const recursive = this.recuriveInfo.has(node.name);
+		const recursive = this.recursiveInfo.has(node.name);
 		let pushedScope = null;
 		if (node.scope) {
 			pushedScope = this.currentScope;
@@ -1926,21 +2048,36 @@ export class CodeGenerator extends ASTVisitor {
 			);
 		}
 		
+		let objectRoot = node.children[0];	// Will be altered if there's total offset
+
 		// TODO: WHAT IF IT IS A 'AccessThroughPointer'?
-		const leftsideOrigin = this.processLValGetter(node.children[0], true, true); // Thus it returns a duplicated version of address
+		let leftsideOrigin = this.processLValGetter(objectRoot, true, true); // Thus it returns a duplicated version of address
 		const isNearPointerHere = leftsideOrigin.getAttribute('isNearPointer') ? true : false;
 		const isRegStructHere = leftsideOrigin.getAttribute('isRegStruct') ? true : false;
-		finalResult.concat(leftsideOrigin);
-		if (node.getAttribute('computed')) {
-			index = this.visitAndRead(node.children[1]);	// Simple calculation
-			finalResult.concat(index);				// Make such visit first!!
-		}
 		if (isRegStructHere) {
+			/**
+			 * @type {TypeInfo?}
+			 */
+			const nodeType = node.dataType;
+
+			finalResult.concat(leftsideOrigin);
 			finalResult.instructionReturn = `${leftsideOrigin.instructionReturn}.${node.children[1].name}`;
 			finalResult.setAttribute('isNearPointer', isNearPointerHere); // inherit the feature
 			finalResult.setAttribute('isRegStruct', isRegStructHere);
-			return finalResult;
+			return finalResult.set_returns_type(nodeType);
 		} 
+		// Memory access, from then on
+		let knownTotalOffset = null;
+		if (node.hasAttribute('totalSource') && node.hasAttribute('totalMemberOffset')) {
+			objectRoot = node.getAttribute('totalSource');
+			leftsideOrigin = this.processLValGetter(objectRoot, true, true);
+			knownTotalOffset = node.getAttribute('totalMemberOffset');
+		} else if (node.getAttribute('computed')) {
+			index = this.visitAndRead(node.children[1]);	// Simple calculation
+			finalResult.concat(index);				// Make such visit first!!
+		}
+		finalResult.concat(leftsideOrigin);	// Deferred evaluation
+
 		const finalSymbol = this.getTempSymbol(this.semantic.getTypeInfo('null_t*'));
 		let leftsideDuplicate;	// Then perform setter
 		if (this.guaranteeTemporarySymbolReg) {
@@ -1967,7 +2104,9 @@ export class CodeGenerator extends ASTVisitor {
 			 * @type {number | string}
 			 */
 			let resultIndex;
-			if (ratio > 1) {
+			if (knownTotalOffset) {
+				resultIndex = knownTotalOffset;
+			} else if (ratio > 1) {
 				if (node.children[1].type === 'NumericLiteral') {
 					resultIndex = ratio * node.children[1].value;
 				} else {
@@ -1983,7 +2122,8 @@ export class CodeGenerator extends ASTVisitor {
 			// Struct/union: seek member inside it. Already calculated by SEM.
 			// Also it is guaranteed that this is a member
 			
-			finalResult.concat(this.memory.outputPointerForwardCall(node.getAttribute('memberOffset'), leftsideDuplicate, this.functionManagement, false, true, isNearPointerHere));
+			finalResult.concat(this.memory.outputPointerForwardCall(knownTotalOffset ?? node.getAttribute('memberOffset'), 
+				leftsideDuplicate, this.functionManagement, false, true, isNearPointerHere));
 			finalResult.instructionReturn = leftsideDuplicate;
 			
 		}
@@ -2281,7 +2421,7 @@ export class CodeGenerator extends ASTVisitor {
 	visitFunctionCall(node) {
 		const referrer = typeName => typeName.slice(0, typeName.length - 2);
 		const special = ['item_t', 'liquid_t', 'unit_t', 'block_t'];
-		let recursive = this.recuriveInfo.has(this.currentFunction);
+		let recursive = this.recursiveInfo.has(this.currentFunction);
 		let result = new Instruction();
 		// Prepare for all parameters
 		/**
@@ -2938,7 +3078,7 @@ export class CodeGenerator extends ASTVisitor {
 			this.currentScope.addSymbol(symbol);
 		}
 
-		if (this.recuriveInfo.has(this.currentFunction)) {
+		if (this.recursiveInfo.has(this.currentFunction)) {
 			//symbol.accessThroughPointer = true;
 			//symbol.needMemoryAllocation = true;
 			symbol.isRecursiveSymbol = true;
