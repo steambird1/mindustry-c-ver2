@@ -2097,8 +2097,9 @@ export class CodeGenerator extends ASTVisitor {
 			finalResult.concat(leftsideOrigin);
 			finalResult.instructionReturn = `${leftsideOrigin.instructionReturn}.${node.children[1].name}`;
 			finalResult.setAttribute('isNearPointer', isNearPointerHere); // inherit the feature
-			finalResult.setAttribute('isRegStruct', isRegStructHere);
-			return finalResult.set_returns_type(nodeType);
+			finalResult.setAttribute('isFromRegStruct', isRegStructHere);
+			finalResult.set_returns_type(nodeType);
+			return finalResult;
 		} 
 		// Memory access, from then on
 		let knownTotalOffset = null;
@@ -2165,9 +2166,9 @@ export class CodeGenerator extends ASTVisitor {
 			finalResult.concat(this.generateSymbolWrite(finalSymbol, finalResult.instructionReturn));
 		}
 		// Because it is an address whatever happens
-		finalResult.set_returns(finalSymbol);
 		finalResult.setAttribute('isNearPointer', isNearPointerHere); // inherit the feature
-		finalResult.setAttribute('isRegStruct', isRegStructHere);
+		finalResult.setAttribute('isFromRegStruct', isRegStructHere);
+		finalResult.set_returns(finalSymbol);
 		//finalResult.instructionReturn = finalSymbol.getAssemblySymbol();
 		return finalResult;
 	}
@@ -2305,7 +2306,7 @@ export class CodeGenerator extends ASTVisitor {
 					throw new InternalGenerationFailure(`${left.name}: A struct/array/union member might not be a pointer`);
 				}*/
 				
-				if (resolution.getAttribute('isRegStruct')) {
+				if (resolution.getAttribute('isFromRegStruct')) {
 					if (returnOnlyPointer) {
 						if (traditional) {
 							return finalResult.concat_returns(resolution);
@@ -2424,8 +2425,16 @@ export class CodeGenerator extends ASTVisitor {
 			let lval = this.processLValGetter(left);
 			result.concat_returns(right);
 			if (lval.getAttribute('isPointer') && lval.getAttribute('isAssignment')) {
-				result.concat(lval.raw_replace('pointer_block_entry', `${right.instructionReturn}_block`)
-				.raw_replace('pointer_ptr_entry', `${right.instructionReturn}_pos`));
+				if (right.getAttribute('isPointer')) {
+					result.concat(lval.raw_replace('pointer_block_entry', `${right.instructionReturn}_block`)
+						.raw_replace('pointer_ptr_entry', `${right.instructionReturn}_pos`));
+				} else {
+					// Now can't use conventional pointer, must set value into that pointer
+					let new_lval = this.processLValGetter(left, true, true);
+					result.concat(new_lval);
+					result.concat(this.memory.outputPointerStorageOf(new_lval.instructionReturn, right.instructionReturn));
+				}
+				
 			} else {
 				let returns = right.instructionReturn;
 				result.concat(lval.raw_replace('value_entry', returns));
@@ -2679,9 +2688,18 @@ export class CodeGenerator extends ASTVisitor {
 		const tmpSymb = this.getTempSymbol(node.dataType);
 		// Let still deliver them by reference
 		// It is a pointer, keep it the same (until you make some explicit assignment works)
-		if (memberResolution.getAttribute('isRegStruct') || node.getAttribute('stringAccess') || node.dataType.kind === 'pointer' || node.dataType.kind === 'array' || node.dataType.kind === 'struct' || node.dataType.kind === 'union') {	// [TODO:] Do a memory copy operation here (and point out that it has been a RValue!)
+		
+		// Think about the possibility: This is a member (of pointer type) of a struct / union / array. Directly returning it seems weird.
+		// [TODO !]
+		if (memberResolution.getAttribute('isFromRegStruct') || node.getAttribute('stringAccess') 
+			 || node.dataType.kind === 'array' || node.dataType.kind === 'struct' || node.dataType.kind === 'union') {	
+			// [TODO, but hung] Do a memory copy operation here (and point out that it has been a RValue!)
+			// Should we really copy one?
 			return memberResolution;
 			//tmpVar = memberResolution.instructionReturn;
+		} else if (node.dataType.kind === 'pointer') {
+			// We expect a pointer stored IN that place.
+			// [TODO TEST] We need to consider a pointer inside a registry structure
 		}
 		result.concat(memberResolution);
 		//tmpVar = this.getTempVariable();

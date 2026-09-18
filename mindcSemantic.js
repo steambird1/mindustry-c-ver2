@@ -1721,7 +1721,8 @@ export class SemanticAnalyzer extends ASTVisitor {
 				}
 				
 				// 设置表达式结果类型
-				node.dataType = argType.pointerTo.discardQualifier(['volatile']);
+				// The discard was of no reason ...
+				node.dataType = argType.pointerTo; //.discardQualifier(['volatile']);
 				break;
 				
 			case '&': // 取地址操作
