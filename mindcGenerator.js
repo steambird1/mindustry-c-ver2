@@ -667,7 +667,7 @@ export class CodeGenerator extends ASTVisitor {
 						 * @param {MemberInfo} member 
 						 */
 						member => {
-							if (member.type.isPointerImpl()) {
+							if (member.type.isRequireMem()) {
 								const tmpSymbol = new SymbolEntry(`__rsstack_${tempSymbolId++}`, member.type, scope, 'variable', null, member.type.size);
 								tmpSymbol.isVirtualSymbol = setVirtual;
 
@@ -2313,10 +2313,21 @@ export class CodeGenerator extends ASTVisitor {
 						}
 						throw new InternalGenerationFailure(`${left.name}: Attempt to get address from a non-addressed variable`);
 					} else {
-						return finalResult.concat(resolution)
-										.concat(
-							InstructionBuilder.set(resolution.instructionReturn, '{value_entry}')
-						);
+						if (isPointer) {
+							return finalResult.concat(resolution)
+								.concat(
+									new Instruction([
+										InstructionBuilder.set(`${resolution.instructionReturn}_block`, '{pointer_block_entry}'),
+										InstructionBuilder.set(`${resolution.instructionReturn}_pos`, `{pointer_ptr_entry}`)
+									])
+								).setAttribute('isPointer', true).setAttribute('isAssignment', true);
+						} else {
+							return finalResult.concat(resolution)
+											.concat(
+								InstructionBuilder.set(resolution.instructionReturn, '{value_entry}')
+							).setAttribute('isAssignment', true);
+						}
+						
 					}
 					
 				} else {
@@ -2700,6 +2711,15 @@ export class CodeGenerator extends ASTVisitor {
 		} else if (node.dataType.kind === 'pointer') {
 			// We expect a pointer stored IN that place.
 			// [TODO TEST] We need to consider a pointer inside a registry structure
+			result.concat(memberResolution);
+			const curPointer = memberResolution.instructionReturn;
+			// result.concat(InstructionBuilder.set(`${tmpSymb.getAssemblySymbol()}_block`, `${memberResolution.instructionReturn}_block`));
+			result.concat(this.memory.outputPointerFetchOf(curPointer, `${tmpSymb.getAssemblySymbol()}_block`));
+			result.concat(this.memory.outputPointerForwardCall(1, curPointer, this.functionManagement, false, true,
+				node.children[0].dataType && node.children[0].dataType.isTypeInfo && node.children[0].dataType.isNear()
+			));
+			result.concat(this.memory.outputPointerFetchOf(curPointer, `${tmpSymb.getAssemblySymbol()}_pos`));
+			return result.set_returns(tmpSymb);
 		}
 		result.concat(memberResolution);
 		//tmpVar = this.getTempVariable();

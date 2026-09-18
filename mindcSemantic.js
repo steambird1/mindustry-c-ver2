@@ -529,6 +529,21 @@ export class TypeInfo {
 		 pointerImplementation.includes(this.kind) || this.isVolatile();
 	}
 
+	/**
+	 * The difference between this and isPointerImpl() is that simple pointer might not require
+	 * memory assignment.
+	 * 
+	 * @returns {boolean}
+	 */
+	isRequireMem() {
+		const pointerImplementation = ['array'];
+		if (this.kind === 'struct' || this.kind === 'union') {
+			return this.isVolatile() || this.isStrictPointerImpl();
+		}
+		return ((typeof this.kind === 'object') && this.kind.isPointerImpl()) ||
+		 pointerImplementation.includes(this.kind) || this.isVolatile();
+	}
+
 	isRegStruct() {
 		return (this.kind === 'struct' || this.kind === 'union') && !this.isPointerImpl();
 	}
