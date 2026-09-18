@@ -2213,6 +2213,11 @@ export class Parser {
                 this.expectToken(TokenType.RIGHT_PAREN);
                 return expression;
             }
+
+            case TokenType.LEFT_BRACE: {
+                const inits = this.parseInitializerList();
+                return inits;
+            }
             
             default:
                 this.addError(`Unexpected token in expression: ${token.type} '${token.value}'`);

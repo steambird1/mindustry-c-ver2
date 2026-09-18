@@ -1,0 +1,30 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+	<meta charset="utf-8" />
+	<script type="module">
+		 import { TokenType, Token, KEYWORDS, SPECIAL_INSTRUCTIONS, OPERATORS,
+            PUNCTUATORS, Lexer
+        } from "./mindcLexer.js";
+	
+	async function do_compile() {
+		var lex = new Lexer(document.getElementById('txt').value, {}, true);
+		console.log(await lex.tokenize());
+	}
+
+	document.addEventListener('DOMContentLoaded', function() {
+		document.getElementById('compilerEnt').addEventListener('click', do_compile);
+	});
+	
+	</script>
+</head>
+<body>
+	<textarea id="txt">
+	
+	</textarea>
+	<button id="compilerEnt">Compile</button>
+	<textarea id="result">
+	
+	</textarea>
+</body>
+</html>
