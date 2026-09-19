@@ -2,6 +2,109 @@
 import { AttributeClass } from "./mindcBase.js";
 import { SymbolEntry, TypeInfo } from "./mindcSemantic.js";
 
+/**
+ * 
+ * @param {Map<string, Set<string>>} callGraph 
+ * @returns {Set<string>}
+ */
+export function findRecursiveFunctions(callGraph) {
+	// 收集所有函数节点
+	const allFunctions = new Set();
+	
+	for (const [caller, callees] of callGraph) {
+		allFunctions.add(caller);
+		for (const callee of callees) {
+			allFunctions.add(callee);
+		}
+	}
+	
+	// 初始化数据结构
+	const visited = new Map(); // 访问状态：0=未访问，1=访问中，2=已访问 (AI's creation!)
+	const dfn = new Map(), low = new Map(); // Tarjan
+	const recursive = new Map(); // 是否为递归函数
+	const callStack = []; // DFS调用栈
+
+	let dfnId = 0;
+	
+	for (const func of allFunctions) {
+		visited.set(func, 0);
+		recursive.set(func, false);
+	}
+	
+	// DFS搜索，检测环
+	function dfs(node) {
+		// 将节点标记为访问中
+		dfnId++;
+		dfn.set(node, dfnId);
+		low.set(node, dfnId);
+		visited.set(node, 1);
+		callStack.push(node);
+		
+		// 获取当前函数调用的函数集合
+		const neighbors = callGraph.get(node) || new Set();
+		
+		for (const neighbor of neighbors) {
+			const neighborState = visited.get(neighbor);
+			
+			if (neighborState === 0) {
+				dfs(neighbor);
+				low.set(node, Math.min(low.get(node), low.get(neighbor)));
+			} else if (callStack.includes(neighbor)) {
+				low.set(node, Math.min(low.get(node), dfn.get(neighbor)));
+			}
+			// AI here is 100% siliy.
+			/*
+			if (neighborState === 0) {
+				// 邻居未访问，递归访问
+				dfs(neighbor);
+				// 如果邻居是递归的，当前节点也是递归的
+				if (recursive.get(neighbor)) {
+					recursive.set(node, true);
+				}
+			} else if (neighborState === 1) {
+				// 发现环！当前路径上的节点都在环中
+				const cycleStartIndex = callStack.indexOf(neighbor);
+				for (let i = cycleStartIndex; i < callStack.length; i++) {
+					recursive.set(callStack[i], true);
+				}
+				// 当前节点在环中
+				recursive.set(node, true);
+			} else { // neighborState === 2
+				// 邻居已访问完成
+				if (recursive.get(neighbor)) {
+					recursive.set(node, true);
+				}
+			}
+				*/
+		}
+		if (neighbors.has(node) || low.get(node) < dfn.get(node)) {
+			recursive.set(node, true);
+		}
+		
+		// 从栈中弹出节点
+		callStack.pop();
+		// 标记节点为已访问
+		visited.set(node, 2);
+	}
+	
+	// 对每个未访问的节点进行DFS
+	for (const func of allFunctions) {
+		if (visited.get(func) === 0) {
+			dfs(func);
+		}
+	}
+	
+	// 收集所有递归函数
+	const result = new Set();
+	for (const [func, isRecursive] of recursive) {
+		if (isRecursive) {
+			result.add(func);
+		}
+	}
+	
+	return result;
+}
+
 export class InstructionReferrerException {
 	constructor(obj, caller = null, info = "") {
 		this.obj = obj;

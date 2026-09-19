@@ -14,10 +14,11 @@ import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 
 import { SymbolEntry, Scope, TypeInfo, MemberInfo, SemanticAnalyzer } from "./mindcSemantic.js";
 
-import { Optimizer } from "./mindcOptimizer.js";
+import { ArrayStateReferrer, Optimizer } from "./mindcOptimizer.js";
 
 import { Instruction, InstructionBuilder, InstructionReferrer, MemoryBlock, MemoryBlockInfo,
-    MemoryManager, FunctionRegisterer, BuildingLinker, SingleInstruction, EmptyInstruction
+    MemoryManager, FunctionRegisterer, BuildingLinker, SingleInstruction, EmptyInstruction,
+	findRecursiveFunctions
  } from "./mindcGeneratorBase.js";
 
 export class InternalGenerationFailure {
@@ -47,6 +48,7 @@ export class CodeGenerator extends ASTVisitor {
 		 */
 		this.semantic = compiler.semanticAnalyzer;
 		this.functionCallGraph = compiler.optimizer.functionCallGraph;
+		this.arrayState = compiler.optimizer.arrayState;
 		this.registryId = 0;
 		this.registrySymbolId = 0;
 		this.registryPointerSymbolId = 0;
@@ -83,8 +85,9 @@ export class CodeGenerator extends ASTVisitor {
 			if (this.memory.memoryBlocks.length == 0) {
 				noMemory = true;
 			}
-			this.recursiveInfo = this.findRecursiveFunctions(this.functionCallGraph);
+			this.recursiveInfo = findRecursiveFunctions(this.functionCallGraph);
 			this.currentScope = this.semantic.globalScope;
+			this.markArrayStatus(this.currentScope, this.arrayState);
 			/**
 			 * @type {SymbolEntry[]}
 			 */
@@ -145,6 +148,18 @@ export class CodeGenerator extends ASTVisitor {
 			memory: this.memory
 		}
     }
+
+	/**
+	 * 
+	 * @param {Scope} scope 
+	 * @param {ArrayStateReferrer} arr 
+	 */
+	markArrayStatus(scope, arr) {
+		scope.recursivelyGetAllSymbols().forEach(symb => {
+			const symbAssembly = symb.getAssemblySymbol();
+			symb.arrayStyle = arr.query(symbAssembly);
+		});
+	}
 
 	/**
 	 * 
