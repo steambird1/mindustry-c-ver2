@@ -118,7 +118,7 @@ export class ArrayStateReferrer {
 		if (!this.arrayParent.has(x)) {
 			this.arrayParent.set(x, x);
 		} else if (this.arrayParent.get(x) !== x) {
-			this.arrayParent.set(x, this.query(x));
+			this.arrayParent.set(x, this.query(this.arrayParent.get(x)).root);
 		}
 		return {
 			root: this.arrayParent.get(x), status: this.arrayState.get(x) ?? (defaults === undefined ? this.defaultState : defaults)

@@ -9,7 +9,7 @@ import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 	StructDefinitionNode, UnionDefinitionNode, StructMemberNode,
 	TypeQualifierNode, AsmStatementNode, PointerTypeNode, DeclaratorNode,
 	DeletedStatement, ASTBuilder, ASTVisitor, __convert, objectList,
-	liquidList, unitList, buildingList
+	liquidList, unitList, buildingList, findRecursiveFunctions
  } from "./mindcBase.js";
 
 import { SymbolEntry, Scope, TypeInfo, MemberInfo, SemanticAnalyzer } from "./mindcSemantic.js";
@@ -18,8 +18,15 @@ import { ArrayStateReferrer, Optimizer } from "./mindcOptimizer.js";
 
 import { Instruction, InstructionBuilder, InstructionReferrer, MemoryBlock, MemoryBlockInfo,
     MemoryManager, FunctionRegisterer, BuildingLinker, SingleInstruction, EmptyInstruction,
-	findRecursiveFunctions
+	
  } from "./mindcGeneratorBase.js";
+
+import { Globals, VariableRet, ImmediateRet, BasicRet, IntRet, BoolRet, FloatRet, ContentRet,
+	PointerRet, RefPointerRet, MemPointerRet, VolatilePointerRet, MemoryRefRet, StructRefRet,
+	symbolRef, ExportRet, valueClassOf, readThrough, writeThrough, pointerStep,
+	pointerToValue, valueToPointer, contentTypeOf, SPECIAL_CONTENT_TYPES,
+	arithmetic, InvalidCastException, InfrastructureNotImplementedExpection
+ } from "./mindcInfrastructure.js";
 
 export class InternalGenerationFailure {
 	constructor(message, node = null) {
@@ -56,6 +63,20 @@ export class CodeGenerator extends ASTVisitor {
         this.outputCode = new Instruction();
 		this.memory = new MemoryManager(compiler.memoryInfo);
 		this.functionManagement = new FunctionRegisterer(this.memory);
+		/**
+		 * The object-oriented value layer (see mindcInfrastructure.js).
+		 * @type {Globals}
+		 */
+		this.glob = new Globals(this.memory,
+			/**
+			 * Temporary symbols (NOT registers!): they are the only storage that
+			 * survives nested evaluation and recursive calls.
+			 * @param {TypeInfo?} type
+			 * @param {string?} kind
+			 * @returns {string}
+			 */
+			(type, kind) => this.getTempSymbol(type, kind).getAssemblySymbol(),
+			this.semantic, this.functionManagement, this);
 		this.currentFunction = "";
 		this.currentReturns = [];
 		this.currentBreaks = [];
@@ -1710,6 +1731,7 @@ export class CodeGenerator extends ASTVisitor {
 	 * @bug Notice: pointer access for recursive functions might result in errors
 	 */
 	visitBinaryExpression(node) {
+		const glob = this.glob;
 		if (node.getAttribute('disposeReturn')) {
 			return new Instruction([
 				this.visit(node.left),
@@ -1718,132 +1740,50 @@ export class CodeGenerator extends ASTVisitor {
 		}
 
 		const operatorTranslation = new Map([['+', 'add'], ['-', 'sub'], ['*', 'mul'], ['/', 'div'], ['%', 'mod'], ['|', 'or'], ['||', 'or'], ['&', 'and'], ['&&', 'land'], ['^', 'xor'], ['<<', 'shl'], ['>>', 'shr'], ['==', 'equal'], ['!=', 'notEqual'], ['<', 'lessThan'], ['>', 'greaterThan'], ['<=', 'lessThanEq'], ['>=', 'greaterThanEq']]);
-		const comparerTranslation = new Map([]);	// unused now
-		let result = new Instruction();
-		if (operatorTranslation.has(node.operator)) {
-			// Boolean can't directly participate in this!
-			const evaluatingKinds = ['pointer', 'array'];
-			const leftIsPointer = node.left.dataType && evaluatingKinds.includes(node.left.dataType.kind);
-			const rightIsPointer = node.right.dataType && evaluatingKinds.includes(node.right.dataType.kind);
-			if (leftIsPointer || rightIsPointer) {
-				const right = this.visitAndRead(node.right);
-				const left = this.visitAndRead(node.left);
-				//const duplicate = this.getTempVariable();
-				const duplicateResult = this.getTempSymbol(node.dataType);
-				const pointerSide = leftIsPointer ? left : right;
-				const nonPointerSide = rightIsPointer ? left : right;
-				result = this.operatesReads(
-					[pointerSide, nonPointerSide],
-					new Instruction([
-						//InstructionBuilder.set(`${duplicate}_block`, `{op_r0}_block`),
-						//InstructionBuilder.set(`${duplicate}_pos`, `{op_r0}_pos`),
-						(node.operator === '+')
-							? (this.memory.outputPointerForwardCall('{op_r1}', '{op_r0}', this.functionManagement, true, false))
-							: (this.memory.outputPointerBackwardCall('{op_r1}', '{op_r0}', this.functionManagement, false)),
-						InstructionBuilder.set(`${duplicateResult.getAssemblySymbol()}_block`, `__ptrblock`),
-						InstructionBuilder.set(`${duplicateResult.getAssemblySymbol()}_pos`, `__ptrpos`)
-					])).set_returns(duplicateResult);
-				/*
-				const pointerReferrer = leftIsPointer ? left.instructionReturn : right.instructionReturn;
-				result.instructionReturn = duplicate;
-				result.concat(left);
-				result.concat(right);
-				// These options are atomic!
-				result.concat(InstructionBuilder.set(`${duplicate}_block`, `${pointerReferrer}_block`));
-				result.concat(InstructionBuilder.set(`${duplicate}_pos`, `${pointerReferrer}_pos`));
-				switch (node.operator) {
-					case '+':
-						result.concat(this.memory.outputPointerForwardCall(leftIsPointer ? right.instructionReturn : left.instructionReturn, duplicate, this.functionManagement));
-						break;
-					case '-':
-						result.concat(this.memory.outputPointerBackwardCall(leftIsPointer ? right.instructionReturn : left.instructionReturn, duplicate, this.functionManagement));
-						break;
-					default:
-						throw new InternalGenerationFailure(`Unsupported operator for pointers: ${node.operator}`, node);
-				}
-				result.concat(this.generateSymbolWrite(duplicateResult, duplicate));
-				result.instructionReturn = duplicateResult.getAssemblySymbol();
-						*/
-			} else {
-				const left = this.visit(node.left);
-				const right = this.visit(node.right);
-				//const varName = this.getTempVariable();
-				const varResult = this.getTempSymbol(node.dataType);
-				/*
-				result.concat_returns(this.operates(
-					InstructionBuilder.op(operatorTranslation.get(node.operator), '{op}',
-					 left.instructionReturn, right.instructionReturn),
-					varResult
-				));
-				*/
-
-				const referrer = typeName => typeName.slice(0, typeName.length - 2);
-				const special = ['item_t', 'liquid_t', 'unit_t', 'block_t'];
-				const categorize = single => {
-					if (single.dataType) {
-						if (this.semantic.isTypeCompatibleForAny(single.dataType, special, true)) {
-							return 1;
-						} else if (this.semantic.isTypeCompatible(single.dataType, 'content_t', true)) {
-							return 2;
-						}
-					}
-					return 0;
-				};
-				const extra = new Instruction();
-				let lret = '{op_r0}', rret = '{op_r1}';
-				const lcat = categorize(left), rcat = categorize(right);
-				const setExtra = single => {
-					const tmpVar = this.getTempVariable();
-					extra.concat(InstructionBuilder.lookup(referrer(left.dataType.name), tmpVar, single));
-					return tmpVar;
-				};
-				if (lcat != rcat) {
-					if (lcat == 1) lret = setExtra(lret);
-					if (rcat == 1) rret = setExtra(rret);
-				}
-
-				result.concat_returns(this.operates(
-					this.operatesReads([left, right], new Instruction([
-						extra,
-						InstructionBuilder.op(operatorTranslation.get(node.operator), '{op}', lret, rret)
-					])),
-					varResult
-				));
-			}
-		} else if (comparerTranslation.has(node.operator)) { // Unused
-			const left = this.implicitToBoolean(node.left);
-			const right = this.implicitToBoolean(node.right);	// Has a copy, so won't result in errors
-			const outlet = this.getTempVariable();
-			let leftComparison = left.instructionReturn;
-			let rightComparison = right.instructionReturn;
-			result.concat(left);
-			result.concat(right);
-			if (left.dataType && left.dataType.kind === 'pointer') {
-				// Right is also. Convert both
-				// I guess literals can't do this
-				const leftTransform = this.castPointerToValue(leftComparison);
-				result.concat(leftTransform);
-				leftComparison = leftTransform.instructionReturn;
-				const rightTransform = this.castPointerToValue(rightComparison);
-				result.concat(rightTransform);
-				rightComparison = rightComparison.instructionReturn;
-			}
-			// It is now guaranteed THAT: left and right comparisons are IMMEDIATE VALUES
-			const outletSymbol = this.getTempSymbol(node.dataType);
-			result.concat_returns(this.operates(
-				InstructionBuilder.op(comparerTranslation.get(node.operator), '{op}', leftComparison, rightComparison),
-				outletSymbol
-			));
-		} else {
+		if (!operatorTranslation.has(node.operator)) {
 			this.addWarning('Going to assignment through binary expression:', node);
-			result = this.visitAssignmentExpression(node);
+			return this.visitAssignmentExpression(node);
 		}
-		if (node.operator === '/' && node.dataType && this.semantic.isTypeCompatibleForAny(node.dataType, ['int', 'long', 'signed', 'unsigned', 'bool'], true)) {
-			result = this.implicitFloorRaw(result);
+		const op = operatorTranslation.get(node.operator);
+
+		// Evaluate both sides (they may well contain calls, so every operand ends up
+		// in its own temporary symbol -- see `arithmetic()`).
+		let left = ExportRet(glob, this.visit(node.left), node.left.dataType);
+		let right = ExportRet(glob, this.visit(node.right), node.right.dataType);
+
+		/*
+		item_t / liquid_t / unit_t / block_t and content_t can be mixed, but the VM
+		cannot compare them directly: the "typed" side has to be looked up into a
+		content first.
+		*/
+		const contentCategory = t => (t && SPECIAL_CONTENT_TYPES.includes(t.name))
+			? contentTypeOf(t.name) : null;
+		const lcat = node.left.dataType ? (node.left.dataType.name === 'content_t' ? 2
+			: (SPECIAL_CONTENT_TYPES.includes(node.left.dataType.name) ? 1 : 0)) : 0;
+		const rcat = node.right.dataType ? (node.right.dataType.name === 'content_t' ? 2
+			: (SPECIAL_CONTENT_TYPES.includes(node.right.dataType.name) ? 1 : 0)) : 0;
+		if (lcat !== rcat && lcat !== 0 && rcat !== 0) {
+			const contentType = this.semantic.getTypeInfo('content_t');
+			if (lcat === 1) {
+				left = left.convertTo(contentType, contentCategory(node.left.dataType));
+			} else {
+				right = right.convertTo(contentType, contentCategory(node.right.dataType));
+			}
+		}
+
+		let result = arithmetic(glob, op, left, right, node.dataType);
+
+		// The VM's `div` is a floating point division: integers need an explicit floor.
+		if (node.operator === '/' && node.dataType
+			&& this.semantic.isTypeCompatibleForAny(node.dataType, ['int', 'long', 'signed', 'unsigned', 'bool'], true)) {
+			const target = result.name;
+			result = valueClassOf(glob, node.dataType).create(glob,
+				[result.instructions, InstructionBuilder.op('floor', target, target)],
+				target, node.dataType, true);
 		}
 		return result;
 	}
-	
+
 	/**
 	 * 
 	 * @param {CastExpression} node 
@@ -1987,7 +1927,7 @@ export class CodeGenerator extends ASTVisitor {
 			if (!value) value = this.visitAndRead(node.right);
 		}
 		
-		return this.processAssignment(node.left, value);
+		return this.processAssignment(node.left, value, node.dataType);
 	}
 
 	/**
@@ -2086,75 +2026,78 @@ export class CodeGenerator extends ASTVisitor {
 	 * @todo I guess this won't result in any error. But who knows...
 	 * @remarks This is an atomic operation for generation (at least so far). This feature is guaranteed by the LValGetter.
 	 */
+	/**
+	 * Resolve a member (or element) access into a **reference** of that member.
+	 *
+	 * The result is either
+	 *  - a `MemoryRefRet` : the member lives in memory, the reference holds the
+	 *    pointer `P` (P_block / P_pos) pointing at it;
+	 *  - a value class (`BasicRet`, `StructRefRet`, ...) : for registry structs,
+	 *    whose members are plain named variables.
+	 *
+	 * @param {ASTNode} node
+	 * @returns {VariableRet}
+	 */
 	resolveMemberExpression(node) {
+		const glob = this.glob;
 		let finalResult = new Instruction(), index;
 		if (node.getAttribute('stringAccess')) {
-			// Special string access
+			// Special string access: read one word out of the string
 			const finalSymbol = this.getTempSymbol(this.semantic.getTypeInfo('char'));
-			return this.operatesReads(node.children.map(child => this.visit(child)),
+			const reading = this.operatesReads(node.children.map(child => this.visit(child)),
 				this.operatesWrite(
-					InstructionBuilder.read('{op_write}', '{op_r0}', '{op_r1}'), finalSymbol)
-			);
+					InstructionBuilder.read('{op_write}', '{op_r0}', '{op_r1}'), finalSymbol));
+			return new BasicRet(glob, reading.instructions, reading.instructionReturn, node.dataType, true);
 		}
-		
+
 		let objectRoot = node.children[0];	// Will be altered if there's total offset
 
-		// TODO: WHAT IF IT IS A 'AccessThroughPointer'?
-		let leftsideOrigin = this.processLValGetter(objectRoot, true, true); // Thus it returns a duplicated version of address
-		const isNearPointerHere = leftsideOrigin.getAttribute('isNearPointer') ? true : false;
-		const isRegStructHere = leftsideOrigin.getAttribute('isRegStruct') ? true : false;
-		if (isRegStructHere) {
-			/**
-			 * @type {TypeInfo?}
-			 */
-			const nodeType = node.dataType;
+		let leftsideOrigin = this.getLValue(objectRoot);
+		const isNearPointerHere = leftsideOrigin.isNear === true;
+		const isRegStructHere = leftsideOrigin.getAttribute('isRegStruct') === true;
 
-			finalResult.concat(leftsideOrigin);
-			finalResult.instructionReturn = `${leftsideOrigin.instructionReturn}.${node.children[1].name}`;
-			finalResult.setAttribute('isNearPointer', isNearPointerHere); // inherit the feature
-			finalResult.setAttribute('isFromRegStruct', isRegStructHere);
-			finalResult.set_returns_type(nodeType);
-			return finalResult;
-		} 
+		if (isRegStructHere) {
+			// Registry struct: the member is a plain variable named `X.member`
+			const nodeType = node.dataType;
+			const memberName = `${leftsideOrigin.instructionReturn}.${node.children[1].name}`;
+			// Registry struct members are real, persistent names (they live on the
+			// stack), so they can be used as operands directly -- no copy needed.
+			const member = valueClassOf(glob, nodeType).create(glob, leftsideOrigin.instructions,
+				memberName, nodeType, true);
+			member.setAttribute('isNearPointer', isNearPointerHere);
+			member.setAttribute('isFromRegStruct', true);
+			if (nodeType && nodeType.isTypeInfo) member.set_returns_type(nodeType);
+			return member;
+		}
+
 		// Memory access, from then on
 		let knownTotalOffset = null;
 		if (node.hasAttribute('totalSource') && node.hasAttribute('totalMemberOffset')) {
 			objectRoot = node.getAttribute('totalSource');
-			leftsideOrigin = this.processLValGetter(objectRoot, true, true);
+			leftsideOrigin = this.getLValue(objectRoot).get();
 			knownTotalOffset = node.getAttribute('totalMemberOffset');
 		} else if (node.getAttribute('computed')) {
 			index = this.visitAndRead(node.children[1]);	// Simple calculation
 			finalResult.concat(index);				// Make such visit first!!
 		}
-		finalResult.concat(leftsideOrigin);	// Deferred evaluation
+		// The address of the object: get() makes sure it is a real pointer value
+		// (a pointer stored in memory has to be read out first).
+		const objectAddress = leftsideOrigin.get();
+		finalResult.concat(objectAddress);	// Deferred evaluation
 
 		const finalSymbol = this.getTempSymbol(this.semantic.getTypeInfo('null_t*'));
-		let leftsideDuplicate;	// Then perform setter
-		if (this.guaranteeTemporarySymbolReg) {
-			//throw new InternalGenerationFailure(`Member expression system requires temporary symbol registry guarantee`);
-			leftsideDuplicate = finalSymbol.getAssemblySymbol();
-		} else {
-			leftsideDuplicate = this.getTempVariable();
-		}
-		finalResult.concat(InstructionBuilder.set(`${leftsideDuplicate}_block`, `${leftsideOrigin.instructionReturn}_block`));
-		finalResult.concat(InstructionBuilder.set(`${leftsideDuplicate}_pos`, `${leftsideOrigin.instructionReturn}_pos`));
+		const leftsideDuplicate = this.guaranteeTemporarySymbolReg
+			? finalSymbol.getAssemblySymbol() : this.getTempVariable();
+		finalResult.concat(InstructionBuilder.set(`${leftsideDuplicate}_block`, `${objectAddress.instructionReturn}_block`));
+		finalResult.concat(InstructionBuilder.set(`${leftsideDuplicate}_pos`, `${objectAddress.instructionReturn}_pos`));
 		if (node.getAttribute('computed')) {
-			// Array, continue to get left-side
-			// TODO: The index of the left side should be multiplied by right-side size
-			// The left side must also return a pointer, but the problem is that: what it the right-side size?
-			
-			let ratio = 1, childSize = 0;
-			if (node.dataType.size > 0) {
-				ratio = node.dataType.size;
-			}
-			// Got correction ratio of array index
-			//finalResult.concat(InstructionBuilder.op('mul', index.instructionReturn, index.instructionReturn, ratio));
-			// Get multiplier
+			// Array: the index has to be multiplied by the element size
+			let ratio = node.dataType.size > 0 ? node.dataType.size : 1;
 			/**
 			 * @type {number | string}
 			 */
 			let resultIndex;
-			if (knownTotalOffset) {
+			if (knownTotalOffset !== null && knownTotalOffset !== undefined) {
 				resultIndex = knownTotalOffset;
 			} else if (ratio > 1) {
 				if (node.children[1].type === 'NumericLiteral') {
@@ -2166,318 +2109,127 @@ export class CodeGenerator extends ASTVisitor {
 			} else {
 				resultIndex = index.instructionReturn;
 			}
-			finalResult.concat(this.memory.outputPointerForwardCall(resultIndex, leftsideDuplicate, this.functionManagement, false, true, isNearPointerHere));
-			finalResult.instructionReturn = leftsideDuplicate;
+			finalResult.concat(this.memory.outputPointerForwardCall(resultIndex, leftsideDuplicate,
+				this.functionManagement, false, true, isNearPointerHere));
 		} else {
 			// Struct/union: seek member inside it. Already calculated by SEM.
-			// Also it is guaranteed that this is a member
-			
-			finalResult.concat(this.memory.outputPointerForwardCall(knownTotalOffset ?? node.getAttribute('memberOffset'), 
+			finalResult.concat(this.memory.outputPointerForwardCall(
+				knownTotalOffset ?? node.getAttribute('memberOffset'),
 				leftsideDuplicate, this.functionManagement, false, true, isNearPointerHere));
-			finalResult.instructionReturn = leftsideDuplicate;
-			
 		}
 		if (!this.guaranteeTemporarySymbolReg) {
-			finalResult.concat(this.generateSymbolWrite(finalSymbol, finalResult.instructionReturn));
+			// (Legacy path) Store the address into the temporary symbol's own memory.
+			finalResult.concat(this.generateSymbolWrite(finalSymbol, leftsideDuplicate));
 		}
 		// Because it is an address whatever happens
-		finalResult.setAttribute('isNearPointer', isNearPointerHere); // inherit the feature
-		finalResult.setAttribute('isFromRegStruct', isRegStructHere);
-		finalResult.set_returns(finalSymbol);
-		//finalResult.instructionReturn = finalSymbol.getAssemblySymbol();
-		return finalResult;
+		const reference = new MemoryRefRet(glob, finalResult.instructions,
+			finalSymbol.getAssemblySymbol(), node.dataType, true);
+		reference.setAttribute('isNearPointer', isNearPointerHere); // inherit the feature
+		reference.setAttribute('isFromRegStruct', false);
+		return reference;
+	}
+
+
+	getLValue(left) {
+		const glob = this.glob;
+		switch (left.type) {
+			case 'Identifier': {
+				const identity = this.currentScope.lookup(left.name);
+				if (!identity) {
+					throw new InternalGenerationFailure(`Unknown variable ${left.name}`, left);
+				}
+				return symbolRef(glob, identity);
+			}
+			case 'MemberExpression': {
+				if (left.getAttribute('stringAccess')) {
+					throw new InternalGenerationFailure(`Strings in Mindustry-C are immutable`, left);
+				}
+				return this.resolveMemberExpression(left);
+			}
+			case 'UnaryExpression': {
+				if (left.getAttribute('isDereference')) {
+					// *p : the address IS the value of p
+					const pointer = ExportRet(glob, this.visitAndRead(left.argument), left.argument.dataType);
+					if (!(pointer instanceof PointerRet)) {
+						this.addWarning(`Dereferencing a non-pointer value`, left.location);
+						return new MemoryRefRet(glob, pointer.instructions, pointer.name, left.dataType, false);
+					}
+					return new MemoryRefRet(glob, pointer.instructions, pointer.name, left.dataType, pointer.temporary);
+				}
+				// ++x / --x / +x ... -- the lvalue of the operand is the lvalue of the whole
+				return this.getLValue(left.argument);
+			}
+			default: {
+				const value = this.visitAndRead(left);
+				if (this.compiler.config.getAttribute('regardValuesAsAddresses')) {
+					this.addWarning(`Maybe not a LValue -- regarding the value as an address`, left.location);
+					return ExportRet(glob, value, left.dataType);
+				}
+				return new ImmediateRet(glob, 'null', left.dataType);
+			}
+		}
 	}
 
 	/**
-	 * This returns LVal. For a pointer, it reserves the name (and if offset exists, it configures)!
-	 * Left value can't have some really-elegant process.
-	 * 
-	 * @param {ASTNode} left 
-	 * @param {boolean} [returnOnlyPointer=false] Whether only providing pointer information (returning a pointer WHICH CAN MODIFY IT if traditional=false).
-	 * @param {boolean} [traditional=false] Whether using "C tradition" (that is, regarding arrays, **structs and unions** as pointer -- even if structs / unions are not considered pointers usually now)
-	 * The `traditional` currently means (when used with `returnOnlyPointer`): I just need a 'mindustry-accessible name'
-	 * @returns {Instruction} Instructions to get node as LValue. This function returns an instruction sequence that can assign value (since you're looking for a LValue!) by replacing {value_entry}.
-	 * @throws {InternalGenerationFailure} When attempting to get the pointer value of non-pointer value at all
-	 * @remark To be tested
-	 * @remark Notice if you are configuring a pointer!
-	 * @remark If it's about some addressing, the value must be duplicated!
+	 * Legacy entry point, kept for the not-yet-refactored call sites.
+	 *
+	 * @param {ASTNode} left
+	 * @param {boolean} [returnOnlyPointer=false]
+	 * @param {boolean} [traditional=false]
+	 * @returns {Instruction}
+	 * @deprecated Prefer `getLValue()`; this one rebuilds the old
+	 * `{value_entry}` / `{pointer_block_entry}` / `{pointer_ptr_entry}` templates.
 	 */
 	processLValGetter(left, returnOnlyPointer = false, traditional = false) {
-		let pointer = "";
-		let finalResult = new Instruction();
-		let isPointer = false;
-		let precall = new Instruction();
-		switch (left.type) {
-			case 'Identifier':
-				/**
-				 * @type {SymbolEntry}
-				 */
-				const identity = this.currentScope.lookup(left.name);
-				const assemblySymbol = identity.getAssemblySymbol();
-				/**
-				 * 
-				 * @param {boolean} isAccess Whether it's "accessThroughPointer".
-				 * @param {boolean} accessControl
-				 * @returns {Instruction}
-				 */
-				const directAccess = (isAccess = true, accessControl = true) => new Instruction(
-					[], `${assemblySymbol}.__pointer`, 
-					new Map([['isPointer', true], ['isPointerAccess', isAccess && accessControl], 
-						['pointerAccess', isAccess], ['relevantSymbolRead', identity], ['isNearPointer', identity.isNearPointer],
-						['isRegStruct', identity.isRegistryStruct()], ['disallowReplacement', true]]));
-				if (identity) {
-					
-					// This means that it IS a pointer. Pay attention to the circumstances
-					// when it is a struct/union.
-					if (identity.implementAsPointer) {
-						if (identity.accessThroughPointer) {
-							// Use the 'pointer' instead
-							//let finalize = new Instruction();
-							// ...
-							if (returnOnlyPointer) {
-								// The object itself is the pointer
-								if (traditional) {
-									// We don't hope for a pointer that modifies itself. Instead, we hope to get its actual pointer value
-									return new Instruction([], null, 
-										[['isPointer', true], ['isPointerAccess', true], ['pointerAccess', true],
-									['relevantSymbolRead', identity], ['isNearPointer', identity.isNearPointer],
-									['isRegStruct', identity.isRegistryStruct()], ['disallowReplacement', true]])
-										.concat_returns(this.generateSymbolRead(identity));
-								} else {
-									return directAccess();
-								}
-								
-							} else {
-								return new Instruction([this.generateSymbolWrite(identity, {
-									template: 'pointer'
-								})], null, new Map([['isAssignment', true], ['isPointer', true]]));
-							}
-						} else {
-							// It is a pointer, but unfortunately, you can't modify it through a pointer.
-							if (returnOnlyPointer) {
-								if (traditional) {
-									return new Instruction([], assemblySymbol, new Map([['isPointer', true],
-									['relevantSymbol', identity], ['isNearPointer', identity.isNearPointer],
-									['isRegStruct', identity.isRegistryStruct()], ['disallowReplacement', true]]));
-								}
-								throw new InternalGenerationFailure(`${left.name}: Attempt to get address from non-addressed variable (Hint: this variable has no address. Use 'volatile', 'static' or explicit '&' for its address.)`, left);
-							}
-							let finalize = new Instruction();
-							finalize.setAttribute('isPointer', true);
-							finalize.setAttribute('isAssignment', true);
-							finalize.concat(InstructionBuilder.set(`${assemblySymbol}_block`, '{pointer_block_entry}'));
-							finalize.concat(InstructionBuilder.set(`${assemblySymbol}_pos`, '{pointer_ptr_entry}'));
-							return finalize;
-						}
-						
-					} else if (identity.accessThroughPointer) {
-						//pointer = `${identity.getAssemblySymbol()}.__pointer`;
-						if (returnOnlyPointer) {
-							if (traditional) {
-								throw new InternalGenerationFailure(`${left.name}: Hoping to get its pointer value, but getting its pointer reference`);
-							}
-							return directAccess(true, false);	// Don't regard it 'access through pointer' (because you just want a pointer!)
-						}
-						return this.generateSymbolWrite(identity, '{value_entry}');
-					} else {
-						/*
-						let result = new Instruction();
-						result.instructionReturn = identity.getAssemblySymbol();
-						return result;
-						*/
-						if (returnOnlyPointer) {
-							if (traditional) {
-								return new Instruction([], identity.getAssemblySymbol(), new Map(
-									[['relevantSymbol', identity], ['isNearPointer', identity.isNearPointer],
-						['isRegStruct', identity.isRegistryStruct()], ['disallowReplacement', true]]
-								));
-							}
-							throw new InternalGenerationFailure(`${left.name}: Attempt to get address from non-addressed variable (Hint: this variable has no address. Use 'volatile', 'static' or explicit '&' for its address.)`, left);
-						}
-						return new Instruction(
-						[InstructionBuilder.set(identity.getAssemblySymbol(), '{value_entry}')]);
-					}
-				} else {
-					throw new InternalGenerationFailure(`Unknown variable ${left.name}`, left);
-				}
-				break;
-
-			case 'MemberExpression':
-				// TODO: Here has been modified as symbolic!!!!!!!
-				// But you can't make it stored in registry right away
-				if (left.getAttribute('stringAccess')) {
-					// This should have been considered by semantic analyzer
-					throw new InternalGenerationFailure(`Strings in Mindustry-C are immutable`, left);
-				}
-				// Given that registry structure can't be 'accessed through pointer', there's no need to
-				// consider inheritance of the attribute.
-				const resolution = this.convertInstructionForReading(this.resolveMemberExpression(left));
-				if (left.dataType.isPointerImpl()) {
-					isPointer = true;			// This determines whether it is about "accessThroughPointer"
-				}
-				//finalResult.setAttribute('isPointer', true);	// This determines whether it is a pointer
-				// Silent this check by default.
-				/* else if (returnOnlyPointer && (!traditional)) {
-					throw new InternalGenerationFailure(`${left.name}: A struct/array/union member might not be a pointer`);
-				}*/
-				
-				if (resolution.getAttribute('isFromRegStruct')) {
-					if (returnOnlyPointer) {
-						if (traditional) {
-							return finalResult.concat_returns(resolution);
-						}
-						throw new InternalGenerationFailure(`${left.name}: Attempt to get address from a non-addressed variable`);
-					} else {
-						if (isPointer) {
-							return finalResult.concat(resolution)
-								.concat(
-									new Instruction([
-										InstructionBuilder.set(`${resolution.instructionReturn}_block`, '{pointer_block_entry}'),
-										InstructionBuilder.set(`${resolution.instructionReturn}_pos`, `{pointer_ptr_entry}`)
-									])
-								).setAttribute('isPointer', true).setAttribute('isAssignment', true);
-						} else {
-							return finalResult.concat(resolution)
-											.concat(
-								InstructionBuilder.set(resolution.instructionReturn, '{value_entry}')
-							).setAttribute('isAssignment', true);
-						}
-						
-					}
-					
-				} else {
-					if (returnOnlyPointer) {
-						finalResult.concat_returns(resolution);
-					} else {
-						finalResult.concat(resolution);
-					}
-					
-				}
-				
-				pointer = resolution.instructionReturn;
-				break;
-			
-			case 'UnaryExpression':
-				if (left.getAttribute('isDereference')) {
-					precall = this.visitAndRead(left.argument);	// Simple calculation
-					// Not regarding as pointer!
-					pointer = precall.instructionReturn;
-					if (returnOnlyPointer) {
-						// This is about reading the data inside it ...
-						/**
-						 * @type {TypeInfo?}
-						 */
-						let insideType = null;
-						if (left.dataType && left.dataType.pointerTo) {
-							insideType = left.dataType.pointerTo;
-						} else if (traditional) {
-							return precall.setAttribute('isPointer', true).setAttribute('isPointerAccess', true);
-						} else {
-							this.addWarning(`Unknown reference`, left.location);
-						}
-						const insideReader = this.getTempSymbol(insideType, insideType ? insideType.kind : null);
-						precall.concat_returns(this.operatesWrite(
-							InstructionBuilder.reads('{op_write}', `${pointer}_block`, `${pointer}_pos`),
-							insideReader
-						));
-						return precall;
-						//throw new InternalGenerationFailure(`${left.name}: Attempt to get address from non-addressed variable (Hint: this variable already has memory address. Use '&' to avoid this problem.)`, left);
-					}
-					// Writing into that pointer otherwise
-					if (left.dataType && left.dataType.isPointerImpl()) {
-						isPointer = true;
-					}
-					break;
-				} else if (left.prefix) {
-					return this.processLValGetter(left.argument, returnOnlyPointer, traditional);
-				} else {
-					// This doesn't really make sense.
-					this.addWarning(`Deprecated dereference`, left.location);
-					return this.processLValGetter(left.argument, returnOnlyPointer, traditional);
-				}
-				// Otherwise, DELIBERATELY PASS DOWN
-			default:
-				// TODO: Might be expressions... must get its l-value pointer to process
-				// Unary expression should also be evaluated here.
-				// TODO: Yet I should consider how to deal with unary *, which returns a LValue
-				precall = this.visitAndRead(left);
-				pointer = precall.instructionReturn;
-				if (traditional && returnOnlyPointer) {
-					return precall;
-				}
-				if (this.compiler.config.getAttribute('regardValuesAsAddresses')) {
-					this.addWarning(`Maybe not a LValue -- regarding the value as an address`, left.location);
-				} else {
-					return new Instruction([], "null", new Map([['disallowReplacement', true]]));
-				}
-				break;
-		}
-		finalResult.concat(precall);
+		const lval = this.getLValue(left);
 		if (returnOnlyPointer) {
-			finalResult.instructionReturn = pointer;
-			return finalResult;
+			return traditional ? lval : lval.address();
 		}
-		// Like 'implementAsPointer'
-		if (isPointer) {
-			// The pointer POINTS TO a pointer
-			finalResult.setAttribute('isPointer', true);
-			finalResult.setAttribute('isPointerSetter', true);	// However, it is a setter... (Reserved for compatibility)
-			finalResult.setAttribute('isPointerAccess', true);
-			finalResult.concat(this.memory.outputPointerStorageOf(pointer, '{pointer_block_entry}'));
-			// Jump the address!
-			finalResult.concat(this.memory.outputPointerForwardCall(1, pointer, this.functionManagement, false, false));
-			finalResult.concat(this.memory.outputPointerStorageOf('__ptr', '{pointer_ptr_entry}'));
+		const name = lval.instructionReturn;
+		const glob = this.glob;
+		let result = new Instruction(lval.instructions ? [...lval.instructions] : []);
+		if (lval instanceof PointerRet) {
+			if (lval instanceof MemPointerRet) {
+				// The pointer itself is in memory: write through its address
+				result.concat(writeThrough(glob, name, '{pointer_block_entry}', 2, lval.isNear));
+			} else {
+				result.concat(InstructionBuilder.set(`${name}_block`, '{pointer_block_entry}'));
+				result.concat(InstructionBuilder.set(`${name}_pos`, '{pointer_ptr_entry}'));
+			}
+			result.setAttribute('isPointer', true);
+		} else if (lval instanceof MemoryRefRet) {
+			result.concat(writeThrough(glob, name, '{value_entry}', lval.width, lval.isNear));
 		} else {
-			// The pointer POINTS TO a value
-			finalResult.concat(this.memory.outputPointerStorageOf(pointer, '{value_entry}'));
+			if (lval.width >= 2) {
+				result.concat(InstructionBuilder.set(`${name}_block`, '{pointer_block_entry}'));
+				result.concat(InstructionBuilder.set(`${name}_pos`, '{pointer_ptr_entry}'));
+				result.setAttribute('isPointer', true);
+			} else {
+				result.concat(InstructionBuilder.set(name, '{value_entry}'));
+			}
 		}
-		finalResult.setAttribute('isAssignment', true);
-		return finalResult;
+		result.setAttribute('isAssignment', true);
+		if (lval.getAttribute('isPointer')) result.setAttribute('isPointer', true);
+		return result;
 	}
 
 	/**
 	 * 
 	 * @param {ASTNode} left The identifier shall be reserved.
-	 * @param {Instruction} right The parameters must be pre-processed and READ.
+	 * @param {Instruction | VariableRet} right The parameters must be pre-processed and READ.
 	 * @return {Instruction}
 	 * @remark We consider NORMAL ASSIGNMENT, STRUCTURAL and POINTER.
 	 * @remark This process is ATOMIC.
 	 */
-	processAssignment(left, right) {
-		let result = new Instruction();
-		
-		const leftIsPointer = !(left.dataType && !left.dataType.isPointerImpl());
-		if (right.getAttribute('disallowReplacement') || leftIsPointer) {
-			let lval = this.processLValGetter(left);
-			result.concat_returns(right);
-			if (lval.getAttribute('isPointer') && lval.getAttribute('isAssignment')) {
-				if (right.getAttribute('isPointer')) {
-					result.concat(lval.raw_replace('pointer_block_entry', `${right.instructionReturn}_block`)
-						.raw_replace('pointer_ptr_entry', `${right.instructionReturn}_pos`));
-				} else {
-					// Now can't use conventional pointer, must set value into that pointer
-					let new_lval = this.processLValGetter(left, true, true);
-					result.concat(new_lval);
-					result.concat(this.memory.outputPointerStorageOf(new_lval.instructionReturn, right.instructionReturn));
-				}
-				
-			} else {
-				let returns = right.instructionReturn;
-				result.concat(lval.raw_replace('value_entry', returns));
-			}
-			return result;
-		} else {
-			const lval = this.processLValGetter(left, true, true);
-			if (lval.getAttribute('isPointer')) {
-				result.concat(lval);
-				result.concat_returns(right);
-				result.concat(this.memory.outputPointerStorageOf(lval.instructionReturn, right.instructionReturn));
-			} else {
-				result.concat_returns(lval);
-				result.concat(right.replace_variable(lval.instructionReturn, right.instructionReturn));
-			}
-			return result;
-		}
+	processAssignment(left, right, type = null) {
+		const glob = this.glob;
+		/**
+		 * @type {VariableRet}
+		 */
+		const source = right instanceof VariableRet ? right
+			: ExportRet(glob, right, type ?? left.dataType ?? right.dataType ?? null);
+		const lval = this.getLValue(left);
+		return lval.set(source);
 	}
 
 	/**
@@ -2538,11 +2290,43 @@ export class CodeGenerator extends ASTVisitor {
 		 * @param {Instruction} param
 		 * @param {TypeInfo | null} [paramType=null]
 		 */
-		const tackleWithParam = (actualType, paramName, param, paramType = null) => 
-			param.getAttribute('isTemporary') ? param.replace_variable(paramName, param.instructionReturn) : new Instruction([
-//				param,
-				this.copyObject(paramName, param.instructionReturn, actualType, paramType)
-			]);
+		/**
+		 * Put one argument into its parameter slot.
+		 *
+		 * A function call is an operation with MANY operands, so every argument has to
+		 * end up in a temporary symbol of its own before the next one is evaluated --
+		 * otherwise a call inside argument N+1 (or a recursive call) reuses the very
+		 * same register that holds argument N.
+		 *
+		 * @param {TypeInfo} actualType
+		 * @param {string} paramName
+		 * @param {VariableRet} param
+		 * @param {TypeInfo | null} [paramType=null]
+		 * @returns {Instruction}
+		 */
+		const tackleWithParam = (actualType, paramName, param, paramType = null) => {
+			const glob = this.glob;
+			// `get()` + `materialize()`: a real value in a temporary symbol.
+			const value = param.get().materialize();
+			if (value instanceof ImmediateRet) {
+				// Constants cannot be renamed: write them out explicitly.
+				if (value.width >= 2) {
+					return new Instruction([
+						InstructionBuilder.set(`${paramName}_block`, 'null'),
+						InstructionBuilder.set(`${paramName}_pos`, 'null')
+					]);
+				}
+				return InstructionBuilder.set(paramName, value.name);
+			}
+			// Reusing the temporary storage of the argument is free and avoids a copy.
+			const delivery = value.rename(paramName);
+			if (paramType && actualType && !this.semantic.isSameType(actualType, paramType)) {
+				// Types differ enough to require an explicit conversion
+				return new Instruction([delivery.instructions,
+					this.copyObject(paramName, paramName, actualType, paramType)]);
+			}
+			return delivery;
+		};
 
 		for (let i = 0; i < relevantFunctionType.parameters.length && i < node.arguments.length; i++) {
 			/**
@@ -2554,25 +2338,19 @@ export class CodeGenerator extends ASTVisitor {
 			} else {
 				actualType = relevantFunction.owningScope.lookupCurrent(relevantFunctionType.parameters[i].name).type.type;
 			}
-			const param = this.compiler.semanticAnalyzer.isSameType(actualType, this.compiler.semanticAnalyzer.getTypeInfo('content_t'))
-				? this.implicitToContent(node.arguments[i], null, true) 
-				: this.visitAndRead(node.arguments[i]);
-			if (!param.getAttribute('isTemporary')) {
-				result.concat(param);
+			const argument = node.arguments[i];
+			const raw = this.visit(argument);
+			/**
+			 * @type {VariableRet}
+			 */
+			let param = ExportRet(this.glob, raw, argument.dataType);
+			if (this.compiler.semanticAnalyzer.isSameType(actualType, this.compiler.semanticAnalyzer.getTypeInfo('content_t'))) {
+				param = param.convertTo(this.compiler.semanticAnalyzer.getTypeInfo('content_t'),
+					contentTypeOf(argument.dataType ? argument.dataType.name : null));
 			}
-			
-			// This is so-called "post-processing"
-			
-			if (isFunctionPointer) {
-				result.concat(tackleWithParam(actualType, `__param_${i}`, param, node.arguments[i].dataType));
-			} else {
-				result.concat(
-					tackleWithParam(actualType, 
-					relevantFunction.owningScope.lookupCurrent(relevantFunction.type.parameters[i].name).getAssemblySymbol(),
-				param, node.arguments[i].dataType)
-				);
-			}
-			
+			const paramName = isFunctionPointer ? `__param_${i}`
+				: relevantFunction.owningScope.lookupCurrent(relevantFunction.type.parameters[i].name).getAssemblySymbol();
+			result.concat(tackleWithParam(actualType, paramName, param, argument.dataType));
 		}
 
 		// Pre-call ended.
@@ -2654,28 +2432,33 @@ export class CodeGenerator extends ASTVisitor {
 	 * @remark This function has a major change in Jan 31 version (no duplicate by default now).
 	 * @remark Therefore, any duplicate function must have its own copy-processing!
 	 */
+	/**
+	 * 
+	 * @param {IdentifierNode} node 
+	 * @returns {VariableRet}
+	 * @remark Constants are returned as immediate values; variables are returned as
+	 *         **already read** values (so a volatile variable ends up in a temporary
+	 *         symbol rather than in a temporary register).
+	 */
 	visitIdentifier(node) {
+		const glob = this.glob;
 		const isBuiltinConstant = node.name.length && node.name[0] == '@';
-		const isConstant = node.dataType && node.dataType.qualifiers.includes('const') 
-			&& (!node.dataType.qualifiers.includes('volatile'));
-		const special = ['item_t', 'liquid_t', 'unit_t', 'block_t'];
-		const referrer = typeName => typeName.slice(0, typeName.length - 2);
 		if (isBuiltinConstant) {
-			// If the value is a builtin constant with type...
-			if (this.compiler.extraConfig.getAttribute('defaultNumeric') && node.dataType && special.includes(node.dataType.name)) {
-				return this.implicitContentToNumericRaw(new Instruction([], node.name.replace(/\_/g, '-'), new Map([['disallowReplacement', true], ['builtinConstant', true]])));	// Make a conversion
-			} else {
-				return new Instruction([], node.name.replace(/\_/g, '-'), new Map([['disallowReplacement', true], ['builtinConstant', true]]));
+			// Builtin constants (@copper, @this, ...) are immediate values
+			const constant = new ImmediateRet(glob, node.name.replace(/\_/g, '-'), node.dataType, true);
+			if (this.compiler.extraConfig.getAttribute('defaultNumeric') && node.dataType
+				&& SPECIAL_CONTENT_TYPES.includes(node.dataType.name)) {
+				// Convert the content into its numeric id
+				return constant.convertTo(this.semantic.getTypeInfo('int'));
 			}
+			return constant;
 		}
-		/*
-		if (!this.compiler.extraConfig.getAttribute('defaultNumeric')) {
-			if (node.dataType && special.includes(node.dataType.name)) {
-				return this.implicitToContentRaw(this.generateSymbolRead(this.currentScope.lookup(node.name)), node.dataType.name);
-			}
+		const symbol = this.currentScope.lookup(node.name);
+		if (!symbol) {
+			throw new InternalGenerationFailure(`Unknown identifier ${node.name}`, node);
 		}
-			*/
-		return this.generateSymbolRead(this.currentScope.lookup(node.name));	// Major change: now changed to false!!!
+		// `get()`: go through the reference and produce the value itself
+		return symbolRef(glob, symbol).get();
 	}
 
 	/**
@@ -2706,45 +2489,24 @@ export class CodeGenerator extends ASTVisitor {
 	 * 
 	 * @param {ASTNode} node Node for member expression
 	 */
+	/**
+	 * 
+	 * @param {ASTNode} node Node for member expression
+	 * @remarks Arrays, structs and unions are delivered **by reference**: the returned
+	 *          Ret is the reference itself, not a copy. Scalars (and pointers stored
+	 *          in the member) are read out.
+	 */
 	visitMemberExpression(node) {
-		// It must be a pointer-like, so we directly seek for a LValue
-		//return this.resolveMemberExpression(node);
 		const memberResolution = this.resolveMemberExpression(node);
-		let result = new Instruction(), tmpVar;
-		const tmpSymb = this.getTempSymbol(node.dataType);
-		// Let still deliver them by reference
-		// It is a pointer, keep it the same (until you make some explicit assignment works)
-		
-		// Think about the possibility: This is a member (of pointer type) of a struct / union / array. Directly returning it seems weird.
-		// [TODO !]
-		if (memberResolution.getAttribute('isFromRegStruct') || node.getAttribute('stringAccess') 
-			 || node.dataType.kind === 'array' || node.dataType.kind === 'struct' || node.dataType.kind === 'union') {	
-			// [TODO, but hung] Do a memory copy operation here (and point out that it has been a RValue!)
-			// Should we really copy one?
+		const kind = node.dataType ? node.dataType.kind : null;
+		if ((memberResolution instanceof StructRefRet) || node.getAttribute('stringAccess')
+			|| kind === 'array' || kind === 'struct' || kind === 'union'
+			|| memberResolution.getAttribute('isFromRegStruct')) {
+			// Deliver them by reference (no copy is made)
 			return memberResolution;
-			//tmpVar = memberResolution.instructionReturn;
-		} else if (node.dataType.kind === 'pointer') {
-			// We expect a pointer stored IN that place.
-			// [TODO TEST] We need to consider a pointer inside a registry structure
-			result.concat(memberResolution);
-			const curPointer = memberResolution.instructionReturn;
-			// result.concat(InstructionBuilder.set(`${tmpSymb.getAssemblySymbol()}_block`, `${memberResolution.instructionReturn}_block`));
-			result.concat(this.memory.outputPointerFetchOf(curPointer, `${tmpSymb.getAssemblySymbol()}_block`));
-			result.concat(this.memory.outputPointerForwardCall(1, curPointer, this.functionManagement, false, true,
-				node.children[0].dataType && node.children[0].dataType.isTypeInfo && node.children[0].dataType.isNear()
-			));
-			result.concat(this.memory.outputPointerFetchOf(curPointer, `${tmpSymb.getAssemblySymbol()}_pos`));
-			return result.set_returns(tmpSymb);
 		}
-		result.concat(memberResolution);
-		//tmpVar = this.getTempVariable();
-		result.concat(this.operatesWith(
-			this.memory.outputPointerFetchOf('{opw}', tmpSymb.getAssemblySymbol()),
-			memberResolution
-		));
-		//result.concat(this.generateSymbolWrite(tmpSymb, tmpVar));
-		result.set_returns(tmpSymb);
-		return result;
+		// Scalars (and pointers) are read out of the memory slot
+		return memberResolution.get();
 	}
 
 	/**
