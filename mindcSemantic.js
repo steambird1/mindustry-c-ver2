@@ -168,6 +168,29 @@ export class SymbolEntry {
 
 		// Used for code generator
 		this.isNearPointer = false;
+
+		// Simple array means array satisfying the following conditions that can be converted into a
+		// builtin array by default:
+		// 1. The array is of simple object type (Note: in this case, device, content_t and null_t are also allowed)
+		// volatile variables, struct/union, array and pointer are NOT simple object types.
+		// 2. The array is never cast to pointer type (Note: function calls permitted.)
+		// If an array is both simple array and constant array, further optimization can be done.
+		// If the array is of device, content_t (or sometimes null_t) type, then simple array is A MUST.
+		/**
+		 * If the type is 'embedded', it works like pdlist / sdlist. If it requires shared feature (i.e. remote access),
+		 * instead of using 'sdlist' there will be an additional library not working in the same way as this array
+		 * as the method must be specified.
+		 * 
+		 * By using array_init(type, mutable, implement, {data...}) you are also allowed to manually specify the way 
+		 * such thing is loaded.
+		 * 
+		 * @type {arrayStyle}
+		 */
+		this.arrayStyle = {
+			type: 'traditional',
+			mutable: true,
+			implement: null
+		};
         
         // 优化标记 [Not really used right away]
         this.canBeEliminated = false;
@@ -281,6 +304,10 @@ export class SymbolEntry {
 			resultType.functionTo = this;
 		}
 		return resultType;
+	}
+
+	isArray() {
+		return this.extractType().kind === 'array';
 	}
 
 	describe() {
@@ -472,6 +499,8 @@ export class TypeInfo {
 		 * @type {true}
 		 */
 		this.isTypeInfo = true;
+
+		this.annotations = new AttributeClass();
     }
     
     isConst() {
@@ -1262,8 +1291,9 @@ export class SemanticAnalyzer extends ASTVisitor {
             case 'basic':
             case 'device':
             case 'null':
+				return 1;
             case 'pointer':
-                return 1;
+                return 2;
             case 'struct':
             case 'union':
                 return typeInfo.size || 1;
@@ -2200,7 +2230,9 @@ export class SemanticAnalyzer extends ASTVisitor {
 				break;
 		}
 
-		node.dataType = this.getTypeInfo(funcSymbol.type.returnType);
+		node.dataType = funcSymbol.type.returnTypeEval ?
+			funcSymbol.type.returnTypeEval(node)
+			 : this.getTypeInfo(funcSymbol.type.returnType);
 	}
 
 	// !! Has manual changes !!

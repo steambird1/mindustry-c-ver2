@@ -1079,9 +1079,11 @@ export class Lexer {
     
     // 处理 #pragma - 收集指令内容
     handlePragma(args, location) {
+        const fullPragma = `#pragma ${args}`.trim();
+        
         this.tokens.push(new Token(TokenType.PREPROCESSOR_PRAGMA, fullPragma, location));
         if (this.skipping) return;
-        const fullPragma = `#pragma ${args}`.trim();
+        
         this.pragmas.push(fullPragma);
     }
     

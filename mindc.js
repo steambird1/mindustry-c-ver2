@@ -57,10 +57,16 @@ class SymbolTableEntry {
 // dependencies work in browsers on eart
 export class CompilerExtensionBase {
 	/**
+	 * @callback returnTypeCallback
+	 * @param {BuiltinCallNode} currentNode
+	 * @returns {TypeInfo}
+	 */
+	/**
 	 * 
 	 * @typedef {{
 	 * 		name: string,
 	 * 		returnType: string,
+	 * 		returnTypeEval: returnTypeCallback?,
 	 * 		parameters: string[],
 	 * 		hasVarArgs: boolean | undefined,
 	 * 		special: string | null | undefined
@@ -362,20 +368,38 @@ export class Compiler {
 			parserConfig.setAttribute('extraTypes', exTypes);
 			parserConfig.setAttribute('extraFunctions', exFuncs);
 			parserConfig.setAttribute('extraHandler', new Map(extensions.flatMap(ext => [...ext.handlers])));
+			const optimizerConfig = {};
 			tokens.pragmas.forEach(
 				/**
 				 * 
 				 * @param {string} info 
 				 */
-				info => {
+				infos => {
+					const info = infos.substring(infos.indexOf('#pragma') + '#pragma'.length).trim();
 					if (info.startsWith("comment(")) {
 						// #pragma comment(attribute,value)
 						const comment = info.substring(info.indexOf('(') + 1, info.lastIndexOf(')'));
 						const config = comment.split(',').map(s => s.trim());
 						if (config.length < 2) return;
-						parserConfig.setAttribute(config[0], config[1]);
+						parserConfig.setAttribute(config[0], JSON.parse(config[1]));
+					} else if (info.startsWith("optimize(")) {
+						// #pragma optimize(array[, mutable_optimize[, const_optimize]])
+						const comment = info.substring(info.indexOf('(') + 1, info.lastIndexOf(')'));
+						const config = comment.split(',').map(s => s.trim());
+						switch (config[0]) {
+							case "array":
+								optimizerConfig.doArrayOptimize = true;
+								if (config.length >= 2) {
+									optimizerConfig.arrayOptimize = JSON.parse(config[1]);
+								}
+								if (config.length >= 3) {
+									optimizerConfig.constArrayOptimize = JSON.parse(config[2]);
+								}
+								break;
+						}
 					}
-			})
+			});
+			parserConfig.setAttribute('optimizeOption', optimizerConfig);
 
 			this.parser = new Parser(this.lexer, parserConfig);
 			this.extraConfig = parserConfig;

@@ -37,6 +37,111 @@ class ReturnRegistry {
 	}
 }
 
+/**
+ * Compatibility problem exists when array B is assigned to array A (explicitly, or implicity by function call)
+ * 
+ * @typedef {{type: 'traditional' | 'embedded' | 'encoded', mutable: boolean, implement: null | 'regular' | 'divided' | 'lookup'}} arrayStyle
+ */
+export class ArrayStateReferrer {
+	constructor() {
+		/**
+		 * @type {Map<string, string>}
+		 */
+		this.arrayParent = new Map();
+		/**
+		 * @type {Map<string, arrayStyle>}
+		 */
+		this.arrayState = new Map();
+
+		/**
+		 * @type {arrayStyle}
+		 */
+		this.defaultState = {
+			type: 'traditional',
+			mutable: true,
+			implement: null
+		};
+	}
+
+	/**
+	 * 
+	 * @param {arrayStyle?} x 
+	 * @param {arrayStyle?} y 
+	 * @returns {arrayStyle?}
+	 */
+	static compatibleOf(x, y) {
+		if ((!x) && (!y)) return undefined;
+		if (!x) return y;
+		if (!y) return x;
+		if (x.type === 'traditional' || y.type === 'traditional') return {
+			type: 'traditional',
+			mutable: x.mutable || y.mutable,
+			implement:	null
+		};
+		if (x.type == 'embedded' || y.type == 'embedded') return {
+			type: 'embedded',
+			mutable: x.mutable || y.mutable,
+			implement: (x.type == y.type) ? x.type.implement : 'divided'
+		};
+		return x.type;
+	}
+
+	/**
+	 * 
+	 * @param {string} x 
+	 * @param {arrayStyle} style 
+	 * @param {boolean} [compatible=false] 
+	 */
+	load(x, style, compatible = false) {
+		const head = this.query(x);
+		this.arrayState.set(head.root, compatible ? ArrayStateReferrer.compatibleOf(style, head.status) : style);
+	}
+
+	/**
+	 * 
+	 * @param {string} x 
+	 */
+	downgrade(x) {
+		this.load(x, {
+			type: 'traditional',
+			mutable: false,
+			implement: null
+		}, true);
+	}
+
+	/**
+	 * @param {string} x 
+	 * @param {arrayStyle | undefined} [defaults=undefined] 
+	 * @returns {{root: string, status: arrayStyle?}}
+	 */
+	query(x, defaults = undefined) {
+		if (!this.arrayParent.has(x)) {
+			this.arrayParent.set(x, x);
+		} else if (this.arrayParent.get(x) !== x) {
+			this.arrayParent.set(x, this.query(x));
+		}
+		return {
+			root: this.arrayParent.get(x), status: this.arrayState.get(x) ?? (defaults === undefined ? this.defaultState : defaults)
+		};
+	}
+
+	/**
+	 * 
+	 * @param {string} x 
+	 * @param {string} y 
+	 */
+	assign(x, y) {
+		const rx = this.query(x, null), ry = this.query(y, null);
+		this.arrayParent.set(ry.root, rx.root);
+		this.arrayState.set(rx.root, ArrayStateReferrer.compatibleOf(rx.status, ry.status));
+	}
+
+	clear() {
+		this.arrayParent.clear();
+		this.arrayState.clear();
+	}
+}
+
 export class Optimizer extends ASTVisitor {
 	/**
 		 * @typedef {{
@@ -102,8 +207,24 @@ export class Optimizer extends ASTVisitor {
 		 */
 		this.callStack = [];
         this.analyzedScopes = new Set();
+
+		this.arrayState = new ArrayStateReferrer();
+
+		this.optimizeConfig = {};
     }
 
+	/**
+	 * 
+	 * @param {{
+	 * 	globalScope: Scope,
+	 *  typeTable: Map<string, TypeInfo>,
+	 *  symbolTable: *,
+	 *  structTable: *,
+	 *  typedefTable: *
+	 * }} analysisResult 
+	 * @param {ProgramNode} ast 
+	 * @returns 
+	 */
     optimize(analysisResult, ast) {
         const { globalScope, symbolTable, typeTable, structTable, typedefTable } = analysisResult;
         
@@ -121,6 +242,10 @@ export class Optimizer extends ASTVisitor {
         this.errors = [];
         this.warnings = [];
         this.analyzedScopes.clear();
+
+		if (this.compiler && this.compiler.extraConfig) {
+			this.optimizeConfig = this.compiler.extraConfig.getAttribute('optimizeOption') ?? {};
+		}
         
         // 多轮优化
         let iteration = 0;
@@ -149,6 +274,8 @@ export class Optimizer extends ASTVisitor {
     }
 
     optimizationPass() {
+		this.arrayState.clear();
+
         // 1. 收集全局信息（函数调用图等）
 		this.visitedFunction = new Set();
 		/**
@@ -358,6 +485,18 @@ export class Optimizer extends ASTVisitor {
 					}
 					if (node.functions) {
 						node.functions.forEach(func => {
+							if (func.scope) {
+								func.scope.recursivelyGetAllSymbols().forEach(
+									/**
+									 * 
+									 * @param {SymbolEntry} symb 
+									 */
+								symb => {
+									if (symb.isArray()) this.loadArrayForSymbol(symb);	// Do this first, and sth else later!
+								});
+							}
+						});
+						node.functions.forEach(func => {
 							if (func.name === 'main') {
 								this.analyzeNode(func, {
 									actualCalling: true,
@@ -545,6 +684,16 @@ export class Optimizer extends ASTVisitor {
 		//const localConstants = this.localConstants.get(scopePath);
 		this.analyzeNode(node.left, info);
 		this.analyzeNode(node.right, info);
+
+		const downgradeArray = subNode => {
+			if (subNode.symbol && subNode.symbol.isArray()) {
+				this.arrayState.downgrade(subNode.symbol.getAssemblySymbol());
+			}
+		};
+
+		downgradeArray(node.left);
+		downgradeArray(node.right);
+
 		if (node.operator.includes('=') && node.operator !== '==' && node.operator !== '>=' && node.operator !== '<=' && node.operator !== '!=') {
 			// Assignment
 			if (node.left.type === 'Identifier') {
@@ -624,8 +773,13 @@ export class Optimizer extends ASTVisitor {
 					}
 					this.addWriteForCurrentScope(node.argument.name, null, curStat);
 				}
+				if (node.symbol && node.symbol.isArray()) {
+					this.arrayState.downgrade(node.symbol.getAssemblySymbol());
+				}
 			}
 		} else {
+			// Using '*' toward a simple array will be considered fetching its first element, so this won't
+			// result in downgrading.
 			this.analyzeNode(node.argument, info);
 		}
 	}
@@ -712,6 +866,48 @@ export class Optimizer extends ASTVisitor {
 
 	/**
 	 * 
+	 * @param {SymbolEntry} symbol 
+	 */
+	loadArrayForSymbol(symbol) {
+		let arrPrototype = this.arrayState.defaultState;
+		
+		const extracted = symbol.extractType();
+		// This might happen as those arrays are "no longer pointerImpl() but still have pointerTo" -- so we have to be ready.
+		if (!extracted.pointerTo) {
+			return;
+		}
+		if (extracted.isVolatile()) {
+			return;
+		}
+		if ((!['basic', 'device', 'null'].includes(extracted.pointerTo.kind)) || extracted.pointerTo.isPointerImpl()) {
+			this.arrayState.load(symbol.getAssemblySymbol(), {
+				type: 'traditional',
+				mutable: !symbol.isConst,
+				implement: null
+			});
+			return;
+		}
+
+		if (this.optimizeConfig["doArrayOptimize"]) {
+			if (symbol.isConst) {
+				arrPrototype = this.optimizeConfig["constArrayOptimize"] ?? this.optimizeConfig["arrayOptimize"] ?? {
+					type: 'encoded',
+					mutable: false,
+					implement: null
+				};
+			} else {
+				arrPrototype = this.optimizeConfig["arrayOptimize"] ?? {
+					type: 'embedded',
+					mutable: true,
+					implement: null
+				};
+			}
+		} 
+		this.arrayState.load(symbol.getAssemblySymbol(), arrPrototype);
+	}
+
+	/**
+	 * 
 	 * @param {VariableDeclarationNode} node 
 	 * @param {*} info 
 	 */
@@ -771,8 +967,45 @@ export class Optimizer extends ASTVisitor {
 						}
 					}
 				}
-                
-            }
+                // Regardless of whether the assignment really occurs:
+				/**
+				 * @type {string?}
+				 */
+				let arrayRooted = null, arrayMutable = true;
+				if (declarator.initializer.type === 'Identifier' || declarator.initializer.type === 'InitializerList') {
+					if (declarator.initializer.symbol && declarator.initializer.symbol.isArray()) {
+						arrayRooted = declarator.initializer.symbol.getAssemblySymbol();
+					}
+				}
+				/**
+				 * @type {TypeInfo?}
+				 */
+				const initType = declarator.initializer.dataType;
+				if (symbol.isArray()) {
+					/**
+					 * @type {arrayStyle}
+					 */
+					let arrPrototype = {
+						type: 'traditional',
+						mutable: !symbol.isConst,
+						implement: null
+					};
+					if (arrayRooted) {
+						this.arrayState.assign(symbol.getAssemblySymbol(), arrayRooted);
+					} else if ((initType && initType.annotations.getAttribute('hasArrayState'))) {
+						arrPrototype = initType.annotations.getAttribute('arrayState');
+						arrPrototype.mutable = arrPrototype.mutable || (!symbol.isConst);
+					}
+					
+					if (!arrayRooted)
+						this.arrayState.load(symbol.getAssemblySymbol(), arrPrototype);
+					
+				} else if (arrayRooted) {
+					this.arrayState.downgrade(arrayRooted);
+				}
+            } else if (symbol.isArray()) {
+				this.loadArrayForSymbol(symbol);
+			}
         });
     }
 
@@ -864,9 +1097,20 @@ export class Optimizer extends ASTVisitor {
 						this.shouldRunEvaluation(node, info));
 				}
 				
+				if (symbol.isArray()) {
+					if (node.right.symbol && node.right.symbol.isArray()) {
+						this.arrayState.assign(symbol.getAssemblySymbol(), node.right.symbol.getAssemblySymbol());
+					} else {
+						this.arrayState.downgrade(symbol.getAssemblySymbol());
+					}
+				}
 			}
 		} else {
 			this.analyzeNode(node.left, info);
+			// If the right side is array
+			if (node.right.symbol && node.right.symbol.isArray()) {
+				this.arrayState.downgrade(node.right.symbol.getAssemblySymbol());
+			}
 		}
 		if (node.right.type === 'Identifier' && node.right.symbol && node.right.symbol.kind === 'function') {
 			this.recordFunctionCall(this.currentFunction, node.right.name);
@@ -883,10 +1127,20 @@ export class Optimizer extends ASTVisitor {
     analyzeFunctionCall(node, info = null) {
 		const shouldRun = this.shouldRunEvaluation(node, info);
 		const valid = shouldRun || (info && (info.firstLoopRun || info.isUnsure || info.inFunction));
+
+		/**
+		 * @type {string?[]}
+		*/
+		let arrCallMapper = [];
+		let arrCallFail = false;
+
         if (node.callee.type === 'Identifier') {
             const funcName = node.callee.name;
             
             // 更新函数调用计数
+			/**
+			 * @type {functionInfoEntry?}
+			 */
 			let funinfo;
 			if (this.functionInfo.has(funcName)) {
 				funinfo = this.functionInfo.get(funcName);
@@ -899,6 +1153,14 @@ export class Optimizer extends ASTVisitor {
 					//}
 				}
 			} else {
+				// When function call is being analyzed, it is possible that the function body hasn't undergone
+				// optimizer's analysis!
+				let foundNode = null;
+				this.ast.functions.forEach(func => {
+					if (func.name === funcName) {
+						foundNode = func;
+					}
+				});
 				this.functionInfo.set(funcName, {
 					calls: valid ? 1 : 0,
 					hasSideEffects: false,
@@ -906,7 +1168,9 @@ export class Optimizer extends ASTVisitor {
 					isDefinition: false,
 					canInline: true,
 					writtenVarsUnknown: true,
-					writtenVars: []
+					writtenVars: [],
+					node: foundNode,
+					scope: foundNode.scope
 				});	// Other information given as undefined
 				funinfo = this.functionInfo.get(funcName);
 			}
@@ -915,15 +1179,40 @@ export class Optimizer extends ASTVisitor {
 				const callerName = this.currentFunction || 'anonymous';
 				this.recordFunctionCall(callerName, funcName);
 			}
+
+			// [TODO: Consider recursive functions ...?]
 			this.analyzeNode(funinfo.node, {
 				actualCalling: Boolean(info.actualCalling && (shouldRun || info.optimizingLoop)),
 				fromCallNodeAnalysis: true,
 				parentInfo: info
 			});
-        }
-        
-        // 分析参数
-        node.arguments.forEach(arg => this.analyzeNode(arg, info));
+
+			const funcSymbol = this.currentScope.lookup(funcName);
+			funcSymbol.type.parameters.forEach(param => {
+				const resolvedType = this.semantic.getTypeInfo(param.type);
+				const resolvedSymbol = funinfo.scope.lookupCurrent(param.name);
+				if (resolvedType.kind === 'array') {
+					arrCallMapper.push(resolvedSymbol.getAssemblySymbol());
+				} else {
+					arrCallMapper.push(null);
+				}
+			});
+			
+        } else {
+			arrCallFail = true;
+		}
+
+		for (let i = 0; i < node.arguments.length; i++) {
+			this.analyzeNode(node.arguments[i], info);
+			if (node.arguments[i].symbol) {
+				const assemblyName = node.arguments[i].symbol.getAssemblySymbol();
+				if (arrCallFail) {
+					this.arrayState.downgrade(assemblyName);
+				} else if (arrCallMapper.length > i && arrCallMapper[i]) {
+					this.arrayState.assign(assemblyName, arrCallMapper[i]);
+				}
+			}
+		}
     }
 	// ! Manually updated !
 	analyzeIfStatement(node, info = null) {
@@ -4821,18 +5110,28 @@ export class Optimizer extends ASTVisitor {
 	replaceParametersInAST(node, paramMap, funcNode, symbolMapper) {
 		if (!node || !paramMap) return;
 		
-		switch (node.type) {
-			case 'Identifier':
-				if (node.symbol && node.symbol.kind === 'parameter') {
-					const replacement = paramMap.get(node.name);
-					if (replacement) {
-						const clonedReplacement = this.cloneAST(replacement);
-						clonedReplacement.location = node.location;
-						clonedReplacement.symbol = symbolMapper.lookup(replacement.name);
-						this.replaceNode(node, clonedReplacement);
+		const doReplacement = node => {
+			switch (node.type) {
+				case 'Identifier':
+					if (node.symbol && node.symbol.kind === 'parameter') {
+						const replacement = paramMap.get(node.name);
+						if (replacement) {
+							const clonedReplacement = this.cloneAST(replacement);
+							clonedReplacement.location = node.location;
+							clonedReplacement.symbol = symbolMapper.lookup(replacement.name);
+							this.replaceNode(node, clonedReplacement);
+						}
 					}
-				}
-				break;
+					break;
+			}
+		};
+
+		doReplacement(node);
+
+		const tsrc = node.getAttribute('totalSource');
+		if (tsrc && tsrc.type === 'Identifier') {
+			doReplacement(tsrc);
+			node.setAttribute('totalSource', this.cloneAST(paramMap.get(tsrc.name)));
 		}
 		
 		// 递归处理子节点
