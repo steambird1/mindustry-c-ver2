@@ -261,8 +261,10 @@ function peekNext(glob, pointer, isNear = false) {
 	return glob.memory.outputPointerForwardCall(1, pointer, glob.funcReg, false, false, isNear);
 }
 
-export function readThrough(glob, pointer, target, width = 1, isNear = false) {
+export function readThrough(glob, pointer, target, width = 1, isNear = false, blockName = null) {
 	if (width <= 1) {
+		// A stepped pointer keeps the block half of whatever it stepped from,
+		// so the block may be read straight from there instead of a copy.
 		return glob.memory.outputPointerFetchOf(pointer, target);
 	}
 	return new Instruction([
@@ -281,7 +283,7 @@ export function readThrough(glob, pointer, target, width = 1, isNear = false) {
  * @param {boolean} isNear
  * @returns {Instruction}
  */
-export function writeThrough(glob, pointer, value, width = 1, isNear = false) {
+export function writeThrough(glob, pointer, value, width = 1, isNear = false, blockName = null) {
 	if (width <= 1) {
 		return glob.memory.outputPointerStorageOf(pointer, value);
 	}
@@ -310,7 +312,7 @@ function referenceRead(glob, ref, target, width) {
 		}
 		return glob.memory.outputFetchOf(ref.fixedLocation, target);
 	}
-	return readThrough(glob, ref.name, target, width, ref.isNear);
+	return readThrough(glob, ref.name, target, width, ref.isNear, ref.blockAlias ?? null);
 }
 
 /**
@@ -331,7 +333,7 @@ function referenceWrite(glob, ref, value, width) {
 		}
 		return glob.memory.outputStorageOf(ref.fixedLocation, value);
 	}
-	return writeThrough(glob, ref.name, value, width, ref.isNear);
+	return writeThrough(glob, ref.name, value, width, ref.isNear, ref.blockAlias ?? null);
 }
 
 /**
@@ -909,7 +911,8 @@ export class PointerRet extends VariableRet {
 		const name = nameOf(target);
 		const inner = (this.type && this.type.pointerTo) ? this.type.pointerTo : null;
 		const width = (inner && inner.isPointerImpl()) ? 2 : 1;
-		const instructions = [this.instructions, readThrough(glob, this.name, name, width, this.isNear)];
+		const instructions = [this.instructions,
+			readThrough(glob, this.name, name, width, this.isNear, this.blockAlias ?? null)];
 		if (width >= 2) {
 			return new RefPointerRet(glob, instructions, name, inner, this.temporary);
 		}
@@ -936,14 +939,39 @@ export class PointerRet extends VariableRet {
 		const value = other.get().convertTo(inner ?? other.type);
 		return valueClassOf(glob, inner).create(glob,
 			[this.instructions, value.instructions,
-				writeThrough(glob, this.name, value.name, value.width, this.isNear)],
+				writeThrough(glob, this.name, value.name, value.width, this.isNear, this.blockAlias ?? null)],
 			this.name, inner, false);
 	}
 
 	/** p + n / p - n */
+	/**
+	 * The register holding the memory block number.
+	 *
+	 * Stepping a pointer never changes which block it points into, so the
+	 * result can keep reading the block from the pointer it came from and
+	 * skip copying it.
+	 *
+	 * @returns {string}
+	 */
+	blockOperand() {
+		return this.blockAlias ?? `${this.name}_block`;
+	}
+
 	offset(step, backward = false) {
 		const glob = this.glob;
 		const target = glob.tmp(this.type, 'pointer');
+		/*
+		`this.temporary` means the pointer itself lives in a scratch register
+		that a nested call may overwrite; then the block has to be copied. A
+		named pointer (a variable, an array base) is stable, so only the offset
+		needs a copy.
+		*/
+		/*
+		Both halves are copied: the pointer is stepped in place, and the block
+		half cannot be borrowed from `this.name`, because that register is
+		re-written when the same base is stepped again (or by a nested call),
+		while the stepped copy is still being read through.
+		*/
 		return new RefPointerRet(glob, [
 			this.instructions,
 			InstructionBuilder.set(`${target}_block`, `${this.name}_block`),
@@ -1678,8 +1706,10 @@ export class TraditionalArrayRet extends ArrayRet {
 			}
 		}
 		const address = (step === 0) ? base : base.offset(step);
-		return new MemoryRefRet(glob, [operand.instructions, extra, address.instructions],
+		const slot = new MemoryRefRet(glob, [operand.instructions, extra, address.instructions],
 			address.name, this.elementTypeInfo, true);
+		// Keep where the block half comes from, so the read needs no copy
+		return slot;
 	}
 }
 
@@ -1930,8 +1960,14 @@ export function encodeDigits(digits) {
  * @returns {{tables: string[], radix: number, shift: number, digits: number,
  *            cost: number, kind: 'single' | 'digits' | 'chain'}}
  */
-export function buildEncodedMapping(values) {
+export function buildEncodedMapping(values, options = {}) {
 	const radix = ENCODED_RADIX;
+	/*
+	When the program asked for `array("encoded", ...)` by name the string table
+	is the whole point, so the `select` chain fallback is not allowed: the
+	values must come out of a table even if a chain would be shorter.
+	*/
+	const forceTable = options.forceTable === true;
 	const numbers = values.map(v => Number(v));
 	if (numbers.some(v => !Number.isFinite(v))) {
 		throw new InfrastructureNotImplementedExpection('encoded arrays must hold numbers');
@@ -1965,7 +2001,7 @@ export function buildEncodedMapping(values) {
 		}
 	}
 	// The fallback: a plain chain of comparisons
-	const chainCost = Math.max(1, numbers.length - 1);
+	const chainCost = forceTable ? Infinity : Math.max(1, numbers.length - 1);
 	if (!best || chainCost < best.cost) {
 		best = { tables: [], radix, shift: 0, digits: 0, cost: chainCost, correction: 0, kind: 'chain' };
 	}
@@ -1986,10 +2022,10 @@ export class EncodedArrayRet extends ArrayRet {
 	 * @param {{tables: string[], radix: number, shift: number, digits: number,
 	 *          cost: number, kind: string}?} mapping From `buildEncodedMapping`
 	 */
-	constructor(glob, values, type, mapping = null) {
+	constructor(glob, values, type, mapping = null, forceTable = false) {
 		super(glob, [], '__encoded', type, false, values.length);
 		this.values = values;
-		this.mapping = mapping ?? buildEncodedMapping(values);
+		this.mapping = mapping ?? buildEncodedMapping(values, { forceTable });
 	}
 
 	/** @param {VariableRet | number | string} index */
@@ -2021,10 +2057,14 @@ class EncodedSlotRet extends VariableRet {
 		const target = glob.tmp(this.type);
 		const parts = [this.instructions];
 		if (mapping.kind === 'chain') {
-			parts.push(InstructionBuilder.set(target, String(this.array.values[0])));
+			const valueAt = i => {
+				const v = this.array.values[i];
+				return (v === undefined || v === null || !Number.isFinite(Number(v))) ? 0 : Number(v);
+			};
+			parts.push(InstructionBuilder.set(target, String(valueAt(0))));
 			for (let i = 1; i < this.array.values.length; i++) {
 				parts.push(InstructionBuilder.selectx(target,
-					`equal ${this.operand.name} ${i}`, String(this.array.values[i]), target));
+					`equal ${this.operand.name} ${i}`, String(valueAt(i)), target));
 			}
 			return valueClassOf(glob, this.type).create(glob, parts, target, this.type, true);
 		}
@@ -2176,7 +2216,10 @@ export function arrayRetOf(glob, style, options = {}) {
 		return new TraditionalArrayRet(glob, options.pointer, type, length);
 	}
 	if (style.type === 'encoded') {
-		return new EncodedArrayRet(glob, options.values ?? new Array(length).fill(0), type);
+		// `reason === 'requested'`: the program named this implementation, so the
+		// string table may not be replaced by a `select` chain
+		return new EncodedArrayRet(glob, options.values ?? new Array(length).fill(0), type,
+			null, style.reason === 'requested');
 	}
 	// style.type === 'embedded'
 	if (style.implement === 'lookup') {

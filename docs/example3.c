@@ -1,3 +1,4 @@
+#pragma optimize(array)
 
 auto device unloader1;
 auto device vault1;

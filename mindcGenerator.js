@@ -115,6 +115,13 @@ export class CodeGenerator extends ASTVisitor {
 			/**
 			 * @type {SymbolEntry[]}
 			 */
+			/*
+			The layout of an array is decided once and cached, and `encoded`
+			needs the contents to build its table -- so they have to be known
+			BEFORE anything asks for `arrayStyleFor`. Optimizer-tracked arrays
+			already carry theirs.
+			*/
+			this.collectGlobalArrayValues(ast);
 			let globalRegs = [];
 			if (ast.scope) {
 				globalRegs = this.processHeapMemory(ast.scope);
@@ -1509,6 +1516,87 @@ export class CodeGenerator extends ASTVisitor {
 	}
 
 	/**
+	 * The literal an instruction consists of, when it is nothing but
+	 * `set <temp> <literal>` and the temp is not used again.
+	 *
+	 * @param {any} inst
+	 * @returns {string?} null when it is not that shape
+	 */
+	immediateValueOf(inst) {
+		const list = inst?.instructions;
+		if (!Array.isArray(list) || list.length !== 1) return null;
+		const only = list[0];
+		if (!only || only.isInstructionGroup || !only.content) return null;
+		const match = /^set\s+\S+\s+(-?\d+(?:\.\d+)?|true|false|null|@[A-Za-z0-9_-]+)\s*$/
+			.exec(String(only.content));
+		return match ? match[1] : null;
+	}
+
+	/**
+	 * Fill in the elements of an array that lives in registers.
+	 *
+	 * @param {SymbolEntry} symbol
+	 * @param {{type: string, implement: string?}} style
+	 * @param {ASTNode} initializer An InitializerList
+	 * @returns {Instruction}
+	 */
+	initializeEmbeddedArray(symbol, style, initializer) {
+		const items = initializer.values ?? initializer.children ?? null;
+		if (!Array.isArray(items) || items.length === 0) return new Instruction();
+		const length = this.arrayLengthOf(symbol);
+		const names = style.type === 'embedded' && style.implement === 'lookup'
+			? this.lookupNamesOf(length).names : null;
+		const result = new Instruction();
+		for (let i = 0; i < items.length && i < length; i++) {
+			const register = names ? names[i] : `${symbol.getAssemblySymbol()}_${i}`;
+			if (!register) break;
+			/*
+			A content constant (@lead) initialising a numeric array must become
+			its id: the register would otherwise hold the content itself and
+			print as `@lead` instead of `1`.
+			*/
+			const item = items[i];
+			const isContent = item && item.type === 'Identifier'
+				&& typeof item.name === 'string' && item.name[0] === '@';
+			if (isContent) {
+				const id = this.semantic?.numberOfInitializerItem?.(item) ?? null;
+				if (id !== null) {
+					result.concat(InstructionBuilder.set(register, String(id)));
+					continue;
+				}
+			}
+			const value = this.visitAndRead(item);
+			result.concat(value);
+			result.concat(InstructionBuilder.set(register,
+				value.instructionReturn !== null && value.instructionReturn !== undefined
+					? value.instructionReturn : '0'));
+			this.releaseTempVariable?.();
+		}
+		return result;
+	}
+
+	/**
+	 * Record the literal contents of every global array.
+	 *
+	 * @param {ASTNode} ast The ProgramNode
+	 * @returns {void}
+	 */
+	collectGlobalArrayValues(ast) {
+		const previous = this.currentScope;
+		this.currentScope = this.semantic.globalScope ?? previous;
+		for (const declaration of ast.globalDeclarations ?? []) {
+			for (const declarator of declaration.declarators ?? []) {
+				const symbol = this.currentScope?.lookup?.(declarator.name);
+				if (!symbol || symbol.arrayInitialValues) continue;
+				if (!this.arraySymbolOfIdentifier(symbol)) continue;
+				const literals = this.numericElementsOf(declarator.initializer);
+				if (literals) symbol.arrayInitialValues = literals;
+			}
+		}
+		this.currentScope = previous;
+	}
+
+	/**
 	 * The contents of an initializer list, when every one of them is a number.
 	 *
 	 * @param {ASTNode?} initializer
@@ -1520,9 +1608,9 @@ export class CodeGenerator extends ASTVisitor {
 		if (!Array.isArray(items) || items.length === 0) return null;
 		const numbers = [];
 		for (const item of items) {
-			if (!item || item.type !== 'NumericLiteral') return null;
-			const value = Number(item.value);
-			if (!Number.isFinite(value)) return null;
+			// Numbers and content constants (`@lead`) both have a compile time id
+			const value = this.semantic?.numberOfInitializerItem?.(item) ?? null;
+			if (value === null || !Number.isFinite(value)) return null;
 			numbers.push(value);
 		}
 		return numbers;
@@ -1587,9 +1675,19 @@ export class CodeGenerator extends ASTVisitor {
 			const literals = this.numericElementsOf(node.initializer);
 			if (literals) symbol.arrayInitialValues = literals;
 		}
-		if (node.initializer && this.arraySymbolOfIdentifier(symbol)
-			&& this.arrayStyleFor(symbol).type !== 'traditional') {
+		const arrayStyle = this.arraySymbolOfIdentifier(symbol)
+			? this.arrayStyleFor(symbol) : null;
+		/*
+		An array held in registers still needs its elements FILLED IN: the
+		layout only decides where they live, not what they contain. Only an
+		`encoded` array is genuinely nothing but its own contents (they are the
+		string itself), and only it may skip initialisation.
+		*/
+		if (node.initializer && arrayStyle && arrayStyle.type !== 'traditional') {
 			node.initializer.setAttribute('embeddedInRepresentation', true);
+			if (arrayStyle.type !== 'encoded') {
+				finalize.concat(this.initializeEmbeddedArray(symbol, arrayStyle, node.initializer));
+			}
 			return finalize;
 		}
 		if (!symbol.memoryLocation || node.initializer) {
@@ -1732,8 +1830,16 @@ export class CodeGenerator extends ASTVisitor {
 			 * @param {ASTNode} obj 
 			 * @param {TypeInfo} typeLayer
 			 */
+			const spaceIsOwned = assignedSpace != null;
 			assignedSpace = assignedSpace ?? this.memory.assign(this.getTempSpace(), Math.max(node.dataType.size, node.getAttribute('requiredSize') ?? 0));
-			result.concat(assignedSpace.getAssignmentInstruction(tmpVar.getAssemblySymbol()));
+			/*
+			When the space is the variable's own memory location the declarator
+			has already written its address out; doing it again here only repeats
+			the same two instructions.
+			*/
+			if (!spaceIsOwned) {
+				result.concat(assignedSpace.getAssignmentInstruction(tmpVar.getAssemblySymbol()));
+			}
 			result.instructionReturn = tmpVar.getAssemblySymbol();
 			result.setAttribute('isPointer', true);
 			const initializerProcessor = (obj, typeLayer) => {
@@ -1761,6 +1867,15 @@ export class CodeGenerator extends ASTVisitor {
 					} else {
 						valueFetch = this.visitAndRead(obj);
 					}
+					/*
+					A value that is only `set <temp> <literal>` can go straight
+					into memory: the temp is not read anywhere else, so keeping
+					it costs one instruction per element for nothing.
+					*/
+					const immediate = this.immediateValueOf(valueFetch);
+					if (immediate !== null) {
+						result.concat(this.memory.outputStorageOf(assignedSpace, immediate));
+					} else {
 					result.concat(valueFetch);
 					// Process assignment-like
 					if (valueFetch.getAttribute('isPointer') || obj.dataType.isPointerImpl()) {
@@ -1771,6 +1886,7 @@ export class CodeGenerator extends ASTVisitor {
 						]));
 					} else {
 						result.concat(this.memory.outputStorageOf(assignedSpace, valueFetch.instructionReturn));
+					}
 					}
 					processed = step;
 					assignedSpace.forwarding(step);
@@ -1792,6 +1908,16 @@ export class CodeGenerator extends ASTVisitor {
 		a name whose id is declared as `null` needs the runtime lookup.
 		*/
 		const known = knownContentIdOf(this.glob, inst.instructionReturn);
+		/*
+		`@lead` on its own produces no code at all, so the id can simply BE the
+		value: no temp symbol, and `write 1 cell1 8` instead of two statements.
+		Anything that needs a register copies it explicitly (the attribute says
+		the literal may not be renamed in place).
+		*/
+		if (known !== null && !(inst.instructions && inst.instructions.length > 0)) {
+			return new Instruction([], String(known),
+				new Map([['disallowReplacement', true]]));
+		}
 		const temporary = this.getTempSymbol(this.semantic.getTypeInfo('int'));
 		if (known !== null) {
 			const holder = temporary.getAssemblySymbol();

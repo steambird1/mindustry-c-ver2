@@ -1692,11 +1692,69 @@ export class SemanticAnalyzer extends ASTVisitor {
 		symbol.requestedArrayImplementation = requested;
 		declarator.initializer = contents;
 		if (contents) {
-			// Remember the constants: an encoded array needs them to build its table
-			symbol.arrayInitialValues = (contents.values ?? contents.children ?? [])
-				.map(item => (item && item.value !== undefined) ? Number(item.value) : null)
-				.filter(v => v !== null && Number.isFinite(v));
+			this.recordArrayInitialValues(symbol, contents, requested === 'encoded',
+				initializer.location);
 		}
+	}
+
+	/**
+	 * The numeric value of one item of an initializer list.
+	 *
+	 * A content constant such as `@lead` counts as a number too: its id is
+	 * known from the content tables (or from `#pragma id`).
+	 *
+	 * @param {ASTNode?} item
+	 * @returns {number?} null when it is not a compile time number
+	 */
+	numberOfInitializerItem(item) {
+		if (!item) return null;
+		if (item.type === 'NumericLiteral') {
+			const value = Number(item.value);
+			return Number.isFinite(value) ? value : null;
+		}
+		if (item.type === 'Identifier' && typeof item.name === 'string' && item.name[0] === '@') {
+			const table = this.contentTable;
+			if (!table) return null;
+			for (const category of ['item', 'liquid', 'unit', 'block']) {
+				const id = table.idOf(category, item.name);
+				if (id !== undefined) return (id === null) ? null : id;
+			}
+			return null;
+		}
+		return null;
+	}
+
+	/**
+	 * Remember the contents of an array given with a literal list.
+	 *
+	 * Everything here must be a compile time number, because these are exactly
+	 * the arrays that may be stored as an encoded table instead of in memory.
+	 * An `encoded` array has no other way to hold its values, so for it the
+	 * contents are mandatory; for the rest a non-numeric element simply means
+	 * "this one cannot use the constant representations".
+	 *
+	 * @param {SymbolEntry} symbol
+	 * @param {ASTNode} list An InitializerList
+	 * @param {boolean} required
+	 * @param {any} location For the error message
+	 * @returns {void}
+	 */
+	recordArrayInitialValues(symbol, list, required, location = null) {
+		const items = list.values ?? list.children ?? [];
+		if (!Array.isArray(items) || items.length === 0) return;
+		const numbers = items.map(item => this.numberOfInitializerItem(item));
+		const bad = numbers.findIndex(v => v === null || !Number.isFinite(v));
+		if (bad >= 0) {
+			if (required) {
+				const raw = items[bad]?.name ?? items[bad]?.raw ?? items[bad]?.value ?? '?';
+				this.addError(
+					`An encoded array can only hold numbers; element ${bad} ('${raw}') is not one`,
+					location);
+			}
+			// Not usable as a constant table, but the array itself is still fine
+			return;
+		}
+		symbol.arrayInitialValues = numbers;
 	}
 
 	/**

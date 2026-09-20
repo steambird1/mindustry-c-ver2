@@ -3890,6 +3890,27 @@ export class Optimizer extends ASTVisitor {
 	 *
 	 * @returns {void}
 	 */
+	/**
+	 * Turn one tracked constant into a number.
+	 *
+	 * @param {any} value
+	 * @returns {number?} null when it is not a compile time number
+	 */
+	numberOfTrackedValue(value) {
+		if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+		if (value && typeof value === 'object' && value.isBuiltinConstant && typeof value.name === 'string') {
+			const table = this.contentTable;
+			if (!table) return null;
+			for (const category of ['item', 'liquid', 'unit', 'block']) {
+				const id = table.idOf(category, value.name);
+				if (id !== undefined) return (id === null) ? null : id;
+			}
+			return null;
+		}
+		if (typeof value === 'boolean') return value ? 1 : 0;
+		return null;
+	}
+
 	finalizeConstantArrays() {
 		if (!this.constantArrays || this.constantArrays.size === 0) return;
 		const visit = scope => {
@@ -3900,7 +3921,17 @@ export class Optimizer extends ASTVisitor {
 				const elements = this.getConstantArray(symbol);
 				if (!elements) return;
 				symbol.isConstantArray = true;
-				symbol.arrayInitialValues = elements.slice();
+				/*
+				The tracked values are optimizer objects: a content constant such
+				as `@lead` is `{isBuiltinConstant: ...}`, not a number. Turning an
+				array into an encoded table needs real numbers, so translate (and
+				when that is impossible, keep whatever the semantic pass recorded
+				rather than overwriting it with garbage).
+				*/
+				const numbers = elements.map(v => this.numberOfTrackedValue(v));
+				if (numbers.every(v => v !== null && Number.isFinite(v))) {
+					symbol.arrayInitialValues = numbers;
+				}
 				if (!symbol.arrayHasRuntimeWrite) {
 					/*
 					Nothing writes to it any more, so it can live in the cheapest

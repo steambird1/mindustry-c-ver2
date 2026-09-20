@@ -1,3 +1,6 @@
+#pragma optimize(array)
+#pragma optimize(pointer)
+
 /**
  * @requires pslist
 */
@@ -114,8 +117,8 @@ void considerOperation(item_t *selection, int *direction) {
     }
     if (balancing) {
         const bool maxImbalGreater = maxImbal > 0;
-        *selection = maxImbalGreater > 0 ? maxImbalItem : minImbalItem;
-        *direction = maxImbalGreater > 0 ? 1 : 0;
+        *selection = maxImbalGreater ? maxImbalItem : minImbalItem;
+        *direction = maxImbalGreater ? 1 : 0;
     } else {
         const bool isMovingAway = (bool)sensor(switch3, @enabled);
         *selection = isMovingAway ? maxImbalItem : minImbalItem;
