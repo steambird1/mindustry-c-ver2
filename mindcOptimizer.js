@@ -140,6 +140,86 @@ export class ArrayStateReferrer {
 		this.arrayParent.clear();
 		this.arrayState.clear();
 	}
+
+	/**
+	 * The style recorded for an array symbol, falling back to the default
+	 * (traditional) layout when nothing has been recorded.
+	 * 
+	 * @param {import('./mindcSemantic.js').SymbolEntry | string} symbol 
+	 * @returns {arrayStyle}
+	 */
+	styleOf(symbol) {
+		const name = (typeof symbol === 'string') ? symbol
+			: (symbol && typeof symbol.getAssemblySymbol === 'function') ? symbol.getAssemblySymbol() : `${symbol}`;
+		return this.query(name).status ?? this.defaultState;
+	}
+}
+
+/* ------------------------------------------------------------------ *
+ * Array representations -- classification
+ *
+ * The array styles above only say *which* layout an array has been
+ * given; the table below says what that means for the code generator
+ * (see the `ArrayRet` family in mindcInfrastructure.js).
+ * ------------------------------------------------------------------ */
+
+/**
+ * Every representation an array can have.
+ *
+ * `supportsPointer` tells whether the array may be converted into a
+ * pointer -- only the traditional layout lives in memory, so it is the
+ * only one that can.
+ *
+ * @type {Map<string, {type: string, implement: string?, representation: string, supportsPointer: boolean}>}
+ */
+export const ARRAY_IMPLEMENTATIONS = new Map([
+	['traditional', { type: 'traditional', implement: null, representation: 'TraditionalArrayRet', supportsPointer: true }],
+	['embedded.regular', { type: 'embedded', implement: 'regular', representation: 'PseudoListArrayRet', supportsPointer: false }],
+	['embedded.divided', { type: 'embedded', implement: 'divided', representation: 'PackedArrayRet', supportsPointer: false }],
+	['embedded.lookup', { type: 'embedded', implement: 'lookup', representation: 'ConstantArrayRet', supportsPointer: false }],
+	['encoded', { type: 'encoded', implement: null, representation: 'ConstantArrayRet', supportsPointer: false }]
+]);
+
+/**
+ * The key of an array style inside `ARRAY_IMPLEMENTATIONS`.
+ * 
+ * @param {arrayStyle?} style 
+ * @returns {string}
+ */
+export function keyOfArrayStyle(style) {
+	if (!style || !style.type) return 'traditional';
+	return style.implement ? `${style.type}.${style.implement}` : style.type;
+}
+
+/**
+ * Decide which representation an array symbol should get.
+ *
+ * This is a pure mirror of `loadArrayForSymbol` (which writes into the
+ * referrer): the same conditions, but returning the style instead of
+ * storing it. It exists so that the code generator can ask "how is this
+ * array represented?" without running a full analysis pass.
+ *
+ * @param {import('./mindcSemantic.js').SymbolEntry} symbol
+ * @param {any?} optimizeConfig The `optimizeConfig` of the optimizer
+ * @returns {arrayStyle}
+ */
+export function classifyArrayStyle(symbol, optimizeConfig = null) {
+	const traditional = { type: 'traditional', mutable: !symbol.isConst, implement: null };
+	const extracted = symbol.extractType();
+	// Arrays that are "no longer pointerImpl() but still have pointerTo"
+	if (!extracted.pointerTo) return traditional;
+	// Volatile arrays must stay in memory
+	if (extracted.isVolatile()) return traditional;
+	// Only arrays of simple (one word) elements can use the special layouts
+	if ((!['basic', 'device', 'null'].includes(extracted.pointerTo.kind)) || extracted.pointerTo.isPointerImpl()) {
+		return traditional;
+	}
+	const config = optimizeConfig ?? {};
+	if (!config["doArrayOptimize"]) return traditional;
+	if (symbol.isConst) {
+		return config["constArrayOptimize"] ?? config["arrayOptimize"] ?? { type: 'encoded', mutable: false, implement: null };
+	}
+	return config["arrayOptimize"] ?? { type: 'embedded', mutable: true, implement: null };
 }
 
 export class Optimizer extends ASTVisitor {
@@ -262,7 +342,10 @@ export class Optimizer extends ASTVisitor {
 			//console.log(iteration + ' -th optimize:');
 			//console.log(this);
         } while (this.modified && iteration < maxIterations);
-        
+
+		// Once everything is known, promote fully determined arrays
+		this.finalizeConstantArrays();
+
         return {
             success: this.errors.length === 0,
             ast: this.ast,
@@ -297,6 +380,9 @@ export class Optimizer extends ASTVisitor {
         // 3. 按作用域递归分析
         this.analyzeScope(this.globalScope);
 
+		// 4. Decide which pointers may store a NAME instead of an address
+		this.analyzeNamePointers();
+
 		// Scope optimizing done in global analyses
 		/*
 		const optimizingScope = scope => {
@@ -321,6 +407,375 @@ export class Optimizer extends ASTVisitor {
 
 	// ! Manually adjusted !
 	// This actually direct finds program entry
+	/**
+	 * Decide which pointers may store the NAME of what they point at
+	 * (`read`/`write @this <name>`) instead of a `block`/`pos` pair.
+	 *
+	 * Off unless `#pragma optimize(pointer)` is given, and it needs v150.
+	 * Even then a pointer only qualifies when
+	 *
+	 *  - everything ever stored into it is the address of a plain register
+	 *    variable, or of a member of a register struct (which is a register
+	 *    too), or of another qualifying pointer;
+	 *  - what it points at fits in ONE register -- a traditional pointer takes
+	 *    two, so `&p` is only allowed when p is itself a name pointer;
+	 *  - it is never involved in pointer arithmetic (`p + 2`, `p[2]`, `p++`),
+	 *    which only makes sense for arrays;
+	 *  - it is never assigned from an array, nor into an array;
+	 *  - and it does not live inside a recursive function, where a register
+	 *    would not survive the nested call.
+	 *
+	 * Pointers that are assigned to one another share a verdict, so a pointer
+	 * can never end up holding a name while a related one holds an address.
+	 */
+	analyzeNamePointers() {
+		const config = this.optimizeConfig ?? {};
+		if (config.doPointerOptimize !== true) return;
+		const version = this.compiler?.config?.getAttribute('targetVersion') ?? 0;
+		if (version < 150) return;
+		// Which functions call themselves (directly or not)? Nothing local to
+		// one can be kept in a register.
+		this.recursiveFunctions = this.findRecursiveFunctions?.(this.functionCallGraph) ?? new Set();
+
+		/** @type {Map<string, any>} */
+		const pointers = new Map();
+		/** @type {Map<string, Set<string>>} */
+		const addressTaken = new Map();
+
+		/**
+		 * Does a value of this type fit in a single register?
+		 * @param {any} type
+		 * @returns {boolean}
+		 */
+		const isSingleRegister = (type) => {
+			if (!type || !type.isTypeInfo) return false;
+			switch (type.kind) {
+				case 'pointer':
+					// A traditional pointer takes two words (`_block` / `_pos`);
+					// only a name pointer takes one.
+					return false;
+				case 'array':
+				case 'struct':
+				case 'union':
+					return false;
+				default:
+					return true;
+			}
+		};
+
+		const keyOf = symbol => symbol?.getAssemblySymbol?.() ?? symbol?.name ?? null;
+
+		const typeOfSymbol = symbol => symbol?.myType?.() ?? symbol?.type?.type ?? null;
+
+		const isPointerSymbol = symbol => typeOfSymbol(symbol)?.kind === 'pointer';
+
+		const isArraySymbol = symbol => {
+			const type = typeOfSymbol(symbol);
+			return !!type && (type.kind === 'array');
+		};
+
+		/**
+		 * @param {any} symbol
+		 * @returns {any} the entry describing this pointer
+		 */
+		const register = symbol => {
+			const key = keyOf(symbol);
+			if (!key) return null;
+			if (!pointers.has(key)) {
+				pointers.set(key, {
+					key, symbol,
+					sources: new Set(),	// what may be stored into it
+					peers: new Set(),	// pointers assigned to / from it
+					bad: false
+				});
+			}
+			return pointers.get(key);
+		};
+
+		/**
+		 * Classify `&expr`, i.e. whether the target is a single register whose
+		 * name can be stored.
+		 * @param {any} expr
+		 * @param {any} scope
+		 * @returns {{kind: string, target: string?, targetSymbol: any?}}
+		 */
+		const classifyAddress = (expr, scope) => {
+			if (!expr) return { kind: 'invalid', target: null, targetSymbol: null };
+			if (expr.type === 'UnaryExpression' && expr.operator === '*') {
+				// `&*q` is just `q`
+				return classify(expr, scope);
+			}
+			if (expr.type === 'Identifier') {
+				const symbol = scope?.lookup(expr.name) ?? null;
+				if (!symbol) return { kind: 'invalid', target: null, targetSymbol: null };
+				if (isPointerSymbol(symbol)) {
+					// Pointing at a pointer: only allowed if that one is a name pointer
+					return { kind: 'pointer', target: keyOf(symbol), targetSymbol: symbol };
+				}
+				if (isArraySymbol(symbol)) return { kind: 'invalid', target: null, targetSymbol: symbol };
+				volatileGuard(symbol);
+				if (symbol.isVolatile || symbol.isExtern || symbol.isStatic) {
+					return { kind: 'invalid', target: null, targetSymbol: symbol };
+				}
+				if (!isSingleRegister(typeOfSymbol(symbol))) {
+					return { kind: 'invalid', target: null, targetSymbol: symbol };
+				}
+				return { kind: 'register', target: keyOf(symbol), targetSymbol: symbol };
+			}
+			if (expr.type === 'MemberExpression') {
+				// `&s.m`: allowed when s is a register struct, because then the
+				// member is a register of its own
+				const object = expr.children?.[0] ?? expr.object ?? null;
+				if (!object || object.type !== 'Identifier') {
+					return { kind: 'invalid', target: null, targetSymbol: null };
+				}
+				const owner = scope?.lookup(object.name) ?? null;
+				if (!owner) return { kind: 'invalid', target: null, targetSymbol: null };
+				const type = typeOfSymbol(owner);
+				if (!type || !['struct', 'union'].includes(type.kind)) {
+					return { kind: 'invalid', target: null, targetSymbol: null };
+				}
+				if (type.isPointerImpl?.()) return { kind: 'invalid', target: null, targetSymbol: owner };
+				return { kind: 'register', target: null, targetSymbol: owner };
+			}
+			return { kind: 'invalid', target: null, targetSymbol: null };
+		};
+
+		/**
+		 * Classify a value that is stored into a pointer.
+		 * @param {any} expr
+		 * @param {any} scope
+		 * @returns {{kind: string, target: string?, targetSymbol: any?}}
+		 */
+		const classify = (expr, scope) => {
+			if (!expr) return { kind: 'invalid', target: null, targetSymbol: null };
+			switch (expr.type) {
+				case 'UnaryExpression':
+					if (expr.operator !== '&') return { kind: 'invalid', target: null, targetSymbol: null };
+					return classifyAddress(expr.argument, scope);
+				case 'Identifier': {
+					const symbol = scope?.lookup(expr.name) ?? null;
+					if (!symbol) return { kind: 'invalid', target: null, targetSymbol: null };
+					if (isPointerSymbol(symbol)) {
+						return { kind: 'pointer', target: keyOf(symbol), targetSymbol: symbol };
+					}
+					// `p = arr` : an array decays to a real address
+					return { kind: 'invalid', target: null, targetSymbol: symbol };
+				}
+				case 'BinaryExpression':
+				case 'MemberExpression':
+				case 'FunctionCall':
+				case 'CastExpression':
+				default:
+					// Arithmetic on a pointer walks an array; anything unknown is
+					// refused rather than guessed at.
+					return { kind: 'invalid', target: null, targetSymbol: null };
+			}
+		};
+
+		const volatileGuard = symbol => { };
+
+		/**
+		 * Note that `expr` is stored into `pointerSymbol`.
+		 * @param {any} pointerSymbol
+		 * @param {any} expr
+		 * @param {any} scope
+		 * @param {boolean} [extraBad]
+		 */
+		const note = (pointerSymbol, expr, scope, extraBad = false) => {
+			const entry = register(pointerSymbol);
+			if (!entry) return;
+			if (extraBad) entry.bad = true;
+			// Anything inside a recursive function must live in memory
+			if (this.isRecursiveSymbol?.(pointerSymbol)) entry.bad = true;
+			const info = classify(expr, scope);
+			entry.sources.add(info.kind);
+			if (info.kind === 'pointer' && info.target) {
+				entry.peers.add(info.target);
+			} else if (info.kind !== 'register') {
+				entry.bad = true;
+			}
+			if (info.kind === 'register' && info.target) {
+				if (!addressTaken.has(info.target)) addressTaken.set(info.target, new Set());
+				addressTaken.get(info.target).add(entry.key);
+			}
+			if (info.kind === 'register' && info.targetSymbol && this.isRecursiveSymbol?.(info.targetSymbol)) {
+				// The target itself lives in a recursive function: not a register
+				entry.bad = true;
+			}
+		};
+
+		/**
+		 * @param {any} node
+		 * @param {any} scope
+		 */
+		const walk = (node, scope) => {
+			if (!node || typeof node !== 'object') return;
+			if (Array.isArray(node)) { node.forEach(child => walk(child, scope)); return; }
+			switch (node.type) {
+				case 'AssignmentExpression': {
+					const left = node.left;
+					if (left && left.type === 'Identifier') {
+						const symbol = scope?.lookup(left.name) ?? null;
+						if (isPointerSymbol(symbol)) {
+							note(symbol, node.right, scope, node.operator !== '=');
+						} else if (isArraySymbol(symbol)) {
+							// `arr = p` : the pointer has to be a real address
+							const source = scope?.lookup(node.right?.name ?? '') ?? null;
+							if (isPointerSymbol(source)) register(source).bad = true;
+						}
+					}
+					break;
+				}
+				case 'VariableDeclarator': {
+					if (node.name && node.initializer) {
+						const symbol = scope?.lookup(node.name) ?? null;
+						if (isPointerSymbol(symbol)) note(symbol, node.initializer, scope);
+					}
+					break;
+				}
+				case 'MemberExpression': {
+					// `p[i]` is pointer arithmetic
+					const object = node.children?.[0] ?? node.object ?? null;
+					if (object && object.type === 'Identifier') {
+						const symbol = scope?.lookup(object.name) ?? null;
+						if (isPointerSymbol(symbol)) register(symbol).bad = true;
+					}
+					break;
+				}
+				case 'UnaryExpression': {
+					if ((node.operator === '++' || node.operator === '--') && node.argument) {
+						const symbol = scope?.lookup(node.argument.name) ?? null;
+						if (isPointerSymbol(symbol)) register(symbol).bad = true;
+					}
+					break;
+				}
+				default: break;
+			}
+			if (node.children) node.children.forEach(child => walk(child, scope));
+			const fields = ['functions', 'globalDeclarations', 'typeDefinitions', 'statements',
+				'expression', 'test', 'consequent', 'alternate', 'body', 'init', 'update',
+				'argument', 'left', 'right', 'declarators', 'arguments', 'callee', 'initializer'];
+			for (const field of fields) {
+				if (Array.isArray(node[field])) node[field].forEach(child => walk(child, scope));
+				else if (node[field] && typeof node[field] === 'object') walk(node[field], scope);
+			}
+		};
+
+		const walkScope = scope => {
+			if (scope?.astNode) walk(scope.astNode, scope);
+			scope?.children?.forEach(walkScope);
+		};
+		walkScope(this.globalScope);
+
+		if (pointers.size === 0) return;
+
+		/* Group pointers that are assigned to one another: they share a verdict. */
+		const byName = new Map();
+		for (const [key, entry] of pointers) byName.set(entry.symbol?.name ?? key, key);
+		const groups = [];
+		const seen = new Set();
+		const collect = (key, group) => {
+			if (group.has(key)) return;
+			group.add(key);
+			const entry = pointers.get(key);
+			if (!entry) return;
+			for (const peer of entry.peers) {
+				const peerKey = byName.get(peer) ?? peer;
+				if (pointers.has(peerKey)) collect(peerKey, group);
+			}
+			// Anything pointing AT this pointer shares its fate too
+			for (const [otherKey, other] of pointers) {
+				if (other.peers.has(key)) collect(otherKey, group);
+			}
+		};
+		for (const key of pointers.keys()) {
+			if (seen.has(key)) continue;
+			const group = new Set();
+			collect(key, group);
+			group.forEach(k => seen.add(k));
+			groups.push(group);
+		}
+
+		/* Fixpoint: a group qualifies only if every source of every member is a
+		   register or an already qualified pointer. */
+		const eligible = new Set();
+		let changed = true;
+		while (changed) {
+			changed = false;
+			for (const group of groups) {
+				if (group.size === 0) continue;
+				let ok = true;
+				for (const key of group) {
+					const entry = pointers.get(key);
+					if (!entry || entry.bad) { ok = false; break; }
+					for (const source of entry.sources) {
+						if (source !== 'register' && source !== 'pointer') { ok = false; break; }
+					}
+					if (!ok) break;
+					for (const peer of entry.peers) {
+						const peerKey = byName.get(peer) ?? peer;
+						if (!pointers.has(peerKey)) continue;
+						// A peer inside the same group shares this group's verdict,
+						// so it cannot block it -- otherwise `int **pp = &p` and
+						// `int *p = &x` would deadlock.
+						if (group.has(peerKey)) continue;
+						if (!eligible.has(peerKey)) { ok = false; break; }
+					}
+					if (!ok) break;
+				}
+				if (ok && ![...group].every(k => eligible.has(k))) {
+					group.forEach(k => eligible.add(k));
+					changed = true;
+				}
+			}
+		}
+
+		for (const key of eligible) {
+			const entry = pointers.get(key);
+			if (entry) entry.symbol.usesNamePointer = true;
+		}
+
+		/*
+		A variable whose address is only ever taken by name pointers does not
+		have to live in memory at all -- that is the whole point.
+		*/
+		for (const [target, takers] of addressTaken) {
+			if (takers.size === 0) continue;
+			const allNames = [...takers].every(t => eligible.has(t));
+			if (allNames) this.markNameOnlyTarget(target);
+		}
+	}
+
+	/**
+	 * Whether the symbol belongs to a recursive function.
+	 * @param {any} symbol
+	 * @returns {boolean}
+	 */
+	isRecursiveSymbol(symbol) {
+		if (!symbol || symbol.isStatic) return false;
+		const region = symbol.getFunctionRegion?.() ?? null;
+		return !!region && this.recursiveFunctions?.has(region);
+	}
+
+	/**
+	 * Record that the variable called `assemblyName` is only ever reached
+	 * through name pointers, so it may stay in a register.
+	 * @param {string} assemblyName
+	 */
+	markNameOnlyTarget(assemblyName) {
+		const visitScope = scope => {
+			if (!scope) return;
+			scope.symbols?.forEach(symbol => {
+				if ((symbol.getAssemblySymbol?.() ?? null) === assemblyName) {
+					symbol.namePointersOnly = true;
+				}
+			});
+			scope.children?.forEach(visitScope);
+		};
+		visitScope(this.globalScope);
+	}
+
     analyzeScope(scope) {
         if (this.analyzedScopes.has(scope)) {
             return;
@@ -717,34 +1172,133 @@ export class Optimizer extends ASTVisitor {
 	 * @param {SymbolEntry?} [symbol=null] 
 	 * @returns {boolean?} `null` means 'do not make changes on variable states'.
 	 */
-	shouldRunEvaluation(node, info = null, symbol = null) {
+	/**
+	 * --------------------------------------------------------------------
+	 * How much is known about an expression?
+	 * --------------------------------------------------------------------
+	 *
+	 * Every place that decides "may I rely on what this expression does?"
+	 * answers one of exactly three things:
+	 *
+	 *   EVAL_DEFINITE -- the value is known for sure, and recording it is safe.
+	 *                    Constant folding, branch pruning, loop unrolling.
+	 *
+	 *   EVAL_TRACKED  -- the VALUE is not known, but the ACCESSES are: we know
+	 *                    that a read/write happens and to which symbol. Good
+	 *                    enough for usage counting and dead-store removal, NOT
+	 *                    good enough to write a value into the constant table.
+	 *
+	 *   EVAL_UNKNOWN  -- nothing can be relied upon at all: the code may not
+	 *                    even run (an unsure branch), or it runs an unknown
+	 *                    number of times (a loop). Not even "this variable is
+	 *                    written here" is trustworthy.
+	 *
+	 * `shouldRunEvaluation` below answers with one of these; the helpers
+	 * `isDefinite` / `isTracked` are what callers should test with, so that the
+	 * three states are never conflated with true/false.
+	 */
+	static EVAL_DEFINITE = 'definite';
+	static EVAL_TRACKED = 'tracked';
+	static EVAL_UNKNOWN = 'unknown';
+
+	/**
+	 * @param {any} state One of EVAL_DEFINITE / EVAL_TRACKED / EVAL_UNKNOWN
+	 * @returns {boolean} Whether the value is known and may be recorded.
+	 */
+	isDefinite(state) {
+		return state === Optimizer.EVAL_DEFINITE;
+	}
+
+	/**
+	 * @param {any} state One of EVAL_DEFINITE / EVAL_TRACKED / EVAL_UNKNOWN
+	 * @returns {boolean} Whether the accesses are known, even if the value is not.
+	 */
+	isTracked(state) {
+		return state === Optimizer.EVAL_DEFINITE || state === Optimizer.EVAL_TRACKED;
+	}
+
+	/**
+	 * Turn an evaluation state into the `doUpdate` argument of
+	 * `addWrittenSymbol`: DEFINITE records the value, TRACKED records only that
+	 * a write happens, UNKNOWN records nothing at all.
+	 *
+	 * @param {any} state
+	 * @returns {boolean?}
+	 */
+	updateFlagFor(state) {
+		if (state === Optimizer.EVAL_DEFINITE) return true;
+		if (state === Optimizer.EVAL_TRACKED) return null;
+		return false;
+	}
+
+	/**
+	 * How much may be relied upon for `node`.
+	 *
+	 * @param {ASTNode} node
+	 * @param {any} info The analysis context (loop / unsure / function state)
+	 * @param {SymbolEntry?} symbol The symbol being touched, if any -- a symbol
+	 *        declared *outside* the unsure region keeps its state even inside one
+	 * @returns {string} EVAL_DEFINITE, EVAL_TRACKED or EVAL_UNKNOWN
+	 */
+	evaluationState(node, info = null, symbol = null) {
+		const state = Optimizer;
 		if (info) {
+			/*
+			Inside an "unsure" region (a branch we cannot decide): we know the
+			code may run, so accesses to symbols declared OUTSIDE the region are
+			still known -- but nothing has a definite value.
+			*/
 			if (info.isUnsure) {
-				if (symbol && symbol.scope.isParent(info.atUnsure)) {
-					return true;
-				}
-				return false;
+				if (symbol && symbol.scope.isParent(info.atUnsure)) return state.EVAL_DEFINITE;
+				return state.EVAL_UNKNOWN;
 			}
+			/*
+			A function that is not actually called (or is called from somewhere
+			we do not track): accesses inside it are known, values are not --
+			unless the symbol lives outside that function.
+			*/
 			if (info.inFunction && !info.actualCalling) {
-				if (symbol && symbol.scope.isParent(info.atFunction)) {
-					return true;
-				}
-				return false;	// i.e. uncertain calls
+				if (symbol && symbol.scope.isParent(info.atFunction)) return state.EVAL_DEFINITE;
+				return state.EVAL_UNKNOWN;	// i.e. uncertain calls
 			}
-			if (info.optimizingLoop) return true;	// High proiority!
+			if (info.optimizingLoop) return state.EVAL_DEFINITE;	// High priority!
+			/*
+			Inside a loop: a symbol declared outside survives every iteration,
+			so its accesses are known; on the first run we can even fold values,
+			afterwards nothing is definite.
+			*/
 			if (info.isLoop) {
-				if (symbol && symbol.scope.isParent(info.atLoop)) {
-					return true;
-				}
-				if (info.firstLoopRun) {
-					return null;	// Priority relevantly lower
-				}
-				return false;
+				if (symbol && symbol.scope.isParent(info.atLoop)) return state.EVAL_DEFINITE;
+				if (info.firstLoopRun) return state.EVAL_TRACKED;	// Priority relevantly lower
+				return state.EVAL_UNKNOWN;
 			}
 		}
-		return true;
+		return state.EVAL_DEFINITE;
 	}
-	
+
+	/**
+	 * Legacy boolean entry point, kept because it is used in many places:
+	 * `true` means "the value can be trusted".
+	 *
+	 * @param {ASTNode} node
+	 * @param {any} [info]
+	 * @param {SymbolEntry?} [symbol]
+	 * @returns {boolean}
+	 */
+	shouldRunEvaluation(node, info = null, symbol = null) {
+		return this.isDefinite(this.evaluationState(node, info, symbol));
+	}
+
+	shouldRunEvaluation(node, info = null, symbol = null) {
+		const state = this.evaluationState(node, info, symbol);
+		/*
+		`EVAL_TRACKED` used to come back as `null` from here, and several callers
+		distinguish it from `false` (see `addWrittenSymbol`). Keep that: return
+		the flag that says how much may be recorded.
+		*/
+		return this.updateFlagFor(state);
+	}
+
 	// Some unary expressions have side	effects of writing (++ and --):
 	// ! Manually adjusted !
 	analyzeUnaryExpression(node, info = null) {
@@ -945,6 +1499,17 @@ export class Optimizer extends ASTVisitor {
             // 检查常量初始化
             if (declarator.initializer) {
                 this.analyzeNode(declarator.initializer, info);
+				/*
+				An array initialised with constants: remember every element, so
+				that a constant subscript can be folded later.
+				*/
+				this.discardArrayGivenToPointer(declarator, declarator.initializer);
+				if (canOptimizeThis && this.isFoldableArray(symbol)
+					&& declarator.initializer.type === 'InitializerList') {
+					const elements = (declarator.initializer.children ?? []).map(
+						item => this.evaluateConstantExpression(item));
+					this.recordConstantArray(symbol, elements);
+				}
                 if (canOptimizeThis && this.shouldRunEvaluation(node, info, symbol)) {
 					const constValue = this.evaluateConstantExpression(declarator.initializer);
 					if (constValue !== undefined) {
@@ -1047,9 +1612,83 @@ export class Optimizer extends ASTVisitor {
         }
     }
 
+	/**
+	 * `p = a` (or `int *p = a`): the array's address escapes into a pointer, so
+	 * it can be written through `p[i]` with any subscript. Forget its contents.
+	 *
+	 * @param {ASTNode} left
+	 * @param {ASTNode} right
+	 * @returns {void}
+	 */
+	discardArrayGivenToPointer(left, right) {
+		// Only when the destination is (or holds) a pointer
+		const leftSymbol = this.baseSymbolOf(left);
+		const leftType = leftSymbol?.myType?.() ?? left?.dataType ?? null;
+		const leftIsPointer = !!leftType && (leftType.kind === 'pointer'
+			|| (left.dataType && left.dataType.kind === 'pointer'));
+		if (!leftIsPointer) return;
+		const source = this.baseSymbolOf(right);
+		if (this.isFoldableArray(source)) this.invalidateConstantArray(source);
+	}
+
+	/**
+	 * Apply the effect of an assignment on a constant array: update one element
+	 * when both subscript and value are known, forget everything otherwise.
+	 *
+	 * @param {ASTNode} node An AssignmentExpression
+	 * @param {any} info
+	 * @returns {void}
+	 */
+	applyArrayWrite(node, info) {
+		const left = node.left;
+		if (!left || left.type !== 'MemberExpression') return;
+		const owner = left.children?.[0] ?? left.object ?? null;
+		const subscript = left.children?.[1] ?? left.property ?? null;
+		if (!owner || owner.type !== 'Identifier' || !subscript) return;
+		const symbol = this.currentScope.lookup(owner.name);
+		if (!symbol || !this.isFoldableArray(symbol)) return;
+		if (!this.getConstantArray(symbol)) return;
+
+		// `+=` and friends: evaluate the whole expression; `=`: just the value
+		const plain = !node.operator || node.operator === '=';
+		const value = this.evaluateConstantExpression(plain ? node.right : node);
+		const index = this.evaluateConstantExpression(subscript);
+		const definite = this.isDefinite(this.evaluationState(node, info, symbol));
+		if (definite && value !== undefined && typeof index === 'number' && Number.isInteger(index)) {
+			const elements = this.getConstantArray(symbol);
+			if (elements && index >= 0 && index < elements.length) {
+				this.writeConstantArrayElement(symbol, index, value);
+				/*
+				The element is known now, but a real `write` instruction is still
+				emitted for it. Remember that, so the array is not later turned
+				into an immutable constant -- that would leave the write with
+				nowhere to go.
+				*/
+				symbol.arrayHasRuntimeWrite = true;
+				return;
+			}
+		}
+		// Unknown subscript, unknown value, or an unsure write
+		this.invalidateConstantArray(symbol);
+	}
+
 	// !! This has manual changes !!
     analyzeAssignmentExpression(node, info = null) {
-        
+		/*
+		An array handed to a pointer escapes our tracking: from now on the
+		array can be written through `p[anything]`, so its contents are unknown.
+		*/
+		this.discardArrayGivenToPointer(node.left, node.right);
+
+		/*
+		Writing into an array. When BOTH the subscript and the value are known
+		at compile time the element is simply updated -- that is what makes
+		`a[2] = 7; print(a[2]);` fold. Anything else (an unknown subscript, an
+		unknown value, or a write we are not sure even happens) throws the known
+		contents away.
+		*/
+		this.applyArrayWrite(node, info);
+
         // 分析右值
         this.analyzeNode(node.right, info);
 		
@@ -1096,6 +1735,20 @@ export class Optimizer extends ASTVisitor {
 						(info.isUnsure || !info.actualCalling) ? null : constValue, 
 						this.shouldRunEvaluation(node, info));
 				}
+				/*
+				When the write could NOT be folded at all (inside a loop, or in a
+				branch we cannot decide) nothing above recorded it -- so an alias
+				established earlier, `int t = b;`, would survive a later write to
+				`b` and make `a = t` compile into `a = b`. Record the write
+				anyway; its VALUE stays unknown, only the access is known.
+				*/
+				if (!(usage && usage.canOptimize)) {
+					const written = this.currentScope.lookup(node.left.name);
+					if (written) {
+						this.addWrittenSymbol(written, null,
+							this.evaluationState(node, info, written));
+					}
+				}
 				
 				if (symbol.isArray()) {
 					if (node.right.symbol && node.right.symbol.isArray()) {
@@ -1117,6 +1770,23 @@ export class Optimizer extends ASTVisitor {
 		}
     }
 
+	/**
+	 * Functions that must be kept even when no call to them is visible: the
+	 * stack helpers reach them through `#pragma stackcheck(fn)` /
+	 * `#pragma stackunderflow(fn)`, which is not a call the optimizer can see.
+	 *
+	 * @returns {Set<string>}
+	 */
+	protectedHandlerNames() {
+		const config = this.optimizeConfig ?? {};
+		const names = new Set();
+		['stackCheck', 'stackUnderflow'].forEach(key => {
+			const value = config[key];
+			if (typeof value === 'string' && value.length > 0) names.add(value);
+		});
+		return names;
+	}
+
 	recordFunctionCall(callerName, funcName) {
 		if (!this.functionCallGraph.has(callerName)) {
 			this.functionCallGraph.set(callerName, new Set());
@@ -1133,6 +1803,28 @@ export class Optimizer extends ASTVisitor {
 		*/
 		let arrCallMapper = [];
 		let arrCallFail = false;
+
+		/*
+		An array handed to a function may be written there. So may a GLOBAL one:
+		the callee can name it directly without it appearing in the argument
+		list. Since we do not analyse what a call does to globals, every global
+		array becomes unknown at every call site; locals are only affected when
+		they are actually passed.
+		*/
+		(node.arguments ?? []).forEach(argument => {
+			const argumentSymbol = this.baseSymbolOf(argument);
+			if (this.isFoldableArray(argumentSymbol)) this.invalidateConstantArray(argumentSymbol);
+		});
+		if (this.constantArrays && this.constantArrays.size > 0) {
+			const visit = scope => {
+				if (!scope) return;
+				(scope.getAllSymbols?.() ?? []).forEach(symbol => {
+					if (symbol.isGlobal && this.isFoldableArray(symbol)) this.invalidateConstantArray(symbol);
+				});
+				scope.children?.forEach(visit);
+			};
+			visit(this.globalScope);
+		}
 
         if (node.callee.type === 'Identifier') {
             const funcName = node.callee.name;
@@ -2971,67 +3663,311 @@ export class Optimizer extends ASTVisitor {
 	 * @param {*} value
 	 * @param {boolean} doUpdate null: Record write count only; true: Try no side effect value; false: Label as with side effect
 	 */
-	addWrittenSymbol(varSymbol, value, doUpdate = true) {
-		const isNoSideEffect = val => (val != null && val != undefined);
-
-		const currentFuncScope = this.currentFunction ? (this.functionInfo.get(this.currentFunction).node.scope) : this.globalScope;
-		//doUpdate = doUpdate;	// By default suppress cross-function optimization
-		let noSideEffectValue = value;
+	/**
+	 * Record that `varSymbol` is written, and how much we know about it.
+	 *
+	 * The third argument is one of the three evaluation states
+	 * (`Optimizer.EVAL_*`), or the booleans that used to stand for them:
+	 *
+	 *   DEFINITE (true)  -- the value is known; it goes into the constant table.
+	 *   TRACKED  (null)  -- only the WRITE is known: count it, but do not touch
+	 *                       the constant table in either direction (leaving a
+	 *                       stale constant would be wrong, deleting a good one
+	 *                       would be pessimistic).
+	 *   UNKNOWN  (false) -- nothing is reliable; drop whatever we thought we knew.
+	 *
+	 * A `value` of `null`/`undefined` means "the value is not known", which
+	 * forces the pessimistic path even when the state is DEFINITE.
+	 *
+	 * @param {SymbolEntry} varSymbol
+	 * @param {any} value The value written, or null/undefined if unknown
+	 * @param {string|boolean?} [state] EVAL_DEFINITE / EVAL_TRACKED / EVAL_UNKNOWN
+	 * @returns {void}
+	 */
+	addWrittenSymbol(varSymbol, value, state = Optimizer.EVAL_DEFINITE) {
+		if (!varSymbol) return;
 		/*
-		if (!varSymbol.belongingTo(currentFuncScope)) {
-			doUpdate = false;
-			noSideEffectValue = null;
-		}
+		A write to an array destroys whatever we knew about its elements: the
+		subscript may be anything, and even a known one invalidates the rest.
 		*/
+		if (this.isFoldableArray(varSymbol)) this.invalidateConstantArray(varSymbol);
+		// Accept the old `doUpdate` booleans: true -> DEFINITE, false -> UNKNOWN
+		const resolved = this.resolveWriteState(state);
+		const state_ = Optimizer;
+		const valueKnown = (value != null && value != undefined);
+
 		const varName = varSymbol.name;
 		const scopePath = varSymbol.scope.getPath();
 		const variableUses = this.variableUses.get(scopePath);
 		const localConstants = this.localConstants.get(scopePath);
-		
+
+		if (!variableUses || !localConstants) return;
+
+		/* ---- 1. The write itself is known, whatever the state ---- */
 		const usage = variableUses.get(varName);
 		if (usage) {
 			usage.writes++;
-			if (doUpdate != null) {
-				if (isNoSideEffect(value)) {
-					usage.canOptimize = true;
-				} else {
-					usage.canOptimize = false;
-				}
+			if (resolved !== state_.EVAL_UNKNOWN) {
+				// A known value may be folded; an unknown one forbids it
+				usage.canOptimize = valueKnown;
 			}
-			
 		}
-	
+
 		// Record variable access in it
 		if (this.currentFunction && this.functionInfo.has(this.currentFunction)) {
-			let target = this.functionInfo.get(this.currentFunction);
+			const target = this.functionInfo.get(this.currentFunction);
 			target.writtenVars.push(varSymbol);
 		}
 
-		// 赋值会改变变量值，从常量表中移除
-		// TODO: Consider removal only if the
-		// assigned value is NOT a constant or
-		// inside a conditional statement !!
-		if (doUpdate != null) {
-			if (!isNoSideEffect(value) || doUpdate == false) {
-				localConstants.delete(varName);
-				varSymbol.isConstant = false;
-				varSymbol.constantValue = null;
-			} else if (doUpdate) {	// This branch is probably a must-go (i.e. "else,") but I don't want to change it. Zauber!
-				const varType = varSymbol.myType();
-				if (this.semantic.isTypeCompatibleForAny(varType, ['int', 'long', 'unsigned', 'signed'], true)) {
-					if (typeof noSideEffectValue === 'number') {
-						noSideEffectValue = Math.floor(noSideEffectValue);
-					}
-				}
-				if (this.semantic.isSameType(varType, this.semantic.getTypeInfo('bool'))) {
-					noSideEffectValue = Boolean(noSideEffectValue);
-				}
-				localConstants.set(varName, noSideEffectValue);
-				varSymbol.markAsConstant(noSideEffectValue);
-			}
-			varSymbol.variableReferrer.modify();
+		/* ---- 2. What does this do to the constant table? ---- */
+		if (resolved === state_.EVAL_TRACKED) {
+			// Only the access is known: leave the constant table alone
+			varSymbol.variableReferrer?.modify();
+			return;
 		}
-		
+		if (resolved === state_.EVAL_UNKNOWN || !valueKnown) {
+			// The value is gone (or was never known): forget any constant
+			localConstants.delete(varName);
+			varSymbol.isConstant = false;
+			varSymbol.constantValue = null;
+			varSymbol.variableReferrer?.modify();
+			return;
+		}
+
+		/* ---- 3. DEFINITE with a known value: record it ---- */
+		let recorded = value;
+		const varType = varSymbol.myType();
+		if (this.semantic.isTypeCompatibleForAny(varType, ['int', 'long', 'unsigned', 'signed'], true)) {
+			if (typeof recorded === 'number') recorded = Math.floor(recorded);
+		}
+		if (this.semantic.isSameType(varType, this.semantic.getTypeInfo('bool'))) {
+			recorded = Boolean(recorded);
+		}
+		localConstants.set(varName, recorded);
+		varSymbol.markAsConstant(recorded);
+		varSymbol.variableReferrer?.modify();
+	}
+
+	/* ------------------------------------------------------------------ *
+	 * Constant arrays
+	 *
+	 * An array whose every element is a compile-time constant, and that is
+	 * never written again, can be folded at compile time just like a plain
+	 * constant: `a[2]` becomes a number. The elements are kept per scope, and
+	 * any write to the array (or taking its address) throws them away.
+	 * ------------------------------------------------------------------ */
+
+	/**
+	 * The variable an lvalue ultimately refers to: `a` for `a`, `a` for `a[i]`
+	 * and `a.b.c`, `p` for `*p`.
+	 *
+	 * @param {any} expr
+	 * @returns {SymbolEntry?}
+	 */
+	baseSymbolOf(expr) {
+		let current = expr;
+		while (current) {
+			if (current.type === 'Identifier') {
+				return this.currentScope.lookup(current.name) ?? null;
+			}
+			if (current.type === 'MemberExpression') {
+				current = current.children?.[0] ?? current.object ?? null;
+				continue;
+			}
+			if (current.type === 'UnaryExpression' && current.operator === '*') {
+				current = current.argument ?? null;
+				continue;
+			}
+			return null;
+		}
+		return null;
+	}
+
+	/**
+	 * @param {SymbolEntry} symbol
+	 * @returns {string}
+	 */
+	constantArrayKey(symbol) {
+		return `${symbol.scope.getPath()}|${symbol.name}`;
+	}
+
+	/**
+	 * @param {SymbolEntry} symbol
+	 * @returns {number[]?} The elements, or null when they are not known
+	 */
+	getConstantArray(symbol) {
+		if (!symbol) return null;
+		this.constantArrays = this.constantArrays ?? new Map();
+		return this.constantArrays.get(this.constantArrayKey(symbol)) ?? null;
+	}
+
+	/**
+	 * Remember the elements of an array.
+	 * @param {SymbolEntry} symbol
+	 * @param {any[]} values
+	 * @returns {void}
+	 */
+	recordConstantArray(symbol, values) {
+		if (!symbol || !Array.isArray(values) || values.length === 0) return;
+		this.constantArrays = this.constantArrays ?? new Map();
+		this.constantArrays.set(this.constantArrayKey(symbol), values.slice());
+	}
+
+	/**
+	 * Update ONE element of an array whose value we know.
+	 *
+	 * This is what makes `a[2] = 7;` followed by `print(a[2])` fold, instead of
+	 * throwing the whole array away.
+	 *
+	 * @param {SymbolEntry} symbol
+	 * @param {number} index
+	 * @param {any} value
+	 * @returns {void}
+	 */
+	writeConstantArrayElement(symbol, index, value) {
+		const elements = this.getConstantArray(symbol);
+		if (!elements) return;
+		if (!Number.isInteger(index) || index < 0 || index >= elements.length) {
+			// Out of bounds or not a constant: nothing can be assumed any more
+			this.invalidateConstantArray(symbol);
+			return;
+		}
+		if (value === undefined || value === null) {
+			elements[index] = undefined;
+			return;
+		}
+		elements[index] = value;
+	}
+
+	/**
+	 * Whether every element of the array is known.
+	 * @param {SymbolEntry} symbol
+	 * @returns {boolean}
+	 */
+	constantArrayComplete(symbol) {
+		const elements = this.getConstantArray(symbol);
+		if (!elements) return false;
+		const length = this.arrayLengthOf(symbol);
+		if (length > 0 && elements.length !== length) return false;
+		return elements.every(item => item !== undefined && item !== null);
+	}
+
+	/**
+	 * How many elements the array symbol has.
+	 * @param {SymbolEntry} symbol
+	 * @returns {number}
+	 */
+	arrayLengthOf(symbol) {
+		const type = symbol.myType?.() ?? null;
+		const sizes = (type && type.arraySize) ? type.arraySize : null;
+		const asNumber = item => {
+			if (item === null || item === undefined) return null;
+			if (typeof item === 'number') return item;
+			if (typeof item.value === 'number') return item.value;
+			return null;
+		};
+		const list = Array.isArray(sizes) ? sizes : [sizes];
+		const numbers = list.map(asNumber).filter(n => n !== null && n > 0);
+		if (numbers.length > 0) return numbers.reduce((a, b) => a * b, 1);
+		return type && type.size ? type.size : 0;
+	}
+
+	/**
+	 * Promote arrays whose every element turned out to be a compile-time constant.
+	 *
+	 * After all the analysis rounds, an array may be left with a complete set of
+	 * known elements -- because it was initialised with constants, or because
+	 * every write to it could be folded (including writes that appeared inside an
+	 * unrolled loop). Such an array IS a constant array, and is treated as one:
+	 *
+	 *  - its values are handed to the code generator, so a constant subscript
+	 *    needs no memory access at all;
+	 *  - when nothing writes to it at run time any more, it is stored the way a
+	 *    `const` array is (a single encoded string instead of memory cells).
+	 *
+	 * An array that still has real `write` instructions is left in its current
+	 * storage: it is the values that are known, not the array that is immutable.
+	 *
+	 * @returns {void}
+	 */
+	finalizeConstantArrays() {
+		if (!this.constantArrays || this.constantArrays.size === 0) return;
+		const visit = scope => {
+			if (!scope) return;
+			(scope.getAllSymbols?.() ?? []).forEach(symbol => {
+				if (!this.isFoldableArray(symbol)) return;
+				if (!this.constantArrayComplete(symbol)) return;
+				const elements = this.getConstantArray(symbol);
+				if (!elements) return;
+				symbol.isConstantArray = true;
+				symbol.arrayInitialValues = elements.slice();
+				if (!symbol.arrayHasRuntimeWrite) {
+					/*
+					Nothing writes to it any more, so it can live in the cheapest
+					constant representation instead of in memory.
+					*/
+					if (!symbol.requestedArrayImplementation) {
+						symbol.requestedArrayImplementation = 'encoded';
+					}
+					symbol.isConst = true;
+				}
+			});
+			scope.children?.forEach(visit);
+		};
+		visit(this.globalScope);
+	}
+
+	/**
+	 * Forget the elements of an array: it has been written (or its address has
+	 * been taken), so nothing about its contents is reliable any more.
+	 * @param {SymbolEntry} symbol
+	 * @returns {void}
+	 */
+	invalidateConstantArray(symbol) {
+		if (!symbol) return;
+		this.constantArrays = this.constantArrays ?? new Map();
+		this.constantArrays.delete(this.constantArrayKey(symbol));
+	}
+
+	/**
+	 * Whether an array symbol may be folded at compile time at all.
+	 *
+	 * Excluded are the arrays whose contents somebody else may change behind our
+	 * back:
+	 *  - `volatile` and `extern` are read and written by OTHER PROCESSORS, so
+	 *    not even a single read can be folded -- `extern` says so explicitly;
+	 *  - an array whose address is taken can be reached through a pointer we do
+	 *    not track.
+	 *
+	 * A global array is allowed: it is only visible to this program. What makes
+	 * it delicate is that any call may write it, so every call site throws the
+	 * known contents away (see `analyzeFunctionCall`).
+	 *
+	 * @param {SymbolEntry} symbol
+	 * @returns {boolean}
+	 */
+	isFoldableArray(symbol) {
+		if (!symbol) return false;
+		const type = symbol.myType?.() ?? null;
+		if (!type || type.kind !== 'array') return false;
+		if (symbol.isVolatile || symbol.isExtern) return false;
+		if (symbol.isAddressed) return false;
+		return true;
+	}
+
+	/**
+	 * Normalise the third argument of `addWrittenSymbol` into an evaluation
+	 * state, accepting the legacy booleans.
+	 *
+	 * @param {string|boolean?} state
+	 * @returns {string}
+	 */
+	resolveWriteState(state) {
+		const state_ = Optimizer;
+		if (state === true) return state_.EVAL_DEFINITE;
+		if (state === false) return state_.EVAL_UNKNOWN;
+		if (state === null || state === undefined) return state_.EVAL_TRACKED;
+		return state;
 	}
 
 	addWriteForCurrentScope(varName, noSideEffectValue, doUpdate = true) {
@@ -3261,6 +4197,34 @@ export class Optimizer extends ASTVisitor {
 				modified = modified || this.replaceAliasAt(node);
                 break;
                 
+			case 'MemberExpression': {
+				/*
+				`a[3]` where every element of `a` is known becomes a literal --
+				the array version of constant folding. Never on the left of an
+				assignment: there the subscript is a destination, not a value.
+				*/
+				if (!node.getAttribute || !node.getAttribute('computed')) break;
+				const owner = node.parent ?? null;
+				const isTarget = owner && (
+					(owner.type === 'AssignmentExpression' && owner.left === node) ||
+					(owner.type === 'BinaryExpression' && owner.operator.includes('=')
+						&& !['==', '!=', '>=', '<=', '>', '<'].includes(owner.operator) && owner.left === node));
+				if (!isTarget) {
+					const elementValue = this.evaluateConstantExpression(node);
+					if (elementValue !== undefined) {
+						const replacement = this.getLiteral(elementValue);
+						replacement.location = node.location;
+						replacement.dataType = node.dataType;
+						this.replaceNode(node, replacement);
+						modified = true;
+						break;
+					}
+				}
+				// The subscript itself may still contain constants
+				const subscriptNode = node.children ? node.children[1] : null;
+				if (subscriptNode) modified = this.replaceConstantsAt(subscriptNode, constants, restrictions) || modified;
+				break;
+			}
             case 'BinaryExpression':
                 // 常量折叠
                 const leftValue = this.evaluateConstantExpression(node.left);
@@ -3570,6 +4534,10 @@ export class Optimizer extends ASTVisitor {
 						funcNode.body) {
 						// For functions we use 'body (=== null)' instead of 'isDefinition'
 						
+						// Never drop a stack handler: the walker calls it
+						if (this.protectedHandlerNames().has(funcName)) {
+							return;
+						}
 						// Manually added: also remove symbols
 						this.globalScope.removeSymbol(funcName);
 						
@@ -3641,6 +4609,33 @@ export class Optimizer extends ASTVisitor {
 	 * @param {boolean} [allowConstants=true] Whether to allow builtin constants to be regarded as constants
 	 * @returns {number | string | extBuiltinConstant | undefined} (`undefined` means it is **not** constant)
 	 */
+	/**
+	 * The `#pragma id` / `#pragma var` definitions of this program.
+	 * @returns {import('./mindcContent.js').ContentIdTable?}
+	 */
+	get contentTable() {
+		return this.compiler?.extraConfig?.getAttribute('contentTable') ?? null;
+	}
+
+	/**
+	 * The value of `@itemCount` / `@liquidCount` / `@unitCount` / `@blockCount`,
+	 * when the compiler is allowed to know it.
+	 *
+	 * @param {string} name
+	 * @returns {number?} null when it is not a count constant, or when ids were
+	 *          declared by hand and the real counts are therefore unknown
+	 */
+	contentCountOf(name) {
+		const category = {
+			'@itemCount': 'item', '@liquidCount': 'liquid',
+			'@unitCount': 'unit', '@blockCount': 'block'
+		}[name];
+		if (!category) return null;
+		const table = this.contentTable;
+		if (table && table.hasOverrides) return undefined;	// Deliberately unknown
+		return table ? table.namesOf(category).length : null;
+	}
+
     evaluateConstantExpression(node, allowConstants = true) {
         if (!node) return undefined;
         
@@ -3649,7 +4644,19 @@ export class Optimizer extends ASTVisitor {
                 return node.value;
             case 'Identifier':
 				// Try evaluating in current environment
-				if (node.name[0] === '@' && !dynamicBuiltins.includes(node.name[0]) && allowConstants) {
+				if (node.name[0] === '@' && allowConstants) {
+					/*
+					`@itemCount` and friends are fixed by the content tables, so
+					they fold like any other number -- unless the program declared
+					ids of its own, in which case how many contents exist is no
+					longer something the compiler may assume.
+					*/
+					const count = this.contentCountOf(node.name);
+					if (count !== null) return count;
+					if (this.contentTable && this.contentTable.isOpaque(node.name)) {
+						// An unknown content: its id is not knowable here
+						return undefined;
+					}
 					// Regard this as a constant value...
 					return {
 						isBuiltinConstant: true,
@@ -3695,6 +4702,19 @@ export class Optimizer extends ASTVisitor {
                     return this.evaluateUnaryOperation(node.operator, arg);
                 }
                 return undefined;
+			case 'MemberExpression': {
+				if (!node.getAttribute('computed')) return undefined;
+				const object = node.children?.[0] ?? node.object ?? null;
+				const subscript = node.children?.[1] ?? node.property ?? null;
+				if (!object || object.type !== 'Identifier' || !subscript) return undefined;
+				const symbol = this.currentScope.lookup(object.name);
+				if (!symbol || !this.isFoldableArray(symbol)) return undefined;
+				const index = this.evaluateConstantExpression(subscript);
+				if (typeof index !== 'number' || !Number.isInteger(index)) return undefined;
+				const elements = this.getConstantArray(symbol);
+				if (!elements || index < 0 || index >= elements.length) return undefined;
+				return elements[index];
+			}
 			case 'ConditionalExpression':
 				const test = this.evaluateConstantExpression(node.test);
 				if (test !== undefined) {

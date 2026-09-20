@@ -1,6 +1,6 @@
 /*
 MinCCompiler on JS
-By Seabird Starch Gunnhildr, Hunyuan and Deepseek, 2025 - 2026.
+By Seabird Starch Gunnhildr and Deepseek, 2025 - 2026.
 
 mindcInfrastructure.js -- the object-oriented "value" layer of the code generator.
 
@@ -132,6 +132,24 @@ const isSpecialLike = (glob, type) => !!type && SPECIAL_CONTENT_TYPES.includes(t
  * @param {TypeInfo?} type
  * @returns {number}
  */
+/**
+ * The numeric id of a `@name` constant, when the compiler knows it.
+ *
+ * @param {import('./mindcGeneratorBase.js').Globals?} glob
+ * @param {string} name
+ * @returns {number?} null when unknown (so a runtime `sensor @id` is needed)
+ */
+export function knownContentIdOf(glob, name) {
+	if (typeof name !== 'string' || name[0] !== '@') return null;
+	const table = glob?.semantic?.contentTable ?? null;
+	if (!table) return null;
+	for (const category of ['item', 'liquid', 'unit', 'block']) {
+		const id = table.idOf(category, name);
+		if (id !== undefined) return (id === null) ? null : id;
+	}
+	return null;
+}
+
 export function widthOfType(type) {
 	if (!type || !type.isTypeInfo) return 1;
 	if (type.kind === 'pointer' || type.kind === 'array') return 2;
@@ -639,7 +657,16 @@ export class VariableRet extends Instruction {
 		} else if (isIntegerLike(glob, dst) && isFloatLike(glob, src)) {
 			conversion = InstructionBuilder.op('floor', target, value.name);
 		} else if (isIntegerLike(glob, dst) && isContentLike(glob, src)) {
-			conversion = InstructionBuilder.sensor(target, value.name, '@id');
+			/*
+			The id of a `@name` is known at compile time, so write it out instead
+			of asking the processor with `sensor x @name @id` -- one instruction
+			less, and the value is right even when nothing is linked. Only when
+			the id is unknown (declared as `null`) does the sensor stay.
+			*/
+			const knownId = knownContentIdOf(glob, value.name);
+			conversion = knownId === null
+				? InstructionBuilder.sensor(target, value.name, '@id')
+				: InstructionBuilder.set(target, String(knownId));
 		} else if (isContentLike(glob, dst) && (isIntegerLike(glob, src) || isSpecialLike(glob, src))) {
 			conversion = InstructionBuilder.lookup(category ?? contentTypeOf(src.name), target, value.name);
 		} else if (isBoolLike(glob, dst)) {

@@ -34,6 +34,7 @@ import { SymbolEntry, Scope, TypeInfo, MemberInfo, SemanticAnalyzer } from "./mi
 import { Optimizer } from "./mindcOptimizer.js";
 
 import { Instruction, SingleInstruction, InstructionBuilder, MemoryBlock, MemoryBlockInfo } from "./mindcGeneratorBase.js";
+import { ContentIdTable } from "./mindcContent.js";
 
 import { CodeGenerator } from "./mindcGenerator.js";
 
@@ -369,6 +370,8 @@ export class Compiler {
 			parserConfig.setAttribute('extraFunctions', exFuncs);
 			parserConfig.setAttribute('extraHandler', new Map(extensions.flatMap(ext => [...ext.handlers])));
 			const optimizerConfig = {};
+			/** @type {ContentIdTable} `#pragma id` / `#pragma var` definitions */
+			const contentTable = new ContentIdTable();
 			tokens.pragmas.forEach(
 				/**
 				 * 
@@ -406,6 +409,14 @@ export class Compiler {
 								optimizerConfig.doPointerOptimize = true;
 								break;
 						}
+					} else if (info.startsWith("stackunderflow(")) {
+						/*
+						#pragma stackunderflow(fn) -- call `fn` when the stack is
+						                              walked below the first block
+						#pragma stackunderflow()   -- no check (this is the default)
+						*/
+						const handler = info.substring(info.indexOf('(') + 1, info.lastIndexOf(')')).trim();
+						optimizerConfig.stackUnderflow = handler === '' ? false : handler;
 					} else if (info.startsWith("stackcheck(")) {
 						/*
 						#pragma stackcheck(fn) -- call `fn` when the stack frame cannot grow
@@ -414,9 +425,46 @@ export class Compiler {
 						*/
 						const handler = info.substring(info.indexOf('(') + 1, info.lastIndexOf(')')).trim();
 						optimizerConfig.stackCheck = handler === '' ? false : handler;
+					} else if (info.startsWith("id(")) {
+						/*
+						#pragma id(item, @myitem:300)   -- give `@myitem` the id 300
+						#pragma id(unit, @oldname:null) -- the name has no id
+						These win over the built-in table.
+						*/
+						const body = info.substring(info.indexOf('(') + 1, info.lastIndexOf(')'));
+						const parts = body.split(',').map(t => t.trim());
+						if (parts.length >= 2) {
+							const spec = parts.slice(1).join(',');
+							const at = spec.indexOf('@');
+							const colon = spec.lastIndexOf(':');
+							if (at >= 0 && colon > at) {
+								const name = spec.substring(at, colon).trim();
+								const raw = spec.substring(colon + 1).trim();
+								const id = (raw === 'null' || raw === '') ? null : Number(raw);
+								contentTable.define(parts[0], name,
+									(id === null || Number.isFinite(id)) ? id : null);
+							}
+						}
+					} else if (info.startsWith("var(")) {
+						/*
+						#pragma var(int, @myVar) -- a processor variable, like @this
+						*/
+						const body = info.substring(info.indexOf('(') + 1, info.lastIndexOf(')'));
+						const parts = body.split(',').map(t => t.trim());
+						if (parts.length >= 2) {
+							const name = parts[1];
+							if (name.startsWith('@')) contentTable.defineVariable(name, parts[0]);
+						}
 					}
 			});
 			parserConfig.setAttribute('optimizeOption', optimizerConfig);
+			parserConfig.setAttribute('contentTable', contentTable);
+			/*
+			Declaring ids by hand means the built-in `lookup` tables no longer
+			necessarily match the processor the program runs on, so arrays must not
+			use them.
+			*/
+			if (contentTable.hasOverrides) optimizerConfig.lookupUnavailable = true;
 
 			this.parser = new Parser(this.lexer, parserConfig);
 			this.extraConfig = parserConfig;

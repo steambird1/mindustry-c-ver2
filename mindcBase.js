@@ -1,79 +1,7 @@
+import { CONTENT_ORDER } from './mindcContent.js';
 
 // 抽象语法树节点类型
-// AST节点类型枚举
-export const ASTNodeType = {
-    // 程序结构
-    PROGRAM: 'Program',
-    FUNCTION_DECLARATION: 'FunctionDeclaration',
-    FUNCTION_CALL: 'FunctionCall',
-    PARAMETER_LIST: 'ParameterList',
-    
-    // 语句
-    EXPRESSION_STATEMENT: 'ExpressionStatement',
-    COMPOUND_STATEMENT: 'CompoundStatement',
-    IF_STATEMENT: 'IfStatement',
-    WHILE_STATEMENT: 'WhileStatement',
-    DO_WHILE_STATEMENT: 'DoWhileStatement',
-    FOR_STATEMENT: 'ForStatement',
-    RETURN_STATEMENT: 'ReturnStatement',
-    BREAK_STATEMENT: 'BreakStatement',
-    CONTINUE_STATEMENT: 'ContinueStatement',
-    DECLARATION_STATEMENT: 'DeclarationStatement',
-    
-    // 声明
-    VARIABLE_DECLARATION: 'VariableDeclaration',
-    VARIABLE_DECLARATOR: 'VariableDeclarator',
-	
-	// 类型定义相关
-    TYPEDEF_DECLARATION: 'TypedefDeclaration',
-    STRUCT_DEFINITION: 'StructDefinition',
-    UNION_DEFINITION: 'UnionDefinition',
-    STRUCT_MEMBER: 'StructMember',
-    UNION_MEMBER: 'UnionMember',
-    
-    // 类型限定符
-    TYPE_QUALIFIER: 'TypeQualifier',
-	
-	// 指针类型相关
-    POINTER_TYPE: 'PointerType',
-    DECLARATOR: 'Declarator',
-    
-    // 表达式
-    BINARY_EXPRESSION: 'BinaryExpression',
-	CAST_EXPRESSION: 'CastExpression',
-    UNARY_EXPRESSION: 'UnaryExpression',
-    ASSIGNMENT_EXPRESSION: 'AssignmentExpression',
-    LOGICAL_EXPRESSION: 'LogicalExpression',
-    CONDITIONAL_EXPRESSION: 'ConditionalExpression',
-    MEMBER_EXPRESSION: 'MemberExpression',
-    ARRAY_EXPRESSION: 'ArrayExpression',
-    CALL_EXPRESSION: 'CallExpression',
-    
-    // 字面量
-    IDENTIFIER: 'Identifier',
-    NUMERIC_LITERAL: 'NumericLiteral',
-    STRING_LITERAL: 'StringLiteral',
-    CHARACTER_LITERAL: 'CharacterLiteral',
-    NULL_LITERAL: 'NullLiteral',
-	INITIALIZER_LIST: 'InitializerList',
-    
-    // 类型
-    TYPE_SPECIFIER: 'TypeSpecifier',
-    POINTER_TYPE: 'PointerType',
-    
-    // 特殊
-    ASM_STATEMENT: 'AsmStatement',
-    BUILTIN_CALL: 'BuiltinCall',
-	
-	// For optimizer
-	DELETED: 'DeletedStatement'
-};
 
-/**
- * 
- * @param {Map<string, Set<string>>} callGraph 
- * @returns {Set<string>}
- */
 export function findRecursiveFunctions(callGraph) {
 	// 收集所有函数节点
 	const allFunctions = new Set();
@@ -171,6 +99,77 @@ export function findRecursiveFunctions(callGraph) {
 	
 	return result;
 }
+
+
+
+// AST节点类型枚举
+export const ASTNodeType = {
+    // 程序结构
+    PROGRAM: 'Program',
+    FUNCTION_DECLARATION: 'FunctionDeclaration',
+    FUNCTION_CALL: 'FunctionCall',
+    PARAMETER_LIST: 'ParameterList',
+    
+    // 语句
+    EXPRESSION_STATEMENT: 'ExpressionStatement',
+    COMPOUND_STATEMENT: 'CompoundStatement',
+    IF_STATEMENT: 'IfStatement',
+    WHILE_STATEMENT: 'WhileStatement',
+    DO_WHILE_STATEMENT: 'DoWhileStatement',
+    FOR_STATEMENT: 'ForStatement',
+    RETURN_STATEMENT: 'ReturnStatement',
+    BREAK_STATEMENT: 'BreakStatement',
+    CONTINUE_STATEMENT: 'ContinueStatement',
+    DECLARATION_STATEMENT: 'DeclarationStatement',
+    
+    // 声明
+    VARIABLE_DECLARATION: 'VariableDeclaration',
+    VARIABLE_DECLARATOR: 'VariableDeclarator',
+	
+	// 类型定义相关
+    TYPEDEF_DECLARATION: 'TypedefDeclaration',
+    STRUCT_DEFINITION: 'StructDefinition',
+    UNION_DEFINITION: 'UnionDefinition',
+    STRUCT_MEMBER: 'StructMember',
+    UNION_MEMBER: 'UnionMember',
+    
+    // 类型限定符
+    TYPE_QUALIFIER: 'TypeQualifier',
+	
+	// 指针类型相关
+    POINTER_TYPE: 'PointerType',
+    DECLARATOR: 'Declarator',
+    
+    // 表达式
+    BINARY_EXPRESSION: 'BinaryExpression',
+	CAST_EXPRESSION: 'CastExpression',
+    UNARY_EXPRESSION: 'UnaryExpression',
+    ASSIGNMENT_EXPRESSION: 'AssignmentExpression',
+    LOGICAL_EXPRESSION: 'LogicalExpression',
+    CONDITIONAL_EXPRESSION: 'ConditionalExpression',
+    MEMBER_EXPRESSION: 'MemberExpression',
+    ARRAY_EXPRESSION: 'ArrayExpression',
+    CALL_EXPRESSION: 'CallExpression',
+    
+    // 字面量
+    IDENTIFIER: 'Identifier',
+    NUMERIC_LITERAL: 'NumericLiteral',
+    STRING_LITERAL: 'StringLiteral',
+    CHARACTER_LITERAL: 'CharacterLiteral',
+    NULL_LITERAL: 'NullLiteral',
+	INITIALIZER_LIST: 'InitializerList',
+    
+    // 类型
+    TYPE_SPECIFIER: 'TypeSpecifier',
+    POINTER_TYPE: 'PointerType',
+    
+    // 特殊
+    ASM_STATEMENT: 'AsmStatement',
+    BUILTIN_CALL: 'BuiltinCall',
+	
+	// For optimizer
+	DELETED: 'DeletedStatement'
+};
 
 export class AttributeClass {
 	constructor() {
@@ -813,35 +812,15 @@ export class ConstantManager {
  * @param {string} s 
  */
 export const __convert = s => s.split(',').map(t => t.replace(/\-/g, '_').trim());
-export var objectList = __convert(
-	'@copper, @lead, @coal, @graphite, @scrap, @sand, @pyratite, @silicon, @spore-pod, @blast-compound, @titanium, @plastanium, @thorium, @phase-fabric, @surge-alloy, @beryllium, @tungsten, @oxide, @carbide'
-);
-export var liquidList = __convert(
-	'@water, @slag, @oil, @cryofluid, @neoplasm, @gallium, @ozone, @hydrogen, @cyanogen, @nitrogen'
-);
-export var unitList = __convert(
-	'@Aegires, @Alpha, @Anthicus, @Antumbra, @Arkyid, @Atrax, @Avert, @Beta, @Bryde, @Cleroi, @Collaris, @Conquer, @Corvus, @Crawler, @Cyerce, @Dagger, @Disrupt, @Eclipse, @Elude, @Emanate, @Evoke, @Flare, @Fortress, @Gamma, @Guardian, @Horizon, @Incite, @Latum, @Locus, @Mace, @Manifold, @Mega, @Merui, @Minke, @Mono, @Navanax, @Nova, @Obviate, @Oct, @Omura, @Oxynoe, @Poly, @Precept, @Pulsar, @Quad, @Quasar, @Quell, @Reign, @Renale, @Retusa, @Risso, @Scepter, @Sei, @Spiroct, @Stell, @Tecta, @Toxopid, @Vanquish, @Vela, @Zenith'
-).map(s => s.toLowerCase());
-// This list is in fact incomplete
-export var buildingList = __convert(
-	[
-		'@core-shard, @core-foundation, @core-nucleus, @core-bastion, @core-acropolis',
-		'@mechanical-drill, @pneumatic-drill, @laser-drill, @blast-drill, @water-extractor, @cultivator, @oil-extractor',
-		'@conveyor, @titanium-conveyor, @plastanium-conveyor, @armored-conveyor, @junction, @bridge-conveyor, @phase-conveyor, @sorter, @inverted-sorter, @router, @distributor, @overflow-gate, @underflow-gate, @mass-driver',
-		'@conduit, @pulse-conveyor, @plated-conveyor, @rotary-pump, @thermal-pump, @conduit, @pipeline, @plated-pipeline, @liquid-router, @liquid-tank, @liquid-junction, @bridge-conduit, @phase-conveyor',
-		'@combustion-generator, @thermal-generator, @steam-generator, @differential-generator, @rtg-generator, @solar-panel, @large-solar-panel, @thorium-reactor, @impact-reactor, @battery, @large-battery, @power-node, @power-node-large, @surge-tower, @diode',
-		'@copper-wall, @large-copper-wall, @titanium-wall, @large-titanium-wall, @durium-wall, @large-durium-wall, @thorium-wall, @large-thorium-wall, @phase-wall, @large-phase-wall, @surge-wall, @large-surge-wall, @door, @large-door, @mender, @mend-projector, @force-projector, @overdrive-projector, @overdrive-dome, @repair-point, @repair-turret',
-		'@duo, @scatter, @scorch, @hail, @arc, @wave, @lancer, @swarmer, @salvo, @fuse, @ripple, @cyclone, @foreshadow, @spectre, @meltdown, @segment, @parallax, @tsunami',
-		'@dagger-factory, @mace-factory, @fortress-factory, @scepter-factory, @reign-factory',
-		'@nova-factory, @pulsar-factory, @quasar-factory, @vela-factory, @corvus-factory',
-		'@crawler-factory, @atrax-factory, @spiroct-factory, @arkyid-factory, @toxopid-factory',
-		'@silicon-smelter, @silicon-smelter2, @silicon-smelter3, @kiln, @plastanium-compressor, @phase-weaver, @surge-smelter, @cryofluid-mixer, @pyratite-mixer, @blast-mixer, @melter, @separator, @disassembler, @spore-press, @pulverizer, @coal-centrifuge, @multi-press',
-		'@container, @vault, @core-shard, @core-foundation, @core-nucleus, @unloader',
-		'@liquid-tank, @conduit, @liquid-router',
-		'@container, @vault, @unloader',
-		'@illuminator, @payload-conveyor, @payload-router, @incinerator, @power-source, @power-void, @item-source, @item-void, @liquid-source, @liquid-void, @payload-source, @payload-void, @message, @switch, @micro-processor, @logic-processor, @hyper-processor, @memory-cell, @memory-bank, @logic-display, @large-logic-display',
-		'@oxidis'
-	].join(',')
-);
+/*
+The content lists are the v152..v159 `logicids.dat` order: the position of a
+name inside its list IS its id (what `sensor x @id` returns). They used to be
+hand written and partly wrong, which made `lookup` and every id based
+conversion disagree with the game.
+*/
+export var objectList = CONTENT_ORDER.item.map(name => `@${name}`);
+export var liquidList = CONTENT_ORDER.liquid.map(name => `@${name}`);
+export var unitList = CONTENT_ORDER.unit.map(name => `@${name}`);
+export var buildingList = CONTENT_ORDER.block.map(name => `@${name}`);
 
 export var dynamicBuiltins = ['@this', '@thisx', '@thisy', '@links', '@ipt', '@pi', '@e', '@degToRad', '@radToDeg', '@time', '@tick', '@second', '@minute', '@waveNumber', '@waveTime', '@mapw', '@maph', '@server', '@client', '@clientLocale', '@clientName', '@clientTeam', '@clientUnit', '@clientMobile', '@blockCount', '@unitCount', '@itemCount', '@liquidCount'];

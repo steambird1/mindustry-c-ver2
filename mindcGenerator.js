@@ -8,8 +8,7 @@ import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 	CharacterLiteralNode, NullLiteralNode, TypeSpecifierNode, TypedefDeclarationNode,
 	StructDefinitionNode, UnionDefinitionNode, StructMemberNode,
 	TypeQualifierNode, AsmStatementNode, PointerTypeNode, DeclaratorNode,
-	DeletedStatement, ASTBuilder, ASTVisitor, __convert, objectList,
-	liquidList, unitList, buildingList
+	DeletedStatement, ASTBuilder, ASTVisitor, __convert
  } from "./mindcBase.js";
 
 import { SymbolEntry, Scope, TypeInfo, MemberInfo, SemanticAnalyzer } from "./mindcSemantic.js";
@@ -27,7 +26,7 @@ import { Globals, VariableRet, ImmediateRet, BasicRet, IntRet, BoolRet, FloatRet
 	RegistryStructRet, NamePointerRet,
 	arrayRetOf, selectArrayImplementation, accessCostOf,
 	pointerToValue, valueToPointer, contentTypeOf, SPECIAL_CONTENT_TYPES,
-	arithmetic, widthOfType, memberTypeOf, InvalidCastException, InfrastructureNotImplementedExpection
+	arithmetic, widthOfType, knownContentIdOf, memberTypeOf, InvalidCastException, InfrastructureNotImplementedExpection
  } from "./mindcInfrastructure.js";
 
 export class InternalGenerationFailure {
@@ -64,8 +63,9 @@ export class CodeGenerator extends ASTVisitor {
 		this.temporarySpaceId = 0;
         this.outputCode = new Instruction();
 		this.memory = new MemoryManager(compiler.memoryInfo);
-		const stackCheckOption = (compiler?.extraConfig?.getAttribute('optimizeOption') ?? {}).stackCheck;
-		this.functionManagement = new FunctionRegisterer(this.memory, stackCheckOption);
+		const optimizeOption = compiler?.extraConfig?.getAttribute('optimizeOption') ?? {};
+		this.functionManagement = new FunctionRegisterer(this.memory,
+			optimizeOption.stackCheck, optimizeOption.stackUnderflow);
 		/**
 		 * The object-oriented value layer (see mindcInfrastructure.js).
 		 * @type {Globals}
@@ -941,7 +941,17 @@ export class CodeGenerator extends ASTVisitor {
 			}
 		});
 		result.concat(staticProcessor);
-		node.globalDeclarations.forEach(decl => result.concat(this.visit(decl)));
+		/*
+		The same declaration node can be listed twice; `visit` hands back the
+		cached instruction, and concatenating that object again would emit the
+		whole declaration a second time.
+		*/
+		const seenDeclarations = new Set();
+		node.globalDeclarations.forEach(decl => {
+			if (seenDeclarations.has(decl)) return;
+			seenDeclarations.add(decl);
+			result.concat(this.visit(decl));
+		});
 		result.concat(this.functionManagement.getAllFunctionDecl(this.memory));
 		result.setAttribute('mainSymbol', mainSymbol);
 		// Main function is now called in generate() after some preprocessing
@@ -1499,6 +1509,26 @@ export class CodeGenerator extends ASTVisitor {
 	}
 
 	/**
+	 * The contents of an initializer list, when every one of them is a number.
+	 *
+	 * @param {ASTNode?} initializer
+	 * @returns {number[]?} null when it is missing or not purely numeric
+	 */
+	numericElementsOf(initializer) {
+		if (!initializer) return null;
+		const items = initializer.values ?? initializer.children ?? null;
+		if (!Array.isArray(items) || items.length === 0) return null;
+		const numbers = [];
+		for (const item of items) {
+			if (!item || item.type !== 'NumericLiteral') return null;
+			const value = Number(item.value);
+			if (!Number.isFinite(value)) return null;
+			numbers.push(value);
+		}
+		return numbers;
+	}
+
+	/**
 	 * 
 	 * @param {VariableDeclaratorNode} node 
 	 * @remark This has to do with many operations...
@@ -1516,7 +1546,15 @@ export class CodeGenerator extends ASTVisitor {
 			return new Instruction();
 		}
 		let finalize = new Instruction();
-		if (symbol.memoryLocation) {
+		/*
+		The address assignment is emitted once per symbol: some paths reach this
+		declarator twice, and writing `X_block` / `X_pos` again only repeats the
+		very same two instructions.
+		*/
+		const alreadyAddressed = this._addressedSymbols ?? (this._addressedSymbols = new Set());
+		const freshAddress = !alreadyAddressed.has(symbol);
+		if (freshAddress) alreadyAddressed.add(symbol);
+		if (symbol.memoryLocation && freshAddress) {
 			if (symbol.extraMemoryLocation) {
 				finalize.concat(this.memory.outputStorageOf(symbol.extraMemoryLocation, `${this.memory.memoryBlocks[symbol.memoryLocation.block].name}_id`));
 				finalize.concat(this.memory.outputStorageOf(symbol.extraMemoryLocation.duplicate().forwarding(1), symbol.memoryLocation.position));
@@ -1528,7 +1566,7 @@ export class CodeGenerator extends ASTVisitor {
 				}
 			}
 		}
-		if (symbol.extraMemoryLocation) {
+		if (symbol.extraMemoryLocation && freshAddress) {
 			// This is a little bit weird, I think
 			// Usually for those access-through-pointer but no memory location ones
 			finalize.concat(symbol.extraMemoryLocation.getAssignmentInstruction(`${symbol.getAssemblySymbol()}.__pointer`));
@@ -1539,6 +1577,16 @@ export class CodeGenerator extends ASTVisitor {
 		already. Building a memory image and copying it in would be pointless --
 		and would write to memory the array does not have.
 		*/
+		/*
+		An `encoded` array IS nothing but a table of its own contents, so those
+		constants must be known. Record them from the initializer list: the
+		optimizer only does that for arrays it tracked itself, so a plain
+		`const int a[4] = {...}` used to arrive with every element taken as 0.
+		*/
+		if (this.arraySymbolOfIdentifier(symbol) && !symbol.arrayInitialValues) {
+			const literals = this.numericElementsOf(node.initializer);
+			if (literals) symbol.arrayInitialValues = literals;
+		}
 		if (node.initializer && this.arraySymbolOfIdentifier(symbol)
 			&& this.arrayStyleFor(symbol).type !== 'traditional') {
 			node.initializer.setAttribute('embeddedInRepresentation', true);
@@ -1738,7 +1786,20 @@ export class CodeGenerator extends ASTVisitor {
 	}
 
 	implicitContentToNumericRaw(inst) {
+		/*
+		`item_t x = @copper;` -- the id of `@copper` is a compile time constant,
+		so write it out rather than asking the processor with a `sensor`. Only
+		a name whose id is declared as `null` needs the runtime lookup.
+		*/
+		const known = knownContentIdOf(this.glob, inst.instructionReturn);
 		const temporary = this.getTempSymbol(this.semantic.getTypeInfo('int'));
+		if (known !== null) {
+			const holder = temporary.getAssemblySymbol();
+			const result = new Instruction([inst,
+				InstructionBuilder.set(holder, String(known))]);
+			result.instructionReturn = holder;
+			return result;
+		}
 		let result = new Instruction([inst]);
 		result.concat_returns(this.operates(
 			this.operatesWith(InstructionBuilder.sensor('{op}', '{opw}', '@id'), inst), temporary));
@@ -2394,12 +2455,50 @@ export class CodeGenerator extends ASTVisitor {
 	 * @returns {{category: string, names: string[]}}
 	 */
 	lookupNamesOf(length) {
+		/*
+		`lookup <category> out i` then `sensor out2 <content> @name`: the names
+		come from the content table, in id order, so index i really is content i.
+		Names declared with `#pragma id` are part of the table; ids declared as
+		`null` have no name at all and cannot be looked up.
+		*/
+		const table = this.contentTable;
 		const strip = list => list.map(s => s.replace(/^@/, ''));
-		if (length <= objectList.length) return { category: 'item', names: strip(objectList).slice(0, length) };
-		if (length <= liquidList.length) return { category: 'liquid', names: strip(liquidList).slice(0, length) };
-		if (length <= unitList.length) return { category: 'unit', names: strip(unitList).slice(0, length) };
-		if (length <= buildingList.length) return { category: 'building', names: strip(buildingList).slice(0, length) };
+		const usable = category => {
+			const names = table.namesOf(category);
+			if (names.length < length) return null;
+			const slice = names.slice(0, length);
+			if (slice.some(name => table.idOf(category, name) === null)) return null;
+			return slice;
+		};
+		for (const category of ['item', 'liquid', 'unit', 'block']) {
+			const names = usable(category);
+			if (names) return { category: category === 'block' ? 'building' : category, names: strip(names) };
+		}
 		return { category: 'item', names: [] };
+	}
+
+	/**
+	 * The `#pragma id` / `#pragma var` definitions of this program.
+	 * @returns {import('./mindcContent.js').ContentIdTable}
+	 */
+	/**
+	 * Whether `#pragma id(...)` was used, which forbids the `lookup` based
+	 * array representation.
+	 * @returns {boolean}
+	 */
+	get lookupUnavailable() {
+		const config = this.compiler?.extraConfig?.getAttribute('optimizeOption') ?? {};
+		return config.lookupUnavailable === true || this.contentTable.hasOverrides === true;
+	}
+
+	get contentTable() {
+		if (!this._contentTable) {
+			this._contentTable = this.compiler?.extraConfig?.getAttribute('contentTable')
+				?? new ContentIdTable();
+			// The generator's `Globals` is built before this point in some paths
+			if (this.glob && this.glob.semantic) this.glob.semantic.contentTable = this._contentTable;
+		}
+		return this._contentTable;
 	}
 
 	/**
@@ -2438,7 +2537,24 @@ export class CodeGenerator extends ASTVisitor {
 		const type = symbol.myType();
 		const length = this.arrayLengthOf(symbol);
 		const size = (type && type.size) ? type.size : 1;
-		const lookup = this.lookupNamesOf(length);
+		/*
+		Hand-declared ids mean the processor's own `lookup` tables may disagree
+		with them, so an array is not allowed to use names as its storage.
+		*/
+		const lookup = this.lookupUnavailable
+			? { category: 'item', names: [] }
+			: this.lookupNamesOf(length);
+		/*
+		Declaring ids by hand makes the processor's own `lookup` tables
+		untrustworthy, so an array may never use them -- not even one that asks
+		for `array("embedded_lookup", ...)` outright. Such a request falls back
+		to the plain register layout.
+		*/
+		let requested = symbol.requestedArrayImplementation ?? null;
+		if (this.lookupUnavailable && requested === 'embedded_lookup') {
+			requested = 'embedded';
+			this.addWarning?.('lookup arrays are disabled by #pragma id; using the register layout instead');
+		}
 		const style = selectArrayImplementation({
 			length, size,
 			isConst: symbol.isConst === true,
@@ -2446,7 +2562,7 @@ export class CodeGenerator extends ASTVisitor {
 			availableMemory: symbol.memoryAllocationFailed ? 0 : this.remainingMemory(),
 			instructionBudget: this.instructionBudget(),
 			targetVersion: this.semantic.targetVersion ?? this.compiler?.config?.getAttribute('targetVersion') ?? 0,
-			requested: symbol.requestedArrayImplementation ?? null,
+			requested,
 			lookupNames: lookup.names
 		});
 		symbol.chosenArrayStyle = style;
@@ -2834,8 +2950,7 @@ export class CodeGenerator extends ASTVisitor {
 		const delivery = value.rename(slotName);
 		if (slotType && value.type && !this.semantic.isSameType(slotType, value.type)) {
 			// Types differ enough to require an explicit conversion
-			return new Instruction([delivery.instructions,
-				this.copyObject(slotName, slotName, slotType, value.type)]);
+			delivery.concat(this.copyObject(slotName, slotName, slotType, value.type));
 		}
 		return delivery;
 	}

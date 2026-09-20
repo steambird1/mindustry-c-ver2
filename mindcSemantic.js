@@ -780,6 +780,17 @@ export class SemanticAnalyzer extends ASTVisitor {
 			'@liquidCount': this.typeTable.get('int'),
 			'@unit': this.typeTable.get('device')
 		};
+		/*
+		`#pragma var(<type>, @name)` declares a processor variable: it behaves
+		exactly like `@this`, only with the type the program asked for.
+		*/
+		this.contentTable = (this.compiler?.extraConfig?.getAttribute('contentTable')) ?? null;
+		if (this.contentTable) {
+			for (const [name, typeName] of this.contentTable.variables) {
+				const info = this.typeTable.get(typeName);
+				if (info) this.specialTypes[name] = info;
+			}
+		}
 		
 		// 建立AST节点和作用域的关联
         this.linkScopesToAST(ast);
@@ -1808,6 +1819,28 @@ export class SemanticAnalyzer extends ASTVisitor {
 			}
 			*/
 			node.dataType = this.typeTable.get('content_t');
+			/*
+			A `@name` nobody declared and no table knows is still a content
+			constant, but the compiler cannot tell WHICH one, so mark the node:
+			an implicit conversion to `item_t` & friends is refused (an explicit
+			cast is still allowed, it simply cannot be folded away).
+			*/
+			if (this.contentTable && this.contentTable.isOpaque(node.name)) {
+				node.setAttribute('opaqueContent', true);
+				/*
+				Mark the TYPE as well, so every compatibility check (assignment,
+				initialisation, argument passing) sees it: the compiler cannot tell
+				which content this is, so it may not silently become an `item_t`.
+				An explicit cast is still allowed -- that is the programmer saying
+				"I know better" -- but its result is not a compile time constant.
+				*/
+				const marked = this.typeTable.get('content_t').duplicate();
+				// `duplicate()` shares the annotations object: a fresh one keeps
+				// the marker on this type only
+				marked.annotations = new AttributeClass();
+				marked.annotations.setAttribute('opaqueContent', true);
+				node.dataType = marked;
+			}
 			return;
 		}
         const symbol = this.currentScope.lookup(node.name);
@@ -2825,6 +2858,14 @@ export class SemanticAnalyzer extends ASTVisitor {
         }
 		if (!strictCompatible) {
 			if (specialContents.includes(targetType.name) && specialContents.includes(sourceType.name)) {
+				/*
+				A `@name` nobody declared is `content_t`, but WHICH content is
+				unknown, so it may only stay `content_t` unless the programmer
+				casts explicitly.
+				*/
+				const opaque = sourceType.annotations?.getAttribute?.('opaqueContent') === true
+					|| sourceType.getAttribute?.('opaqueContent') === true;
+				if (opaque && targetType.name !== 'content_t') return false;
 				return true;
 			}
 			// Clear names for checker

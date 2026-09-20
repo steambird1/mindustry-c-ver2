@@ -53,16 +53,47 @@ export class InstructionReferrer {
 /*
 Instruction input must be done by instruction builder!
 */
+/**
+ * Flatten a list of instructions.
+ *
+ * Several call sites build an instruction as `[other.instructions, more]`,
+ * which nests a plain ARRAY inside the list. Such an element carries neither
+ * `content` nor `referrer` and blows up while the code is being printed.
+ * Empty slots are dropped for the same reason.
+ *
+ * @param {Iterable<any>} list
+ * @returns {any[]}
+ */
+function flattenInstructions(list) {
+	const result = [];
+	for (const item of list) {
+		if (item == null) continue;
+		if (Array.isArray(item)) {
+			result.push(...flattenInstructions(item));
+		} else {
+			result.push(item);
+		}
+	}
+	return result;
+}
+
 export class Instruction extends AttributeClass {
 	constructor(instructSequence = [], instructionReturn = null, attributes = new Map()) {
 		super();
 		this.isDebug = false;
 		this.isInstructionGroup = true;
+		let sequence;
 		if (instructSequence.length !== undefined) {
-			this.instructions = instructSequence;
+			sequence = instructSequence;
 		} else {
-			this.instructions = [instructSequence];
+			sequence = [instructSequence];
 		}
+		/*
+		Keep the very same array when there is nothing to fix, so that call sites
+		relying on sharing it keep working exactly as before.
+		*/
+		const needsFix = sequence.some(item => item == null || Array.isArray(item));
+		this.instructions = needsFix ? flattenInstructions(sequence) : sequence;
 		this.instructionReturn = instructionReturn;	// What this instruction returns
 		
 		if (this.instructionReturn && (typeof this.instructionReturn === 'object')) {
@@ -84,6 +115,20 @@ export class Instruction extends AttributeClass {
 	 @remark This copies the object.
 	*/
 	concat(other) {
+		/*
+		An instruction object is mutable and shared by reference: pushing the very
+		same object twice (a declaration reached through two lists, say) would
+		emit it twice. Identical neighbours are always a mistake.
+		*/
+		if (other && other.isInstructionGroup
+			&& this.instructions[this.instructions.length - 1] === other) {
+			return this;
+		}
+		if (Array.isArray(other)) {
+			// A bare list is not an instruction: splice it in item by item
+			flattenInstructions(other).forEach(item => this.instructions.push(item));
+			return this;
+		}
 		/*
 		const currentLength = this.instructions.length;
 		other.instructions.forEach(stmt => {
@@ -617,12 +662,46 @@ export function writeAtAdvancedPointer(data) {
 	return InstructionBuilder.writes(data, '__ptrblock', '__ptrpos');
 }
 
+/**
+ * What to do when the stack cannot grow any further.
+ *
+ * @param {string|boolean|undefined} stackCheck
+ * @returns {Instruction[]}
+ */
+function overflowHandlerOf(stackCheck) {
+	if (typeof stackCheck === 'string' && stackCheck.length > 0) {
+		return callHandlerOf(stackCheck);
+	}
+	return [
+		// Nothing is printed: whether a message board is connected is unknown
+		InstructionBuilder.set('__error', '"stack overflow"'),
+		InstructionBuilder.end()
+	];
+}
+
+/**
+ * Call `handler` and then leave the walker, whatever it returned.
+ *
+ * @param {string} handler
+ * @returns {Instruction[]}
+ */
+function callHandlerOf(handler) {
+	return [
+		InstructionBuilder.set('__stackcheck_return', '__stackpos'),
+		InstructionBuilder.op('add', '__stackpos', '@counter', 1),
+		InstructionBuilder.set('@counter', '_' + handler),
+		InstructionBuilder.set('@counter', '__stackcheck_return')
+	];
+}
+
 export class FunctionRegisterer {
 	/**
 	 * 
 	 * @param {MemoryManager} memoryObject 
 	 */
-	constructor(memoryObject, stackCheck = undefined) {
+	constructor(memoryObject, stackCheck = undefined, stackUnderflow = undefined) {
+		this.stackCheck = stackCheck;
+		this.stackUnderflow = stackUnderflow;
 		/**
 		 * @type {Map<string, functionInfo>}
 		 */
@@ -631,8 +710,14 @@ export class FunctionRegisterer {
 		this.memoryObject = memoryObject;
 
 		if (this.memoryObject.memoryBlocks.length > 0) {
-			memoryObject.outputPointerForwardFunction(this, '__stackframe_forward', '__stackframe_', false, stackCheck);
-			memoryObject.outputPointerBackwardFunction(this, '__stackframe_backward', '__stackframe_', false);
+			/*
+			All three are registered as removable: a program whose functions keep
+			nothing on the stack never calls them, and they are then dropped
+			instead of being emitted as dead code.
+			*/
+			memoryObject.outputPointerForwardFunction(this, '__stackframe_forward', '__stackframe_', true, stackCheck);
+			memoryObject.outputPointerBackwardFunction(this, '__stackframe_backward', '__stackframe_', true, stackUnderflow);
+			memoryObject.outputNearFitFunction(this, '__nearFit', '__ptr', true, stackCheck);
 		}
 	}
 	
@@ -751,6 +836,23 @@ export class FunctionRegisterer {
 			// So pointer-forward and -backward can't have stack symbols!
 			totalStackframeSize += stackFrameSizeOf(symbol);
 			const memFwdCall = this.getFunctionCall('__stackframe_forward', new Map([['__step', symbol.size]]), null);
+			/*
+			A `near` symbol must lie completely inside ONE block, so the frame is
+			first walked forward to a position that can hold all of it. The walk
+			lands on a stack overflow when no block is large enough.
+			*/
+			if (symbol.isNearPointer === true) {
+				const nearFit = this.getFunctionCall('__nearFit', new Map([
+					['__ptrblock', '__stackframe_block'],
+					['__ptrpos', '__stackframe_pos'],
+					['__step', symbol.size]
+				]), null);
+				nearFit.concat(new Instruction([
+					InstructionBuilder.set('__stackframe_block', '__ptrblock'),
+					InstructionBuilder.set('__stackframe_pos', '__ptrpos')
+				]));
+				heapPreparation.concat(nearFit);
+			}
 			//memoryObject.outputPointerForwardCall(symbol.size, '__stackframe', this);
 			// This has even taken array into account
 			if (!needsSaveSlot(symbol)) {
@@ -894,9 +996,58 @@ export class FunctionRegisterer {
 	 * @param {MemoryManager} memoryObject 
 	 * @returns 
 	 */
+	/**
+	 * Mark the stack helpers as used whenever some function keeps anything on
+	 * the stack, so that "drop it when unused" does not drop a helper that is
+	 * called later in the same pass.
+	 *
+	 * @returns {void}
+	 */
+	markStackHelpersUsed() {
+		const helpers = new Set(['__stackframe_forward', '__stackframe_backward',
+			'__nearFit', '__pointerForward', '__pointerBackward']);
+		let anyStack = false, anyNear = false;
+		this.functionCollection.forEach((func, name) => {
+			if (helpers.has(name)) return;
+			func.stackTotal = 0;
+			func.stackSymbols.forEach(symb => {
+				func.stackTotal += stackFrameSizeOf(symb);
+				if (symb.isNearPointer === true) anyNear = true;
+			});
+			// The roll-back is only emitted for a function that owns stack space
+			if (func.stackTotal > 0) anyStack = true;
+		});
+		const bump = name => {
+			const helper = this.functionCollection.get(name);
+			if (helper) helper.calls = Math.max(helper.calls, 1);
+		};
+		if (anyStack) {
+			bump('__stackframe_forward');
+			bump('__stackframe_backward');
+		}
+		if (anyNear) {
+			bump('__nearFit');
+		}
+		/*
+		A handler named by `#pragma stackcheck(fn)` / `#pragma stackunderflow(fn)`
+		is only ever reached through the walker, so nothing marks it as called and
+		it would be dropped -- leaving `set @counter _fn` pointing nowhere.
+		*/
+		[this.stackCheck, this.stackUnderflow].forEach(handler => {
+			if (typeof handler === 'string' && handler.length > 0) bump(handler);
+		});
+	}
+
 	getAllFunctionDecl(memoryObject) {
 		
 		let result = new Instruction();
+		/*
+		A removable helper is dropped when `calls` is still 0 by the time the loop
+		reaches it -- and the helpers below are called while a LATER function is
+		being emitted, so they would be dropped even though they are used. Decide
+		first, from the stack layout, whether anybody needs them.
+		*/
+		this.markStackHelpersUsed();
 		this.functionCollection.forEach((func, name) => {
 			// Re-evaluate the size!
 			func.stackTotal = 0;
@@ -1328,78 +1479,91 @@ export class MemoryManager {
 	// This is a function for pointer, satisfying cdecl standard.
 	// Tested to be OK
 	// These two functions directly modify the pointers, so we don't use a 'ret'.
-	outputPointerForwardFunction(funcReg, name = '__pointerForward', target = '__ptr', removable = true, stackCheck = undefined) {
-		/*
-		Logic: First read the remaining number and compare current step and the previous pointer. Add if not exceeding, or jump to next page.
-		
-		`stackCheck` applies to the stack frame walker (`__stackframe_forward`):
-		  undefined -- write a fixed message to __error and stop (the default)
-		  false    -- `#pragma stackcheck()`: no capacity check at all
-		  string   -- `#pragma stackcheck(fn)`: call fn, then leave the walker
-		*/
-		let body;
-		if (stackCheck === false) {
-			body = [
-				InstructionBuilder.jump('{0}', 'greaterThanEq', '__mxstep', 0, [2]),
-				InstructionBuilder.end(),
-				InstructionBuilder.getlink('__curptrblock', `${target}block`),
-				InstructionBuilder.jump('{0}', 'lessThanEq', '__step', 0, [15]),
-				InstructionBuilder.read('__block', '__curptrblock', 2),
-				InstructionBuilder.op('sub', '__mxstep', '__block', `${target}pos`),
-				InstructionBuilder.jump('{0}', 'greaterThanEq', '__step', '__mxstep', [10]),
-				InstructionBuilder.op('add', `${target}pos`, `${target}pos`, '__step'),
-				InstructionBuilder.set('__step', 0),
-				InstructionBuilder.jump('{0}', 'always', null, null, [15]),
-				InstructionBuilder.read(`${target}block`, '__curptrblock', 1),
-				InstructionBuilder.op('sub', '__step', '__step', '__mxstep'),
-				InstructionBuilder.op('add', '__step', '__step', 1),
-				InstructionBuilder.set(`${target}pos`, this.reservedSize),
-				InstructionBuilder.jump('{0}', 'always', null, null, [0]),
-			];
-		} else {
-			const overflow = [];
-			if (typeof stackCheck === 'string' && stackCheck.length > 0) {
-				overflow.push(
-					InstructionBuilder.set('__stackcheck_return', '__stackpos'),
-					InstructionBuilder.op('add', '__stackpos', '@counter', 1),
-					InstructionBuilder.set('@counter', '_' + stackCheck),
-					InstructionBuilder.set('@counter', '__stackcheck_return'),
-				);
-			} else {
-				overflow.push(
-					InstructionBuilder.set('__error', '"stack overflow"'),
-					InstructionBuilder.end(),
-				);
-			}
-			const ret = 16 + overflow.length;
-			body = [
-				InstructionBuilder.jump('{0}', 'greaterThanEq', '__mxstep', 0, [2]),
-				InstructionBuilder.end(),
-				InstructionBuilder.getlink('__curptrblock', `${target}block`),
-				InstructionBuilder.jump('{0}', 'lessThanEq', '__step', 0, [ret]),
-				InstructionBuilder.read('__block', '__curptrblock', 2),
-				InstructionBuilder.op('sub', '__mxstep', '__block', `${target}pos`),
-				InstructionBuilder.jump('{0}', 'greaterThanEq', '__step', '__mxstep', [11]),
-				InstructionBuilder.op('add', `${target}pos`, `${target}pos`, '__step'),
-				InstructionBuilder.set('__step', 0),
-				InstructionBuilder.jump('{0}', 'always', null, null, [ret]),
-				InstructionBuilder.read(`${target}block`, '__curptrblock', 1),
-				// A block id of 0 or less means there is no next block at all
-				InstructionBuilder.jump('{0}', 'lessThanEq', `${target}block`, 0, [16]),
-				InstructionBuilder.op('sub', '__step', '__step', '__mxstep'),
-				InstructionBuilder.op('add', '__step', '__step', 1),
-				InstructionBuilder.set(`${target}pos`, this.reservedSize),
-				InstructionBuilder.jump('{0}', 'always', null, null, [0]),
-				...overflow
-			];
-		}
-		funcReg.addFunction(name, new Instruction(body), null, [], true, false, removable);
-	}
-	
+		/**
+	 * Advance a pointer by `__step` cells, crossing into the next memory block
+	 * when the current one cannot hold them.
+	 *
+	 * Blocks form a chain (slot 0 = previous, slot 1 = next, slot 2 = capacity)
+	 * and are laid out back to back in the address space, so crossing simply
+	 * consumes what is left of the current block and continues at `reservedSize`
+	 * of the next one -- no extra `+1`, and nothing is wasted.
+	 *
+	 * @param {FunctionRegisterer} funcReg
+	 * @param {string} name
+	 * @param {string} target
+	 * @param {boolean} removable Drop the helper when nothing calls it
+	 * @param {string|boolean|undefined} stackCheck
+	 *        undefined -- write a fixed message to __error and stop
+	 *        false    -- `#pragma stackcheck()`: no capacity check
+	 *        string   -- call that function, then leave the walker
+	 * @returns {void}
+	 */
 	/**
-	 * 
-	 * @param {string} variable 
-	 * @param {FunctionRegisterer} funcReg 
+	 * Advance a pointer by `__step` cells, crossing into the next memory block
+	 * when the current one cannot hold them.
+	 *
+	 * Blocks form a chain (slot 0 = previous, slot 1 = next, slot 2 = capacity)
+	 * and are laid out back to back in the address space, so crossing simply
+	 * consumes what is left of the current block and continues at `reservedSize`
+	 * of the next one. No extra `+1` is added: the cells left at the tail of a
+	 * block are exactly the ones the retreat walks back over.
+	 *
+	 * @param {FunctionRegisterer} funcReg
+	 * @param {string} name
+	 * @param {string} target
+	 * @param {boolean} removable Drop the helper when nothing calls it
+	 * @param {string|boolean|undefined} stackCheck
+	 *        undefined -- write a fixed message to __error and stop
+	 *        false    -- `#pragma stackcheck()`: no capacity check at all
+	 *        string   -- call that function, then leave the walker
+	 * @returns {void}
+	 */
+	outputPointerForwardFunction(funcReg, name = '__pointerForward', target = '__ptr', removable = true, stackCheck = undefined) {
+		const noCheck = (stackCheck === false);
+		const overflow = noCheck ? [] : overflowHandlerOf(stackCheck);
+		const guardLength = noCheck ? 0 : 1;
+		const OVF = 11 + guardLength + 3;
+		const RET = OVF + overflow.length;
+		const guard = noCheck ? [] : [
+			InstructionBuilder.jump('{0}', 'lessThanEq', `${target}block`, 0, [OVF])
+		];
+		funcReg.addFunction(name, new Instruction([
+			InstructionBuilder.jump('{0}', 'greaterThanEq', '__mxstep', 0, [2]),			// 0
+			InstructionBuilder.end(),														// 1
+			InstructionBuilder.getlink('__curptrblock', `${target}block`),					// 2
+			InstructionBuilder.jump('{0}', 'lessThanEq', '__step', 0, [RET]),				// 3
+			InstructionBuilder.read('__block', '__curptrblock', 2),							// 4 capacity
+			InstructionBuilder.op('sub', '__mxstep', '__block', `${target}pos`),				// 5 remaining
+			InstructionBuilder.jump('{0}', 'greaterThanEq', '__step', '__mxstep', [10]),	// 6
+			InstructionBuilder.op('add', `${target}pos`, `${target}pos`, '__step'),			// 7 fits
+			InstructionBuilder.set('__step', 0),											// 8
+			InstructionBuilder.jump('{0}', 'always', null, null, [RET]),					// 9
+			InstructionBuilder.read(`${target}block`, '__curptrblock', 1),					// 10 next block
+			...guard,
+			InstructionBuilder.op('sub', '__step', '__step', '__mxstep'),					// consume the tail
+			InstructionBuilder.set(`${target}pos`, this.reservedSize),
+			InstructionBuilder.jump('{0}', 'always', null, null, [0]),
+			...overflow
+		]), null, [], true, false, removable);
+	}
+
+	/**
+	 * Retreat a pointer by `__step` cells, walking the chain backwards.
+	 *
+	 * A block that has been left behind is always full from the address point of
+	 * view, so landing in the previous block only needs its CAPACITY (slot 2);
+	 * from there the loop walks the remaining cells down inside it. That is why
+	 * nothing but the chain has to be saved: the position is rebuilt from the
+	 * pointer itself.
+	 *
+	 * @param {FunctionRegisterer} funcReg
+	 * @param {string} name
+	 * @param {string} target
+	 * @param {boolean} removable
+	 * @param {string|boolean|undefined} stackUnderflow
+	 *        undefined or false -- no check (this is the default)
+	 *        string            -- call that function, then leave the walker
+	 * @returns {void}
 	 */
 	outputPointerForwardCall(step, variable, funcReg, doReset = false, doSet = true, isNear = false) {
 		if (doReset) isNear = false;
@@ -1435,16 +1599,6 @@ export class MemoryManager {
 		return process;
 	}
 
-	/**
-	 * 
-	 * @param {*} step 
-	 * @param {SymbolEntry} symbol 
-	 * @param {FunctionRegisterer} funcReg 
-	 * @param {boolean} doReset 
-	 * @param {boolean} doSet 
-	 * @param {boolean} [doCopy=true] 
-	 * @returns {Instruction}
-	 */
 	outputSymbolForwardCall(step, symbol, funcReg, doReset = false, doSet = true, doCopy = true) {
 		const translation = symbol.accessThroughPointer ? `${symbol.getAssemblySymbol()}.__pointer` : `${symbol.getAssemblySymbol()}`;
 		if (doReset || !symbol.isNearPointer) {
@@ -1464,27 +1618,89 @@ export class MemoryManager {
 			], '__ptr');
 		}
 	}
-	
-	outputPointerBackwardFunction(funcReg, name = '__pointerBackward', target = '__ptr', removable = true) {
+
+	outputPointerBackwardFunction(funcReg, name = '__pointerBackward', target = '__ptr', removable = true, stackUnderflow = undefined) {
+		const handler = (typeof stackUnderflow === 'string' && stackUnderflow.length > 0)
+			? stackUnderflow : null;
+		const underflow = handler ? callHandlerOf(handler) : [];
+		const guardLength = handler ? 1 : 0;
+		const cross = [
+			InstructionBuilder.op('sub', '__step', '__step', '__mxstep'),					// step -= used
+			InstructionBuilder.read(`${target}block`, '__curptrblock', 0)					// previous block
+		];
+		const land = [
+			InstructionBuilder.getlink('__curptrblock', `${target}block`),
+			InstructionBuilder.read(`${target}pos`, '__curptrblock', 2),					// capacity
+			InstructionBuilder.jump('{0}', 'always', null, null, [0])
+		];
+		const UF = 9 + cross.length + guardLength + land.length;
+		const RET = UF + underflow.length;
+		const guard = handler ? [
+			InstructionBuilder.jump('{0}', 'lessThanEq', `${target}block`, 0, [UF])
+		] : [];
 		funcReg.addFunction(name, new Instruction([
 			InstructionBuilder.jump('{0}', 'greaterThanEq', '__mxstep', 0, [2]),			// 0
 			InstructionBuilder.end(),														// 1
-			InstructionBuilder.getlink('__curptrblock', `${target}block`),						// 2
-			InstructionBuilder.jump('{0}', 'lessThanEq', '__step', 0, [14]),				// 3
-
-			InstructionBuilder.op('sub', '__mxstep', `${target}pos`, this.reservedSize),		// 4
+			InstructionBuilder.getlink('__curptrblock', `${target}block`),					// 2
+			InstructionBuilder.jump('{0}', 'lessThanEq', '__step', 0, [RET]),				// 3
+			InstructionBuilder.op('sub', '__mxstep', `${target}pos`, this.reservedSize),		// 4 used
 			InstructionBuilder.jump('{0}', 'greaterThan', '__step', '__mxstep', [9]),		// 5
-			InstructionBuilder.op('sub', `${target}pos`, `${target}pos`, '__step'),					// 6
+			InstructionBuilder.op('sub', `${target}pos`, `${target}pos`, '__step'),			// 6 fits
 			InstructionBuilder.set('__step', 0),											// 7
-			InstructionBuilder.jump('{0}', 'always', null, null, [14]),						// 8
-			InstructionBuilder.read(`${target}block`, '__curptrblock', 0),						// 9
-			InstructionBuilder.op('sub', '__step', '__step', '__mxstep'),					// 10
-
-			InstructionBuilder.getlink('__curptrblock', `${target}block`),						// 11
-			InstructionBuilder.read(`${target}pos`, '__curptrblock', 4),						// 12
-			InstructionBuilder.jump('{0}', 'always', null, null, [0])						// 13
+			InstructionBuilder.jump('{0}', 'always', null, null, [RET]),					// 8
+			...cross, ...guard, ...land, ...underflow
 		]), null, [], true, false, removable);
 	}
+
+
+	/**
+	 * Move a pointer forward until the whole `__step` cells fit inside ONE block.
+	 * Used for `near` symbols on the stack: they must not be split across blocks.
+	 * Running out of blocks is a stack overflow.
+	 *
+	 * @param {FunctionRegisterer} funcReg
+	 * @param {string} name
+	 * @param {string} target
+	 * @param {boolean} removable
+	 * @param {string|boolean|undefined} stackCheck
+	 * @returns {void}
+	 */
+	/**
+	 * Move a pointer forward until the whole `__step` cells fit inside ONE block.
+	 *
+	 * Used for `near` symbols living on the stack: they must never be split
+	 * across two blocks. Running out of blocks is a stack overflow.
+	 *
+	 * @param {FunctionRegisterer} funcReg
+	 * @param {string} name
+	 * @param {string} target
+	 * @param {boolean} removable
+	 * @param {string|boolean|undefined} stackCheck
+	 * @returns {void}
+	 */
+	outputNearFitFunction(funcReg, name = '__nearFit', target = '__ptr', removable = true, stackCheck = undefined) {
+		const noCheck = (stackCheck === false);
+		const overflow = noCheck ? [] : overflowHandlerOf(stackCheck);
+		const guardLength = noCheck ? 0 : 1;
+		const OVF = 5 + guardLength + 2;
+		const RET = OVF + overflow.length;
+		const guard = noCheck ? [] : [
+			InstructionBuilder.jump('{0}', 'lessThanEq', `${target}block`, 0, [OVF])
+		];
+		funcReg.addFunction(name, new Instruction([
+			InstructionBuilder.getlink('__curptrblock', `${target}block`),					// 0
+			InstructionBuilder.read('__block', '__curptrblock', 2),							// 1 capacity
+			InstructionBuilder.op('sub', '__mxstep', '__block', `${target}pos`),				// 2 remaining
+			InstructionBuilder.jump('{0}', 'lessThanEq', '__step', '__mxstep', [RET]),		// 3 fits
+			InstructionBuilder.read(`${target}block`, '__curptrblock', 1),					// 4 next block
+			...guard,
+			InstructionBuilder.set(`${target}pos`, this.reservedSize),
+			InstructionBuilder.jump('{0}', 'always', null, null, [0]),
+			...overflow
+		]), null, [], true, false, removable);
+	}
+
+
 	
 	/**
 	 * 
