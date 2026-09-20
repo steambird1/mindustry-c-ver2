@@ -799,8 +799,25 @@ export class BasicRet extends VariableRet {
 	 * @returns {boolean}
 	 */
 	get isNameAddressable() {
-		return this.getAttribute('namePointersOnly') === true
-			|| this.symbol?.namePointersOnly === true;
+		if (this.getAttribute('namePointersOnly') === true
+			|| this.symbol?.namePointersOnly === true) return true;
+		/*
+		The pointer pass only marks variables it could see. A pointer that was
+		optimised away (`int *p = &x;` where p is never used) leaves no trace,
+		and a variable handed to `ulocate` / `ucontrol` is named by the
+		instruction itself -- in both cases `&x` is still just the NAME of x.
+		`SemanticAnalyzer.collectAddressUses` records which it is.
+		*/
+		const symbol = this.symbol;
+		if (!symbol) return false;
+		const generator = this.glob?.generator ?? null;
+		const table = generator?.semantic?.addressUseTable ?? null;
+		const uses = table?.get(symbol.getAssemblySymbol?.() ?? symbol.name) ?? null;
+		if (!uses || uses.other !== 0) return false;
+		if (uses.builtin > 0 && uses.pointers.size === 0) return true;
+		if (uses.pointers.size === 0) return false;
+		// Stored into a pointer: only a name pointer can hold a name
+		return generator?.namePointerAllowed?.() === true;
 	}
 }
 

@@ -1212,8 +1212,17 @@ export class FunctionRegisterer {
 // This class also generates a few pieces
 // It is recommended to use scope path to describe variable 
 // This will raise exception for failed memory allocation
-export class MemoryAllocationException {
+export class MemoryAllocationException extends Error {
 	constructor(varName = null, maxRemaining = null) {
+		/*
+		It used to be a bare object: reaching the top level it produced
+		"Internal parser error: undefined" with no clue at all. Being a real
+		Error gives it a readable message and a stack.
+		*/
+		super(`Not enough memory${varName ? ` to hold ${varName}` : ''}` +
+			`${maxRemaining === 0 ? ' (no memory is available at all)' : ''}` +
+			`${(maxRemaining !== null && maxRemaining > 0) ? ` (largest free block: ${maxRemaining})` : ''}`);
+		this.name = 'MemoryAllocationException';
 		this.varName = varName;
 		this.maxRemaining = maxRemaining;
 	}
@@ -1251,22 +1260,30 @@ export class MemoryBlockInfo {
 	 */
 	currentRemain() {
 		if (this.parent) {
-			return this.parent.memoryBlocks[this.block].size - this.position;
+			/*
+			With no memory configured at all there is no such block, and asking
+			for its size used to crash. There is nothing left in it either.
+			*/
+			const block = this.parent.memoryBlocks[this.block];
+			if (!block) return 0;
+			return block.size - this.position;
 		}
 		else return Infinity;
 	}
 
 	isAvailable() {
 		if (this.parent) {
-			return (this.currentRemain() > 0) &&
-				(!this.parent.memoryBlocks[this.block].occupation[this.position]);
+			const block = this.parent.memoryBlocks[this.block];
+			if (!block) return false;
+			return (this.currentRemain() > 0) && (!block.occupation[this.position]);
 		}
 		else return true;
 	}
 
 	skipToNextPage() {
 		if (this.parent) {
-			if (this.block === this.parent.memoryBlocks.length - 1) {
+			// `>=` also covers "there is no block at all", which must end the walk
+			if (this.block >= this.parent.memoryBlocks.length - 1) {
 				this.full = true;
 			} else {
 				this.block++;

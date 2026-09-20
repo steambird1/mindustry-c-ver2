@@ -172,7 +172,7 @@ export class CodeGenerator extends ASTVisitor {
 			}
 		} catch (error) {
 			success = false;
-			this.addError(`Internal parser error: ${error.message}\n${error.stack}`);
+			this.addError(`Internal parser error: ${error.message}\n${error.stack ?? new Error().stack}`);
 		}
 		return {
 			success: success,
@@ -301,6 +301,29 @@ export class CodeGenerator extends ASTVisitor {
 		*/
 		const addressedByName = symbol.namePointersOnly === true && this.namePointerAllowed();
 		/*
+		`&x` used as a builtin OUTPUT parameter: the machine instruction takes
+		the name of the register, so x needs no memory -- at any version, with or
+		without the name pointer pragma. (See SemanticOptimizer.analyzeNamePointers.)
+		*/
+		/*
+		How the address of this variable is taken decides whether it really has
+		to live in memory (see SemanticAnalyzer.collectAddressUses):
+		  - only by `ulocate` / `ucontrol`, which take register NAMES: no memory
+		    needed, at any version;
+		  - also by a pointer: memory is needed unless every such pointer keeps
+		    names (or is never used), which requires the name pointer option.
+		*/
+		const addressUses = this.semantic?.addressUseTable?.get(symbol.getAssemblySymbol?.() ?? symbol.name) ?? null;
+		const pointerTakers = [...(addressUses?.pointers ?? [])]
+			.map(name => this.currentScope?.lookup?.(name) ?? this.semantic?.globalScope?.lookup?.(name) ?? null);
+		const onlyBuiltinOutputs = !!addressUses && addressUses.other === 0
+			&& addressUses.pointers.size === 0 && addressUses.builtin > 0;
+		const takenByNamePointers = !!addressUses && addressUses.other === 0
+			&& addressUses.pointers.size > 0 && this.namePointerAllowed()
+			&& pointerTakers.every(p => p === null || p.usesNamePointer === true || p.usesNamePointer === undefined);
+		const addressedAsOutput = symbol.addressedAsBuiltinOutput === true
+			|| onlyBuiltinOutputs || takenByNamePointers;
+		/*
 		A struct whose very DEFINITION demands memory -- it embeds an array, or
 		another such struct -- can never be a group of registers, so it is forced
 		into memory regardless of how it is used. (`&s` sets the same flag on a
@@ -309,7 +332,7 @@ export class CodeGenerator extends ASTVisitor {
 		const structDemandsMemory = isStructLike
 			&& !!(type && typeof type.isStrictPointerImpl === 'function' && type.isStrictPointerImpl());
 		const forced = ctx.mustAlloc || recursive || symbol.isVolatile || structDemandsMemory
-			|| (symbol.isAddressed && !addressedByName);
+			|| (symbol.isAddressed && !addressedByName && !addressedAsOutput);
 
 		/*
 		`volatile` means "keep this variable in memory". It applies to the
@@ -325,11 +348,19 @@ export class CodeGenerator extends ASTVisitor {
 		register: the name alone is enough to find it. Not inside a recursive
 		function though -- the register would be gone when the call returns.
 		*/
-		const staysInRegister = !forced && addressedByName;
+		const staysInRegister = !forced && (addressedByName || addressedAsOutput);
 
 		if (staysInRegister) {
 			symbol.accessThroughPointer = false;
 			symbol.needMemoryAllocation = false;
+			/*
+			Tell the value classes that `&x` is the NAME of x: a name pointer
+			storing it, or a builtin output parameter, never asked for a real
+			address. Without this, `int *p = &x;` would demand one.
+			*/
+			if (!symbol.namePointersOnly && (onlyBuiltinOutputs || takenByNamePointers)) {
+				symbol.namePointersOnly = true;
+			}
 		} else if ((forced || selfVolatile) && symbol.kind !== 'function') {
 			if (isStructLike) {
 				// A struct in memory is reached through a pointer (recursive processor)
@@ -382,6 +413,12 @@ export class CodeGenerator extends ASTVisitor {
 				case 'null_t':
 					if (symbol.isAutoDevice) {
 						symbol.implementAsPointer = false;
+					} else if (staysInRegister) {
+						/*
+						`&d` handed to a builtin: the device keeps its register
+						and is named by it, so it is not stored in memory after
+						all -- which it could not be anyway.
+						*/
 					} else if (symbol.accessThroughPointer || symbol.implementAsPointer || symbol.needMemoryAllocation) {
 						const diagnosis = `symbol ${symbol.name} with device-like type ('device' or 'content_t') is stored in memory. This will result in data loss.`;
 						if (this.compiler.config.getAttribute('noDevicePointerError')) {
@@ -669,6 +706,47 @@ export class CodeGenerator extends ASTVisitor {
 	 * @returns {VariableRet}
 	 * @warning This has **no** operation on structures. Be careful!
 	 */
+	/**
+	 * The register a builtin should write its result into, when the argument
+	 * is `&x` and x is allowed to stay a register.
+	 *
+	 * `ulocate` / `ucontrol` take their output parameters as plain register
+	 * names, so a name pointer can name the register directly. Anything else
+	 * (a variable that really lives in memory) is left to the caller.
+	 *
+	 * @param {ASTNode?} node
+	 * @returns {string?} the register name, or null when this is not one
+	 */
+	builtinOutputName(node) {
+		if (!node || node.type !== 'UnaryExpression' || node.operator !== '&') return null;
+		const argument = node.argument;
+		if (!argument || argument.type !== 'Identifier') return null;
+		const scope = this.currentScope ?? this.semantic?.globalScope ?? null;
+		const symbol = scope?.lookup?.(argument.name) ?? null;
+		if (!symbol) return null;
+		/*
+		Only a variable that really kept its register can be named. One that
+		ended up in memory (volatile, recursive, ...) has to be written through
+		its address instead, which the caller does.
+		*/
+		const namedByPointer = symbol.namePointersOnly === true && this.namePointerAllowed();
+		if (symbol.addressedAsBuiltinOutput !== true && !namedByPointer) return null;
+		if (symbol.accessThroughPointer || symbol.needMemoryAllocation) return null;
+		return symbol.getAssemblySymbol();
+	}
+
+	/**
+	 * The old name of `writeSymbol`, still called from the builtin handlers in
+	 * mindc.js (pdcreate / pdread).
+	 *
+	 * @param {SymbolEntry} symbol
+	 * @param {any} source
+	 * @returns {Instruction}
+	 */
+	generateSymbolWrite(symbol, source) {
+		return this.writeSymbol(symbol, source);
+	}
+
 	writeSymbol(symbol, source) {
 		const target = symbolRef(this.glob, symbol);
 		if (target instanceof NamePointerRet && !(source instanceof VariableRet)) {
@@ -1831,7 +1909,21 @@ export class CodeGenerator extends ASTVisitor {
 			 * @param {TypeInfo} typeLayer
 			 */
 			const spaceIsOwned = assignedSpace != null;
-			assignedSpace = assignedSpace ?? this.memory.assign(this.getTempSpace(), Math.max(node.dataType.size, node.getAttribute('requiredSize') ?? 0));
+			if (!spaceIsOwned) {
+				try {
+					assignedSpace = this.memory.assign(this.getTempSpace(),
+						Math.max(node.dataType.size, node.getAttribute('requiredSize') ?? 0));
+				} catch (e) {
+					/*
+					A value built out of a list needs somewhere to be assembled.
+					With no memory at all there is nowhere, and this is a normal
+					user error rather than an internal failure.
+					*/
+					this.addError(`Cannot hold an initializer list in memory: this program` +
+						` needs a memory block for its array / pointer initializers`);
+					return result;
+				}
+			}
 			/*
 			When the space is the variable's own memory location the declarator
 			has already written its address out; doing it again here only repeats
@@ -3286,6 +3378,13 @@ export class CodeGenerator extends ASTVisitor {
 						fetcher = this.visitForContent(ast);
 					}
 						*/
+					// `&x` naming a register: the builtin writes into it directly
+					const outputName = this.builtinOutputName(ast);
+					if (outputName) {
+						varNames.push(outputName);
+						vid++;	// keep the numbering of the other operands
+						return new Instruction();
+					}
 					const fetcher = this.visitForContent(ast);
 					//varNames.push(fetcher.instructionReturn);
 					varNames.push(`{op_r${vid++}}`);
@@ -3427,7 +3526,18 @@ export class CodeGenerator extends ASTVisitor {
 							break;
 					}
 					for (let i = tailPosition; i < tailPosition + 4; i++) {
+						// `&x` naming a register: ulocate writes into it directly
+						const outputName = this.builtinOutputName(ast.arguments[i]);
+						if (outputName) {
+							preConcat += ` ${outputName}`;
+							continue;
+						}
 						const argContent = this.visitForContent(ast.arguments[i]);
+						/*
+						The instructions that COMPUTE the address used to be dropped
+						here, so the pointer halves were never written.
+						*/
+						result.concat(argContent);
 						if (argContent.getAttribute('fromCast') && ast.arguments[i].dataType.qualifiers
 							&& ast.arguments[i].dataType.qualifiers.includes('volatile')) {
 								preConcat += ` ${argContent.instructionReturn}`;

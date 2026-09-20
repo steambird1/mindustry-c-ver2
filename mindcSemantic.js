@@ -738,6 +738,82 @@ export class SemanticAnalyzer extends ASTVisitor {
 		// Cannot do initialization in construction !!!
     }
 
+	/**
+	 * Classify every `&x` in the program: builtin output parameter, stored into
+	 * a pointer, or an ordinary address use. See `analyze()` for why.
+	 *
+	 * Runs on the full AST, before any optimisation removes declarations.
+	 *
+	 * @param {any} ast
+	 */
+	collectAddressUses(ast) {
+		/** @type {Map<string, {builtin: number, pointers: Set<string>, other: number}>} */
+		const table = new Map();
+		// Symbols live in nested scopes, so resolve by name over the whole tree
+		let allSymbols = null;
+		const symbolsOf = name => {
+			if (!allSymbols) {
+				allSymbols = new Map();
+				const visit = scope => {
+					scope?.symbols?.forEach(sym => {
+						if (!allSymbols.has(sym.name)) allSymbols.set(sym.name, []);
+						allSymbols.get(sym.name).push(sym);
+					});
+					scope?.children?.forEach(visit);
+				};
+				visit(this.globalScope);
+			}
+			return allSymbols.get(name) ?? [];
+		};
+		const entryOf = symbol => {
+			if (!symbol) return null;
+			const key = symbol.getAssemblySymbol?.() ?? symbol.name ?? null;
+			if (!key) return null;
+			if (!table.has(key)) table.set(key, { builtin: 0, pointers: new Set(), other: 0 });
+			return table.get(key);
+		};
+		const isOutputBuiltin = name => name === 'ulocate' || name === 'ucontrol';
+
+		const walk = (node, parent) => {
+			if (!node || typeof node !== 'object') return;
+			if (Array.isArray(node)) { node.forEach(child => walk(child, parent)); return; }
+			if (node.type === 'UnaryExpression' && node.operator === '&'
+				&& node.argument && node.argument.type === 'Identifier') {
+				const candidates = symbolsOf(node.argument.name);
+				const entry = entryOf(candidates.length === 1 ? candidates[0]
+					: (candidates.find(c => /coreX|coreY|coreFound/.test(c.name)) ?? candidates[0]));
+				if (entry) {
+					if (parent && (parent.type === 'FunctionCall' || parent.type === 'BuiltinCall')) {
+						const callee = parent.callee?.name ?? parent.functionName ?? parent.name ?? null;
+						if (isOutputBuiltin(callee)) entry.builtin++;
+						else entry.other++;
+					} else if (parent && parent.type === 'VariableDeclarator') {
+						/*
+						`int *p = &x` -- remember p. Whether x needs a real
+						address depends on p, which is decided later.
+						*/
+						entry.pointers.add(parent.name);
+					} else if (parent && parent.type === 'AssignmentExpression'
+						&& parent.right === node && parent.left?.type === 'Identifier') {
+						entry.pointers.add(parent.left.name);
+					} else {
+						entry.other++;
+					}
+				}
+			}
+			for (const key of ['children', 'functions', 'globalDeclarations', 'statements',
+				'declarators', 'arguments', 'argument', 'left', 'right', 'initializer',
+				'expression', 'test', 'consequent', 'alternate', 'body', 'init', 'update',
+				'callee', 'declarations', 'elements']) {
+				const child = node[key];
+				if (Array.isArray(child)) child.forEach(c => walk(c, node));
+				else if (child && typeof child === 'object') walk(child, node);
+			}
+		};
+		walk(ast, null);
+		this.addressUseTable = table;
+	}
+
     analyze(ast) {
         this.errors = [];
         this.warnings = [];
@@ -801,6 +877,18 @@ export class SemanticAnalyzer extends ASTVisitor {
 		this.memoryVariants = new Map();
 
         this.visit(ast);
+		/*
+		Record HOW the address of each variable is taken. The generator needs
+		this to decide whether the variable really has to live in memory:
+
+		  - `ulocate(..., &x, ...)` writes into the register NAMED x, so x may
+		    stay a register at any version;
+		  - `int *p = &x` needs a real address only when p is a traditional
+		    pointer -- if p keeps names (or is never used at all) x may stay a
+		    register too;
+		  - anything else genuinely needs an address.
+		*/
+		this.collectAddressUses(ast);
 
         return {
             success: this.errors.length === 0,
@@ -1556,7 +1644,14 @@ export class SemanticAnalyzer extends ASTVisitor {
 				return extractToBottom(single);
 			};
 
-			if ((finalType.qualifiers.some(q => warningStorages.includes(q)) || warningKinds.includes(finalType.kind)) && warningTypes.includes(extractToBottom(finalType).name)) {
+			/*
+			Only warn when the variable really ends up in memory: an array that
+			was asked for a register layout (array("embedded...") / "encoded")
+			holds its elements there, where a device is perfectly fine.
+			*/
+			const requestedImpl = declarator.getAttribute?.('arrayImplementation') ?? null;
+			const staysInRegisters = !!requestedImpl && requestedImpl !== 'traditional';
+			if (!staysInRegisters && (finalType.qualifiers.some(q => warningStorages.includes(q)) || warningKinds.includes(finalType.kind)) && warningTypes.includes(extractToBottom(finalType).name)) {
 				this.addWarning(`Variable ${declarator.name} (with type ${varType.toString()}) cannot be stored in memory`, declarator.location);
 			}
 
@@ -2188,6 +2283,20 @@ export class SemanticAnalyzer extends ASTVisitor {
 			memory here would therefore be pure waste.
 			*/
 			this.markVariableAsAddressed(object);
+		} else if (node.type === 'CastExpression') {
+			/*
+			`(T*)x`, where x is a plain variable, is the idiom of this dialect
+			for an output parameter -- `ulocate(..., (volatile int*)coreX, ...)`
+			means "write the result into coreX". So it is `&x` in disguise and
+			the variable has to live in memory. A cast of something that is
+			already a pointer is an ordinary conversion instead.
+			*/
+			const target = node.dataType ?? null;
+			const inner = node.expression ?? null;
+			const isPointerish = t => !!t && (t.isPointerImpl?.() === true || t.isStrictPointerImpl?.() === true);
+			if (isPointerish(target) && !isPointerish(inner?.dataType)) {
+				this.markVariableAsAddressed(inner);
+			}
 		} else if (node.type === 'UnaryExpression' && node.operator === '*') {
 			// 解引用表达式的地址（如&*ptr）等于ptr
 			const arg = node.argument;

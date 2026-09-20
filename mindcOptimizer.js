@@ -382,6 +382,9 @@ export class Optimizer extends ASTVisitor {
 
 		// 4. Decide which pointers may store a NAME instead of an address
 		this.analyzeNamePointers();
+		// Needs the verdict of the pass above: `int *p = &x` is fine only when p
+		// is a name pointer.
+		this.markBuiltinOutputTargets();
 
 		// Scope optimizing done in global analyses
 		/*
@@ -428,6 +431,131 @@ export class Optimizer extends ASTVisitor {
 	 * Pointers that are assigned to one another share a verdict, so a pointer
 	 * can never end up holding a name while a related one holds an address.
 	 */
+	/**
+	 * Find every variable whose address is only ever taken by a builtin that
+	 * WRITES through it -- `ulocate` and `ucontrol` take their output
+	 * parameters as register NAMES (`ulocate ... outx outy found building`).
+	 *
+	 * For such a variable the name is all that is needed, so it can stay a
+	 * register. This is not the name pointer optimisation: nothing is stored
+	 * anywhere and no `read @this` is involved, so it applies at every version,
+	 * with or without `#pragma optimize(pointer)` -- which only governs
+	 * pointers that keep a name in a variable.
+	 *
+	 * One ordinary `&x` (`int *p = &x`, say) needs a real address, and then x
+	 * goes to memory as usual.
+	 */
+	markBuiltinOutputTargets() {
+		/** @type {Map<string, {total: number, builtin: number, symbol: any}>} */
+		const uses = new Map();
+		const isOutputBuiltin = name => name === 'ulocate' || name === 'ucontrol';
+		const symbolOf = (expr, scope) => {
+			if (!expr || expr.type !== 'Identifier') return null;
+			return scope?.lookup?.(expr.name) ?? null;
+		};
+		const note = (symbol, builtin, pointerSymbol = null, label = '?') => {
+			if (!symbol) return;
+			const key = symbol.getAssemblySymbol?.() ?? symbol.name ?? null;
+			if (!key) return;
+			if (!uses.has(key)) uses.set(key, { occurrences: [], symbol });
+			uses.get(key).occurrences.push({
+				builtin: builtin === true,
+				pointerSymbol,
+				label: arguments.length > 3 ? arguments[3] : '?'
+			});
+		};
+
+		const walk = (node, scope) => {
+			if (!node || typeof node !== 'object') return;
+			if (Array.isArray(node)) { node.forEach(child => walk(child, scope)); return; }
+			if (node.type === 'FunctionCall' || node.type === 'BuiltinCall') {
+				// A builtin keeps its name on `functionName`, a user call on `callee`
+				const callee = node.callee?.name ?? node.functionName ?? node.name ?? null;
+				for (const arg of node.arguments ?? []) {
+					if (arg && arg.type === 'UnaryExpression' && arg.operator === '&') {
+						/*
+						The walk reaches this node again when it descends into
+						`arguments`; that pass must not count it a second time as
+						an ordinary address use.
+						*/
+						arg.__outputParameter = true;
+						note(symbolOf(arg.argument, scope), isOutputBuiltin(callee), null, 'call:' + callee);
+					}
+				}
+			} else if (node.type === 'UnaryExpression' && node.operator === '&'
+				&& !node.__outputParameter) {
+				note(symbolOf(node.argument, scope), false, null, 'bare:' + node.argument?.type);
+			}
+			/*
+			`int *p = &x` and `p = &x`: whether x needs a REAL address depends on
+			whether p keeps names, which the pointer pass above has just decided
+			-- so remember the pointer and judge it afterwards.
+			*/
+			const pointerTarget = name => {
+				if (!name || typeof name !== 'string') return null;
+				const target = scope?.lookup?.(name) ?? null;
+				if (!target) return null;
+				const kind = target.myType?.()?.kind ?? target.type?.type?.kind ?? null;
+				return kind === 'pointer' ? target : null;
+			};
+			if (node.type === 'VariableDeclarator' && node.initializer
+				&& node.initializer.type === 'UnaryExpression'
+				&& node.initializer.operator === '&') {
+				const target = pointerTarget(node.name);
+				if (target) {
+					node.initializer.__outputParameter = true;
+					note(symbolOf(node.initializer.argument, scope), false, target, 'decl');
+				}
+			}
+			if (node.type === 'AssignmentExpression' && node.left?.type === 'Identifier'
+				&& node.right?.type === 'UnaryExpression' && node.right.operator === '&') {
+				const target = pointerTarget(node.left);
+				if (target) {
+					node.right.__outputParameter = true;
+					note(symbolOf(node.right.argument, scope), false, target);
+				}
+			}
+			if (node.children) node.children.forEach(child => walk(child, scope));
+			const fields = ['functions', 'globalDeclarations', 'typeDefinitions', 'statements',
+				'expression', 'test', 'consequent', 'alternate', 'body', 'init', 'update',
+				'argument', 'left', 'right', 'declarators', 'arguments', 'callee', 'initializer'];
+			for (const field of fields) {
+				if (Array.isArray(node[field])) node[field].forEach(child => walk(child, scope));
+				else if (node[field] && typeof node[field] === 'object') walk(node[field], scope);
+			}
+		};
+		const walkScope = scope => {
+			if (scope?.astNode) walk(scope.astNode, scope);
+			scope?.children?.forEach(walkScope);
+		};
+		walkScope(this.globalScope);
+
+		this.recursiveFunctions ??= this.findRecursiveFunctions?.(this.functionCallGraph) ?? new Set();
+		for (const use of uses.values()) {
+			/*
+			Every single `&x` has to be nameable: either a builtin output
+			parameter (the instruction takes the name anyway), or stored into a
+			pointer that itself keeps names (then the name is what p holds and
+			nothing needs a real address).
+			*/
+			const nameable = use.occurrences.every(o =>
+				o.builtin
+				// The pointer never survived (dead code) -- nothing reads the address
+				|| o.pointerSymbol === null && o.dead === true
+				|| o.pointerSymbol?.usesNamePointer === true);
+			if (!nameable) continue;
+			const symbol = use.symbol;
+			const type = symbol?.myType?.() ?? symbol?.type?.type ?? null;
+			if (!type) continue;
+			// Only something that fits a single register can be named
+			if (['pointer', 'array', 'struct', 'union'].includes(type.kind)) continue;
+			// These have to live in memory, so there is no register to name
+			if (symbol.isVolatile || symbol.isExtern || symbol.isStatic) continue;
+			if (this.isRecursiveSymbol?.(symbol)) continue;
+			symbol.addressedAsBuiltinOutput = true;
+		}
+	}
+
 	analyzeNamePointers() {
 		const config = this.optimizeConfig ?? {};
 		if (config.doPointerOptimize !== true) return;
@@ -668,6 +796,12 @@ export class Optimizer extends ASTVisitor {
 		};
 		walkScope(this.globalScope);
 
+		/*
+		`&x` handed straight to a builtin that writes through it (`ulocate`,
+		`ucontrol "within"`). The processor can write into the register a name
+		pointer names, so x may stay a register -- as long as EVERY `&x` in the
+		program is such an output parameter.
+		*/
 		if (pointers.size === 0) return;
 
 		/* Group pointers that are assigned to one another: they share a verdict. */
