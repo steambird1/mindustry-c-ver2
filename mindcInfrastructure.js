@@ -1,6 +1,6 @@
 /*
 MinCCompiler on JS
-By Seabird Starch Gunnhildr and Deepseek, 2025 - 2026.
+By Seabird Starch Gunnhildr, Hunyuan and Deepseek, 2025 - 2026.
 
 mindcInfrastructure.js -- the object-oriented "value" layer of the code generator.
 
@@ -34,8 +34,20 @@ instruction sequence and consumed by not-yet-refactored code) *and* knows what i
       |
       +-- MemoryRefRet        值位于内存中某个地址 P 处（读写都要经过内存）
       |     +-- StructRefRet      结构体 / 联合体
+      |           +-- RegistryStructRet  成员各自占一个寄存器（registry struct）
       |
       +-- (references above are all "ReferenceRet": they have get() and set())
+
+PREPARATION (not wired into the generator yet)
+      |
+      +-- PackedPointerRet    单字打包地址 block*SPAN+pos -- 只能存地址 / 解引用
+      |     +-- PackedSlotRet
+      |
+      +-- ArrayRet            只支持下标访问的数组表示
+            +-- TraditionalArrayRet   内存数组（可转指针）
+            +-- PseudoListArrayRet    生成代码（pdread/pdwrite 式），句柄为整数
+            +-- PackedArrayRet        位域打包进一个寄存器
+            +-- ConstantArrayRet      常量表，常量下标直接折叠
 
 USAGE
 -----
@@ -54,7 +66,7 @@ first one. `materialize()` does exactly that, and it is free when the value alre
 sits in a temporary symbol (it just renames, emitting no instruction).
 */
 
-import { Instruction, InstructionBuilder, MEMORY_RESERVE_SIZE } from "./mindcGeneratorBase.js";
+import { Instruction, InstructionBuilder, InstructionReferrer, MEMORY_RESERVE_SIZE } from "./mindcGeneratorBase.js";
 import { SemanticAnalyzer, TypeInfo } from "./mindcSemantic.js";
 
 /* ------------------------------------------------------------------ *
@@ -92,7 +104,10 @@ function nameOf(target) {
 }
 
 /** item_t -> item, liquid_t -> liquid ... */
-export const contentTypeOf = typeName => (typeName ? typeName.slice(0, typeName.length - 2) : 'item');
+export const contentTypeOf = typeName => {
+	// item_t -> item, liquid_t -> liquid ... everything else (int!) defaults to item
+	return (typeName && SPECIAL_CONTENT_TYPES.includes(typeName)) ? typeName.slice(0, typeName.length - 2) : 'item';
+};
 
 export const SPECIAL_CONTENT_TYPES = ['item_t', 'liquid_t', 'unit_t', 'block_t'];
 
@@ -211,13 +226,30 @@ export function pointerStep(glob, pointer, step, isNear = false, backward = fals
  * @param {boolean} isNear
  * @returns {Instruction}
  */
+/**
+ * Move `pointer` one cell forward WITHOUT moving the pointer itself.
+ *
+ * Reading or writing a two-word value needs the address of the second word, but
+ * that must not disturb the pointer: it may be a variable's save slot, and
+ * `pointerStep` (which writes the advanced address back) would slowly walk it
+ * into somebody else's storage.
+ *
+ * @param {import('./mindcGeneratorBase.js').Globals?} glob
+ * @param {string} pointer
+ * @param {boolean} isNear
+ * @returns {Instruction}
+ */
+function peekNext(glob, pointer, isNear = false) {
+	return glob.memory.outputPointerForwardCall(1, pointer, glob.funcReg, false, false, isNear);
+}
+
 export function readThrough(glob, pointer, target, width = 1, isNear = false) {
 	if (width <= 1) {
 		return glob.memory.outputPointerFetchOf(pointer, target);
 	}
 	return new Instruction([
 		glob.memory.outputPointerFetchOf(pointer, `${target}_block`),
-		pointerStep(glob, pointer, 1, isNear),
+		peekNext(glob, pointer, isNear),
 		InstructionBuilder.reads(`${target}_pos`, '__ptrblock', '__ptrpos')
 	]);
 }
@@ -237,7 +269,7 @@ export function writeThrough(glob, pointer, value, width = 1, isNear = false) {
 	}
 	return new Instruction([
 		glob.memory.outputPointerStorageOf(pointer, `${value}_block`),
-		pointerStep(glob, pointer, 1, isNear),
+		peekNext(glob, pointer, isNear),
 		InstructionBuilder.writes(`${value}_pos`, '__ptrblock', '__ptrpos')
 	]);
 }
@@ -297,6 +329,20 @@ export function pointerToValue(glob, pointer, target) {
 		InstructionBuilder.op('sub', target, target, glob.reservedSize),
 		InstructionBuilder.op('add', target, target, `${pointer}_pos`)
 	]);
+}
+
+/**
+ * Build the type `inner *`.
+ * @param {Globals} glob
+ * @param {TypeInfo?} inner
+ * @returns {TypeInfo?}
+ */
+function pointerTypeOf(glob, inner) {
+	if (!inner) return null;
+	const pointer = new TypeInfo('', 'pointer', 2);
+	pointer.pointerTo = inner;
+	pointer.qualifiers = [...(inner.qualifiers ?? [])].filter(q => q !== 'volatile');
+	return pointer;
 }
 
 /**
@@ -471,6 +517,26 @@ export class VariableRet extends Instruction {
 	 */
 	assign(other) {
 		return this.set(other);
+	}
+
+	/**
+	 * Uniform constructor entry point, so that the factories in this file do not
+	 * need to know how many arguments each subclass takes.
+	 *
+	 * It dispatches on `this`, which means **every** subclass (including ones added
+	 * later) builds an instance of its own class. Classes with extra constructor
+	 * arguments override it.
+	 *
+	 * @param {Globals} glob
+	 * @param {any} instructions
+	 * @param {string?} returner
+	 * @param {TypeInfo?} type
+	 * @param {boolean} [temporary=false]
+	 * @param {SymbolEntry?} [symbol=null]
+	 * @returns {VariableRet}
+	 */
+	static create(glob, instructions, returner, type, temporary = false, symbol = null) {
+		return new this(glob, instructions, returner, type, temporary);
 	}
 
 	/**
@@ -684,8 +750,28 @@ export class BasicRet extends VariableRet {
 	}
 
 	address() {
+		/*
+		A variable that is only ever reached through name pointers never has to
+		be moved into memory: `&x` is simply the NAME of x.
+		*/
+		if (this.isNameAddressable) {
+			const glob = this.glob;
+			const target = glob.tmp(pointerTypeOf(glob, this.type), 'pointer');
+			return new NamePointerRet(glob,
+				[this.instructions, NamePointerRet.pointAt(glob, target, this.name)],
+				target, pointerTypeOf(glob, this.type), true, this.name);
+		}
 		throw new InfrastructureNotImplementedExpection(
 			`${this.instructionReturn} has no address (use 'volatile', 'static' or '&')`);
+	}
+
+	/**
+	 * Whether `&x` may be taken as the name of x.
+	 * @returns {boolean}
+	 */
+	get isNameAddressable() {
+		return this.getAttribute('namePointersOnly') === true
+			|| this.symbol?.namePointersOnly === true;
 	}
 }
 
@@ -899,6 +985,11 @@ export class MemPointerRet extends PointerRet {
 		}
 	}
 
+	/** @returns {MemPointerRet} */
+	static create(glob, instructions, returner, type, temporary = false, symbol = null, fixedLocation = null) {
+		return new this(glob, instructions, returner, type, temporary, fixedLocation, symbol);
+	}
+
 	/**
 	 * Read the pointer out of memory.
 	 * @returns {RefPointerRet}
@@ -938,8 +1029,13 @@ export class MemPointerRet extends PointerRet {
 
 	/** The address of the pointer is known: it is our own address. */
 	address() {
+		/*
+		The type of an address is a POINTER to what we hold. `TypeInfo.pointerTo`
+		is null for a struct or union, which would make the address look like a
+		single word -- so build the pointer type explicitly.
+		*/
 		return new RefPointerRet(this.glob, this.instructions, this.name,
-			this.type ? this.type.pointerTo : null, false);
+			pointerTypeOf(this.glob, this.type), false);
 	}
 }
 
@@ -984,6 +1080,11 @@ export class MemoryRefRet extends VariableRet {
 		}
 	}
 
+	/** @returns {MemoryRefRet} */
+	static create(glob, instructions, returner, type, temporary = false, symbol = null, fixedLocation = null) {
+		return new this(glob, instructions, returner, type, temporary, fixedLocation, symbol);
+	}
+
 	/**
 	 * Read the value out of memory.
 	 * @returns {VariableRet}
@@ -1006,7 +1107,9 @@ export class MemoryRefRet extends VariableRet {
 		const value = other.get().convertTo(this.type ?? other.type);
 		const instructions = [this.instructions, value.instructions,
 			referenceWrite(glob, this, value.name, value.width)];
-		return valueClassOf(glob, this.type).create(glob, instructions, this.name, this.type, this.temporary);
+		// The value of an assignment expression is the value that has been stored --
+		// NOT our own name, which is the *address* of that value.
+		return valueClassOf(glob, this.type).create(glob, instructions, value.name, this.type, true);
 	}
 
 	/**
@@ -1068,6 +1171,11 @@ export class StructRefRet extends VariableRet {
 		}
 	}
 
+	/** @returns {StructRefRet} */
+	static create(glob, instructions, returner, type, temporary = false, symbol = null) {
+		return new this(glob, instructions, returner, type, temporary, symbol);
+	}
+
 	get() {
 		return this;
 	}
@@ -1088,8 +1196,969 @@ export class StructRefRet extends VariableRet {
 	}
 
 	address() {
-		return new RefPointerRet(this.glob, this.instructions, this.name, this.type, false);
+		// The address of a struct is a pointer TO that struct, not the struct itself
+		return new RefPointerRet(this.glob, this.instructions, this.name,
+			pointerTypeOf(this.glob, this.type), false);
 	}
+}
+
+/* ------------------------------------------------------------------ *
+ * Registry structs -- one register per member
+ * ------------------------------------------------------------------ */
+
+/**
+ * A struct (or union) whose members are **not** laid out in memory but kept in
+ * ordinary registers, one variable per member (`X.member`).
+ *
+ * This is the "registry struct" (`SymbolEntry.isRegistryStruct()` /
+ * `TypeInfo.isRegStruct()`) representation:
+ *  - `get()` is a no-op: the struct is already a value, and passing it around
+ *    means passing every member;
+ *  - `set()` copies member by member (there is nothing to memcpy);
+ *  - `member(name)` gives the member as an ordinary value, so `a.b = 1` and
+ *    `x = a.b` compile to a single `set`.
+ *
+ * Such a struct can never be turned into a pointer -- there is no address.
+ */
+export class RegistryStructRet extends StructRefRet {
+
+	constructor(glob, instructions, name, type, temporary = false, symbol = null) {
+		super(glob, instructions, name, type, temporary, symbol);
+		this.setAttribute('isRegStruct', true);
+		this.setAttribute('isPointer', false);
+		this.setAttribute('isPointerAccess', false);
+	}
+
+	/**
+	 * Look up a member of this registry struct.
+	 * @param {string} memberName
+	 * @param {TypeInfo?} memberType
+	 * @returns {VariableRet}
+	 */
+	member(memberName, memberType = null) {
+		const glob = this.glob;
+		const type = memberType ?? memberTypeOf(glob, this.type, memberName);
+		const name = `${this.instructionReturn}.${memberName}`;
+		const member = valueClassOf(glob, type).create(glob, this.instructions, name, type, false);
+		member.setAttribute('isFromRegStruct', true);
+		member.setAttribute('isSymbolic', true);
+		/*
+		A member of a registry struct IS a register, so `&s.m` is simply its name
+		-- which is exactly what a name pointer stores.
+		*/
+		if (glob.generator?.namePointerAllowed?.()) member.setAttribute('namePointersOnly', true);
+		if (type && type.isTypeInfo) member.set_returns_type(type);
+		return member;
+	}
+
+	/** The struct is a value already: reading it changes nothing. */
+	get() {
+		return this;
+	}
+
+	/**
+	 * @param {VariableRet} other
+	 * @returns {RegistryStructRet}
+	 */
+	set(other) {
+		const gen = this.glob.generator;
+		if (!gen) throw new InfrastructureNotImplementedExpection('struct copy without generator');
+		const source = other.get();
+		const copy = gen.copyStruct(this.instructionReturn, source.instructionReturn, this.type, source.type);
+		return new RegistryStructRet(this.glob, [this.instructions, source.instructions, copy],
+			this.instructionReturn, this.type, this.temporary, this.symbol);
+	}
+
+	address() {
+		/*
+		A registry struct is a group of registers, not a piece of memory, so it
+		has no address -- and a processor cannot even build the name one would
+		need (`read @this <name>` needs a single, fixed name).
+		*/
+		throw new InfrastructureNotImplementedExpection(
+			`cannot take the address of '${this.instructionReturn}': a struct held in registers has no address (declare it 'volatile' or take the address of a member instead)`);
+	}
+}
+
+/**
+ * The declared type of a struct member.
+ * @param {Globals} glob
+ * @param {TypeInfo?} structType
+ * @param {string} memberName
+ * @returns {TypeInfo?}
+ */
+export function memberTypeOf(glob, structType, memberName) {
+	if (!structType || !structType.isTypeInfo) return null;
+	const members = structType.members ?? [];
+	for (const member of members) {
+		if (member.name === memberName) {
+			const inner = member.type ?? member.typeInfo ?? null;
+			if (inner && inner.isTypeInfo) return inner;
+			if (typeof inner === 'string') return glob.semantic.getTypeInfo(inner);
+		}
+	}
+	return null;
+}
+
+/* ================================================================== *
+ * Alternative representations
+ *
+ * Under `#pragma optimize(pointer)` (and version >= 150) a pointer does
+ * not have to be a `X_block` / `X_pos` pair at all: it may store the
+ * **name** of the register it points at, and reach it with
+ *
+ *      read  target @this <name>
+ *      write value  @this <name>
+ *
+ * (`@this` is the processor itself, and `read` / `write` on it address
+ * its own registers by name.)
+ *
+ * Arrays may be laid out in three further ways (see `selectArray
+ * Implementation`), all of which avoid occupying memory:
+ *   embedded.divided -- one register per element, picked with `select`;
+ *   embedded.lookup  -- one register per element, named after a content
+ *                       constant and found with `lookup` + `sensor @name`;
+ *   encoded          -- a compile time constant table held in a string.
+ * ================================================================== */
+
+/* ------------------------------------------------------------------ *
+ * Name pointers -- one register holding the target's NAME
+ * ------------------------------------------------------------------ */
+
+/**
+ * A pointer that stores the *name* of the register it points at.
+ *
+ * Supported: taking the address of a register variable (`&x`), copying
+ * another name pointer, dereferencing (`*p`, `*p = v`).
+ *
+ * NOT supported: pointer arithmetic (`p + 2`, `p[2]`) -- adding to a
+ * name is meaningless -- and pointing at anything that is not a single
+ * register (an array element, for instance).
+ */
+export class NamePointerRet extends PointerRet {
+
+	constructor(glob, instructions, name, type, temporary = false, targetName = null) {
+		super(glob, instructions, name, type, temporary);
+		this.targetName = targetName;	// known at compile time, if at all
+		this.setAttribute('isNamePointer', true);
+	}
+
+	/** The name itself is one word. */
+	get width() {
+		return 1;
+	}
+
+	/** The value is the address: nothing to read. */
+	get() {
+		return this;
+	}
+
+	address() {
+		if (!this.getAttribute('isSymbolic')) return this;
+		/*
+		`&p` where p is itself a name pointer: the only thing one can do with
+		that address is store it in another name pointer, and what it stores is
+		the NAME of p.
+		*/
+		const glob = this.glob;
+		const pointer = pointerTypeOf(glob, this.type);
+		const target = glob.tmp(pointer, 'pointer');
+		return new NamePointerRet(glob,
+			[NamePointerRet.pointAt(glob, target, this.name)],
+			target, pointer, true, this.name);
+	}
+
+	/** The type this pointer points at. */
+	get pointee() {
+		return (this.type && this.type.pointerTo) ? this.type.pointerTo : null;
+	}
+
+	/** The LValue reached through this pointer. */
+	slot() {
+		return new NameSlotRet(this.glob, this, this.pointee);
+	}
+
+	/**
+	 * Materialize `&x`: store the name of `x` as a string.
+	 * @param {Globals} glob
+	 * @param {string} target Register receiving the name
+	 * @param {string} assemblyName Name of the register being pointed at
+	 * @returns {Instruction}
+	 */
+	static pointAt(glob, target, assemblyName) {
+		return InstructionBuilder.set(target, `"${assemblyName}"`);
+	}
+
+	/**
+	 * Read the pointed-to register.
+	 * @param {string|SymbolEntry} target
+	 * @returns {VariableRet}
+	 */
+	fetch(target) {
+		const glob = this.glob;
+		const inner = this.pointee;
+		/*
+		Only a single register can be named. A pointer counts as one here: when
+		name pointers are in use, what `*pp` reads out of `p` is another NAME,
+		so the result is a name pointer again (that is what makes `**pp` work).
+		*/
+		if (inner && widthOfType(inner) !== 1 && inner.kind !== 'pointer') {
+			throw new InfrastructureNotImplementedExpection(
+				'a name pointer cannot point at a value that is not a single register');
+		}
+		const name = nameOf(target);
+		const source = this.targetName ? `"${this.targetName}"` : this.name;
+		const instructions = [this.instructions, InstructionBuilder.read(name, '@this', source)];
+		if (inner && inner.kind === 'pointer') {
+			return new NamePointerRet(glob, instructions, name, inner, this.temporary, null);
+		}
+		return valueClassOf(glob, inner).create(glob, instructions, name, inner, this.temporary);
+	}
+
+	/**
+	 * Write the pointed-to register.
+	 * @param {VariableRet} other
+	 * @returns {VariableRet}
+	 */
+	pointedSet(other) {
+		const glob = this.glob;
+		const inner = this.pointee;
+		if (inner && widthOfType(inner) !== 1 && inner.kind !== 'pointer') {
+			throw new InfrastructureNotImplementedExpection(
+				'a name pointer cannot point at a value that is not a single register');
+		}
+		const value = other.get().convertTo(inner ?? other.type);
+		const source = this.targetName ? `"${this.targetName}"` : this.name;
+		return valueClassOf(glob, inner).create(glob,
+			[this.instructions, value.instructions,
+				InstructionBuilder.write(value.name, '@this', source)],
+			value.name, inner, false);
+	}
+
+	deref() {
+		const inner = (this.type && this.type.pointerTo) ? this.type.pointerTo : null;
+		return this.fetch(this.glob.tmp(inner));
+	}
+
+	/**
+	 * @param {VariableRet} other
+	 * @returns {NamePointerRet}
+	 */
+	set(other) {
+		const glob = this.glob;
+		const value = other.get();
+		if (value instanceof NamePointerRet) {
+			return new NamePointerRet(glob, [this.instructions, value.instructions,
+				InstructionBuilder.set(this.name, value.name)],
+				this.name, this.type, this.temporary, value.targetName);
+		}
+		if (value instanceof ImmediateRet) {
+			// `p = &x` written out as the plain name string
+			return new NamePointerRet(glob, [this.instructions,
+				InstructionBuilder.set(this.name, value.name)],
+				this.name, this.type, this.temporary, null);
+		}
+		if (widthOfType(value.type) <= 1) {
+			// Any other single register: it holds a name, so copy it
+			return new NamePointerRet(glob, [this.instructions, value.instructions,
+				InstructionBuilder.set(this.name, value.name)],
+				this.name, this.type, this.temporary, null);
+		}
+		throw new InvalidCastException(other, this);
+	}
+
+	/** Not supported: adding to a name is meaningless. */
+	offset(step, backward = false) {
+		throw new InfrastructureNotImplementedExpection(
+			'pointer arithmetic on a name pointer (point it at an array instead)');
+	}
+}
+
+/**
+ * A pointer only ever carries a name when the optimisation has been
+ * asked for, the target version supports `read @this`, and static
+ * analysis decided that this particular pointer is eligible (see
+ * `analyzeNamePointers` in mindcOptimizer.js).
+ *
+ * @param {any} symbol The pointer's SymbolEntry
+ * @param {{targetVersion: number, pointerOptimize: boolean}} options
+ * @returns {boolean}
+ */
+export function usesNamePointer(symbol, options = {}) {
+	if (!symbol) return false;
+	if (options.pointerOptimize !== true) return false;
+	if ((options.targetVersion ?? 0) < 150) return false;
+	return symbol.usesNamePointer === true;
+}
+
+/**
+ * The slot a name pointer points at: reading emits `read @this <name>`,
+ * writing emits `write @this <name>`.
+ */
+export class NameSlotRet extends VariableRet {
+
+	/**
+	 * @param {Globals} glob
+	 * @param {NamePointerRet} pointer
+	 * @param {TypeInfo?} type
+	 */
+	constructor(glob, pointer, type = null) {
+		super(glob, pointer.instructions, pointer.name, type ?? pointer.pointee, pointer.temporary);
+		this.pointer = pointer;
+		this.setAttribute('isNameSlot', true);
+	}
+
+	get width() {
+		return 1;
+	}
+
+	address() {
+		return this.pointer;
+	}
+
+	get() {
+		return this.pointer.fetch(this.glob.tmp(this.type));
+	}
+
+	/**
+	 * @param {VariableRet} other
+	 * @returns {VariableRet}
+	 */
+	set(other) {
+		return this.pointer.pointedSet(other);
+	}
+}
+
+/**
+ * Which representation a pointer symbol should get.
+ *
+ * @param {any} symbol
+ * @param {{targetVersion: number, pointerOptimize: boolean}} options
+ * @returns {'name' | 'memory'}
+ */
+export function pointerStyleOf(symbol, options = {}) {
+	return usesNamePointer(symbol, options) ? 'name' : 'memory';
+}
+
+/* ------------------------------------------------------------------ *
+ * Arrays -- subscript access, several possible layouts
+ * ------------------------------------------------------------------ */
+
+/**
+ * Turn an index (a `VariableRet`, a number or a name) into an operand.
+ *
+ * @param {Globals} glob
+ * @param {VariableRet | number | string} index
+ * @returns {{instructions: any[], name: string, constant: boolean, value: number?}}
+ */
+function operandOf(glob, index) {
+	if (index instanceof VariableRet) {
+		const value = index.get();
+		return { instructions: [value.instructions], name: value.name, constant: false, value: null };
+	}
+	const text = String(index);
+	const numeric = /^-?\d+$/.test(text) ? Number(text) : null;
+	return { instructions: [], name: text, constant: numeric !== null, value: numeric };
+}
+
+/**
+ * Base class of the array representations.
+ *
+ * Every representation supports `element(i)`, which returns an LValue
+ * (`get()` / `set()`); only the traditional layout can be converted
+ * into a pointer, since the others have no address.
+ */
+export class ArrayRet extends VariableRet {
+
+	constructor(glob, instructions, name, type, temporary = false, length = 0) {
+		super(glob, instructions, name, type, temporary);
+		this.length = length;
+		this.setAttribute('isArrayRet', true);
+	}
+
+	get elementTypeInfo() {
+		return (this.type && this.type.pointerTo) ? this.type.pointerTo : null;
+	}
+
+	get elementSize() {
+		return widthOfType(this.elementTypeInfo);
+	}
+
+	/**
+	 * The LValue of `a[index]`.
+	 * @param {VariableRet | number | string} index
+	 * @returns {VariableRet}
+	 */
+	element(index) {
+		throw new InfrastructureNotImplementedExpection(`subscript of ${this.constructor.name}`);
+	}
+
+	/** Arrays are never read as a whole. */
+	get() {
+		return this;
+	}
+
+	/** Whether this layout can be turned into a pointer. */
+	get convertibleToPointer() {
+		return false;
+	}
+
+	address() {
+		throw new InfrastructureNotImplementedExpection(
+			`${this.constructor.name} cannot be converted into a pointer`);
+	}
+}
+
+/**
+ * The ordinary layout: a contiguous block of memory reached through a
+ * `X_block` / `X_pos` pointer. The only convertible one.
+ */
+export class TraditionalArrayRet extends ArrayRet {
+
+	/**
+	 * @param {Globals} glob
+	 * @param {PointerRet} pointer Address of the first element
+	 * @param {TypeInfo?} type
+	 * @param {number?} length
+	 */
+	constructor(glob, pointer, type = null, length = 0) {
+		super(glob, pointer.instructions, pointer.name, type ?? pointer.type, pointer.temporary, length);
+		this.pointer = pointer;
+	}
+
+	get convertibleToPointer() {
+		return true;
+	}
+
+	address() {
+		return this.pointer;
+	}
+
+	/** `a[i]` is the memory slot at `base + i * size`. */
+	element(index) {
+		const glob = this.glob;
+		const operand = operandOf(glob, index);
+		const size = this.elementSize;
+		const base = this.pointer.get();
+		let step = operand.name, extra = [];
+		if (size > 1) {
+			if (operand.constant) {
+				step = operand.value * size;
+			} else {
+				const scaled = glob.tmp(null);
+				extra = [InstructionBuilder.op('mul', scaled, operand.name, size)];
+				step = scaled;
+			}
+		}
+		const address = (step === 0) ? base : base.offset(step);
+		return new MemoryRefRet(glob, [operand.instructions, extra, address.instructions],
+			address.name, this.elementTypeInfo, true);
+	}
+}
+
+/** One element of a `DividedArrayRet`. */
+class DividedSlotRet extends VariableRet {
+
+	/**
+	 * @param {Globals} glob
+	 * @param {DividedArrayRet} array
+	 * @param {{instructions: any[], name: string, constant: boolean, value: number?}} operand
+	 */
+	constructor(glob, array, operand) {
+		super(glob, operand.instructions, array.name, array.elementTypeInfo, false);
+		this.array = array;
+		this.operand = operand;
+	}
+
+	/**
+	 * A constant index names one register outright: no code at all.
+	 * Otherwise every element is tried in turn with `select`.
+	 */
+	get() {
+		const glob = this.glob;
+		if (this.operand.constant) {
+			const index = this.operand.value;
+			if (index < 0 || index >= this.array.length) {
+				throw new InfrastructureNotImplementedExpection('subscript out of range');
+			}
+			return valueClassOf(glob, this.type).create(glob, this.instructions,
+				this.array.elementName(index), this.type, false);
+		}
+		const target = glob.tmp(this.type);
+		const parts = [this.instructions,
+			InstructionBuilder.set(target, this.array.elementName(0))];
+		for (let i = 1; i < this.array.length; i++) {
+			parts.push(InstructionBuilder.selectx(target, `equal ${this.operand.name} ${i}`,
+				this.array.elementName(i), target));
+		}
+		return valueClassOf(glob, this.type).create(glob, parts, target, this.type, true);
+	}
+
+	/**
+	 * Writing cannot be done with `select` (it picks a *value*, not a
+	 * target), so the *name* of the element is selected and then used
+	 * through `write @this <name>` -- exactly like a name pointer.
+	 */
+	set(other) {
+		const glob = this.glob;
+		const value = other.get().convertTo(this.type ?? other.type);
+		if (this.operand.constant) {
+			const index = this.operand.value;
+			if (index < 0 || index >= this.array.length) {
+				throw new InfrastructureNotImplementedExpection('subscript out of range');
+			}
+			return valueClassOf(glob, this.type).create(glob,
+				[this.instructions, value.instructions,
+					InstructionBuilder.set(this.array.elementName(index), value.name)],
+				value.name, this.type, false);
+		}
+		const chosen = glob.tmp(null);
+		const parts = [this.instructions, value.instructions,
+			InstructionBuilder.set(chosen, `"${this.array.elementName(0)}"`)];
+		for (let i = 1; i < this.array.length; i++) {
+			parts.push(InstructionBuilder.selectx(chosen, `equal ${this.operand.name} ${i}`,
+				`"${this.array.elementName(i)}"`, chosen));
+		}
+		parts.push(InstructionBuilder.write(value.name, '@this', chosen));
+		return valueClassOf(glob, this.type).create(glob, parts, value.name, this.type, false);
+	}
+}
+
+/**
+ * `embedded.divided`: every element is a register of its own, and the
+ * subscript picks which one.
+ *
+ * A constant subscript costs nothing at all; a variable one costs
+ * `length - 1` `select` instructions -- which is why this is only chosen
+ * for short arrays, or when no memory is left.
+ */
+export class DividedArrayRet extends ArrayRet {
+
+	/**
+	 * @param {Globals} glob
+	 * @param {string} baseName Elements are named `baseName_0`, ...
+	 * @param {TypeInfo?} type
+	 * @param {number} length
+	 */
+	constructor(glob, baseName, type, length) {
+		super(glob, [], baseName, type, false, length);
+	}
+
+	elementName(index) {
+		return `${this.name}_${index}`;
+	}
+
+	element(index) {
+		return new DividedSlotRet(this.glob, this, operandOf(this.glob, index));
+	}
+}
+
+/**
+ * `embedded.lookup`: every element is a register named after a content
+ * constant (`copper`, `water`, `@alpha`'s name, ...).
+ *
+ * The subscript is turned into the constant with `lookup`, its name is
+ * read with `sensor @name`, and the register is then reached exactly
+ * like a name pointer:
+ *
+ *      lookup item  T  i
+ *      sensor       N  T @name
+ *      read   target @this N
+ *
+ * This costs the same three instructions whatever the array is long,
+ * but it only works for at most `list.length` elements.
+ *
+ * @see mindcBase.js -- objectList / liquidList / unitList / buildingList
+ */
+export class LookupArrayRet extends ArrayRet {
+
+	/**
+	 * @param {Globals} glob
+	 * @param {string} category item | liquid | unit | building
+	 * @param {string[]} names The register names, one per element
+	 * @param {TypeInfo?} type
+	 */
+	constructor(glob, category, names, type) {
+		super(glob, [], `__lookup_${category}`, type, false, names.length);
+		this.category = category;
+		this.names = names;
+	}
+
+	/** How many elements this category can address. */
+	get capacity() {
+		return this.names.length;
+	}
+
+	/**
+	 * @param {VariableRet | number | string} index
+	 * @returns {VariableRet}
+	 */
+	element(index) {
+		const glob = this.glob;
+		const operand = operandOf(glob, index);
+		if (operand.constant) {
+			const at = this.names[operand.value];
+			if (at === undefined) throw new InfrastructureNotImplementedExpection('subscript out of range');
+			// The name is known: nothing to compute at all
+			return valueClassOf(glob, this.elementTypeInfo).create(glob, [],
+				at, this.elementTypeInfo, false);
+		}
+		return new LookupSlotRet(glob, this, operand, this.elementTypeInfo);
+	}
+}
+
+/** One element of a `LookupArrayRet`, addressed at run time. */
+class LookupSlotRet extends VariableRet {
+
+	constructor(glob, array, operand, type) {
+		super(glob, operand.instructions, array.name, type, false);
+		this.array = array;
+		this.operand = operand;
+	}
+
+	/**
+	 * The register name of the element, in `target`.
+	 * @param {Globals} glob
+	 * @param {string} content Register receiving the looked-up constant
+	 * @param {string} target Register receiving the name
+	 * @returns {Instruction}
+	 */
+	resolve(glob, content, target) {
+		return new Instruction([
+			InstructionBuilder.lookup(this.array.category, content, this.operand.name),
+			InstructionBuilder.sensor(target, content, '@name')
+		]);
+	}
+
+	get() {
+		const glob = this.glob;
+		const content = glob.tmp(glob.semantic.getTypeInfo('content_t'));
+		const nameHolder = glob.tmp(null);
+		const target = glob.tmp(this.type);
+		return valueClassOf(glob, this.type).create(glob, [
+			this.instructions, this.resolve(glob, content, nameHolder),
+			InstructionBuilder.read(target, '@this', nameHolder)
+		], target, this.type, true);
+	}
+
+	set(other) {
+		const glob = this.glob;
+		const content = glob.tmp(glob.semantic.getTypeInfo('content_t'));
+		const nameHolder = glob.tmp(null);
+		const value = other.get().convertTo(this.type ?? other.type);
+		return valueClassOf(glob, this.type).create(glob, [
+			this.instructions, value.instructions, this.resolve(glob, content, nameHolder),
+			InstructionBuilder.write(value.name, '@this', nameHolder)
+		], value.name, this.type, false);
+	}
+}
+
+/* ------------------------------------------------------------------ *
+ * `encoded` -- a compile time constant table held in a string
+ * ------------------------------------------------------------------ */
+
+/**
+ * The character codes that may appear in an encoded table.
+ *
+ * Everything from `\` (92) onwards is excluded -- and so is `"` (34) --
+ * because those would need escaping inside a string literal.
+ */
+export const ENCODED_CODES = (() => {
+	const codes = [];
+	for (let code = 35; code <= 91; code++) codes.push(code);
+	return codes;
+})();
+
+/**
+ * `read target "<table>" i` yields the ASCII **code** of the i-th
+ * character, so every digit comes back shifted by this amount.
+ */
+export const ENCODED_OFFSET = ENCODED_CODES[0];
+
+/** How many distinct values one character can carry. */
+export const ENCODED_RADIX = ENCODED_CODES.length;
+
+/**
+ * Turn digit values into the string that stores them.
+ * @param {number[]} digits Every digit must be in `[0, ENCODED_RADIX)`.
+ * @returns {string}
+ */
+export function encodeDigits(digits) {
+	return digits.map(d => String.fromCharCode(ENCODED_CODES[d])).join('');
+}
+
+/**
+ * Build the mapping `index -> value` of a constant array.
+ *
+ * A string is a read-only ROM: `read target "<table>" i` yields the
+ * ASCII code of the i-th character, which is one instruction for the
+ * whole lookup. Values that do not fit in a single character are split
+ * into base-`ENCODED_RADIX` digits, one table per digit, and put back
+ * together with Horner's rule (3 instructions per extra digit).
+ *
+ * The alternative -- a chain of `select` -- costs `n - 1` instructions,
+ * so the cheaper of the two is returned.
+ *
+ * @param {number[]} values The constant contents, index by index
+ * @returns {{tables: string[], radix: number, shift: number, digits: number,
+ *            cost: number, kind: 'single' | 'digits' | 'chain'}}
+ */
+export function buildEncodedMapping(values) {
+	const radix = ENCODED_RADIX;
+	const numbers = values.map(v => Number(v));
+	if (numbers.some(v => !Number.isFinite(v))) {
+		throw new InfrastructureNotImplementedExpection('encoded arrays must hold numbers');
+	}
+	const lowest = Math.min(...numbers);
+	const shifts = (lowest < 0) ? [0, -lowest] : [0];
+	let best = null;
+	for (const shift of shifts) {
+		const shifted = numbers.map(v => v + shift);
+		if (shifted.some(v => v < 0)) continue;
+		const highest = Math.max(...shifted);
+		let digits = 1, span = radix;
+		while (highest >= span) { digits++; span *= radix; }
+		const tables = [];
+		for (let k = 0; k < digits; k++) {
+			const power = Math.pow(radix, k);
+			tables.push(encodeDigits(shifted.map(v => Math.floor(v / power) % radix)));
+		}
+		/*
+		Every character read comes back as `digit + ENCODED_OFFSET`, so all of
+		them together add `OFFSET * (1 + R + ... + R^(K-1))` to the Horner sum.
+		That whole quantity is a constant, so one `sub` at the end undoes it
+		(together with the shift that made the values non-negative).
+		*/
+		let spanSum = 0;
+		for (let k = 0; k < digits; k++) spanSum += Math.pow(radix, k);
+		const correction = ENCODED_OFFSET * spanSum + shift;
+		const cost = (digits === 1 ? 2 : 3 * digits - 1) - (correction !== 0 ? 0 : 1);
+		if (!best || cost < best.cost) {
+			best = { tables, radix, shift, digits, cost, correction, kind: digits === 1 ? 'single' : 'digits' };
+		}
+	}
+	// The fallback: a plain chain of comparisons
+	const chainCost = Math.max(1, numbers.length - 1);
+	if (!best || chainCost < best.cost) {
+		best = { tables: [], radix, shift: 0, digits: 0, cost: chainCost, correction: 0, kind: 'chain' };
+	}
+	return best;
+}
+
+/**
+ * A constant array held as one or more strings.
+ *
+ * Only reading makes sense -- the array is `const`, so `set()` refuses.
+ */
+export class EncodedArrayRet extends ArrayRet {
+
+	/**
+	 * @param {Globals} glob
+	 * @param {number[]} values
+	 * @param {TypeInfo?} type
+	 * @param {{tables: string[], radix: number, shift: number, digits: number,
+	 *          cost: number, kind: string}?} mapping From `buildEncodedMapping`
+	 */
+	constructor(glob, values, type, mapping = null) {
+		super(glob, [], '__encoded', type, false, values.length);
+		this.values = values;
+		this.mapping = mapping ?? buildEncodedMapping(values);
+	}
+
+	/** @param {VariableRet | number | string} index */
+	element(index) {
+		const glob = this.glob;
+		const operand = operandOf(glob, index);
+		// A constant index is known at compile time: emit the value itself
+		if (operand.constant) {
+			const value = this.values[operand.value];
+			if (value === undefined) throw new InfrastructureNotImplementedExpection('subscript out of range');
+			return new ImmediateRet(glob, String(value), this.elementTypeInfo);
+		}
+		return new EncodedSlotRet(glob, this, operand, this.elementTypeInfo);
+	}
+}
+
+/** One element of an `EncodedArrayRet`, addressed at run time. */
+class EncodedSlotRet extends VariableRet {
+
+	constructor(glob, array, operand, type) {
+		super(glob, operand.instructions, array.name, type, false);
+		this.array = array;
+		this.operand = operand;
+	}
+
+	get() {
+		const glob = this.glob;
+		const mapping = this.array.mapping;
+		const target = glob.tmp(this.type);
+		const parts = [this.instructions];
+		if (mapping.kind === 'chain') {
+			parts.push(InstructionBuilder.set(target, String(this.array.values[0])));
+			for (let i = 1; i < this.array.values.length; i++) {
+				parts.push(InstructionBuilder.selectx(target,
+					`equal ${this.operand.name} ${i}`, String(this.array.values[i]), target));
+			}
+			return valueClassOf(glob, this.type).create(glob, parts, target, this.type, true);
+		}
+		// Horner: start with the highest digit, then shift and add
+		parts.push(InstructionBuilder.read(target, `"${mapping.tables[mapping.digits - 1]}"`,
+			this.operand.name));
+		for (let k = mapping.digits - 2; k >= 0; k--) {
+			const digit = glob.tmp(null);
+			parts.push(InstructionBuilder.read(digit, `"${mapping.tables[k]}"`, this.operand.name));
+			parts.push(InstructionBuilder.op('mul', target, target, mapping.radix));
+			parts.push(InstructionBuilder.op('add', target, target, digit));
+		}
+		if (mapping.correction !== 0) {
+			parts.push(InstructionBuilder.op('sub', target, target, mapping.correction));
+		}
+		return valueClassOf(glob, this.type).create(glob, parts, target, this.type, true);
+	}
+
+	set(other) {
+		throw new InfrastructureNotImplementedExpection(
+			'an encoded array is constant and cannot be written to');
+	}
+}
+
+/* ------------------------------------------------------------------ *
+ * Choosing a representation
+ * ------------------------------------------------------------------ */
+
+/**
+ * Rough instruction cost of one subscript access for each layout.
+ *
+ * The numbers are per-access estimates used only to *compare* layouts;
+ * the traditional layout additionally needs `length * size` memory
+ * cells, and everything but the traditional layout needs v150.
+ */
+export function accessCostOf(kind, length, digits = 1) {
+	switch (kind) {
+		case 'traditional': return 4;				// getlink + read/write + address
+		case 'embedded.divided': return Math.max(1, length);	// a `select` per element
+		case 'embedded.lookup': return 3;			// lookup + sensor + read/write
+		case 'encoded': return digits <= 1 ? 2 : 3 * digits - 1;
+		default: return 4;
+	}
+}
+
+/**
+ * Pick the layout of an array.
+ *
+ * The rules, in order:
+ *  1. an explicitly requested layout (`array("...")`) always wins;
+ *  2. otherwise memory is used while there is enough of it -- that is
+ *     the layout with the cheapest access;
+ *  3. when memory runs out, the layouts that need none are considered,
+ *     and the one with the fewest instructions is taken. If even that
+ *     does not fit the remaining instruction budget, the traditional
+ *     layout is used anyway: running out of instructions is worse than
+ *     running out of memory.
+ *
+ * @param {object} info
+ * @param {number} info.length Number of elements
+ * @param {number} [info.size] Words per element
+ * @param {boolean} [info.isConst]
+ * @param {number[]} [info.values] Contents, for constant arrays
+ * @param {number} [info.availableMemory] Free memory cells
+ * @param {number} [info.instructionBudget] Instructions still available
+ * @param {number} [info.targetVersion]
+ * @param {string?} [info.requested] Layout asked for by `array(...)`
+ * @param {string[]?} [info.lookupNames] Names for the `lookup` layout
+ * @returns {{type: string, implement: string?, reason: string}}
+ */
+export function selectArrayImplementation(info) {
+	const length = info.length ?? 0;
+	const size = info.size ?? 1;
+	const isConst = info.isConst === true;
+	const version = info.targetVersion ?? 0;
+	const memory = info.availableMemory ?? Infinity;
+	const budget = info.instructionBudget ?? 1000;
+	const requested = normalizeImplementation(info.requested);
+	const lookupNames = info.lookupNames ?? null;
+
+	if (requested) return requested;
+
+	const cells = length * size;
+	if (cells <= memory) {
+		return { type: 'traditional', implement: null, reason: 'memory available' };
+	}
+	// No (or not enough) memory: consider the layouts that need none
+	const candidates = [];
+	if (version >= 150 && lookupNames && lookupNames.length >= length) {
+		candidates.push({ type: 'embedded', implement: 'lookup',
+			cost: accessCostOf('embedded.lookup', length) });
+	}
+	if (isConst) {
+		const mapping = buildEncodedMapping(info.values ?? new Array(length).fill(0));
+		candidates.push({ type: 'encoded', implement: null,
+			cost: accessCostOf('encoded', length, mapping.digits) });
+	}
+	candidates.push({ type: 'embedded', implement: 'divided',
+		cost: accessCostOf('embedded.divided', length) });
+	// Fewest instructions first
+	candidates.sort((x, y) => x.cost - y.cost);
+	const affordable = candidates.find(c => c.cost <= budget);
+	if (affordable) return { ...affordable, reason: 'out of memory' };
+	// Nothing fits the budget either: instructions matter more than memory
+	return { ...candidates[0], reason: 'budget exhausted, instructions take priority' };
+}
+
+/**
+ * Turn the string given to `array(...)` into a style.
+ *
+ * @param {string?} text
+ * @returns {{type: string, implement: string?, reason: string}?}
+ */
+export function normalizeImplementation(text) {
+	if (!text) return null;
+	const name = String(text).trim();
+	switch (name) {
+		case 'traditional': return { type: 'traditional', implement: null, reason: 'requested' };
+		case 'embedded': return { type: 'embedded', implement: null, reason: 'requested' };
+		case 'embedded_divided': return { type: 'embedded', implement: 'divided', reason: 'requested' };
+		case 'embedded_lookup': return { type: 'embedded', implement: 'lookup', reason: 'requested' };
+		case 'encoded': return { type: 'encoded', implement: null, reason: 'requested' };
+		default: return null;
+	}
+}
+
+/**
+ * Build the array representation described by a style.
+ *
+ * @param {Globals} glob
+ * @param {{type: string, implement: string?}} style
+ * @param {object} options
+ * @param {PointerRet?} [options.pointer] For the traditional layout
+ * @param {TypeInfo?} [options.type] The array type
+ * @param {number} [options.length]
+ * @param {string} [options.baseName] Element register prefix
+ * @param {string} [options.category] item | liquid | unit | building
+ * @param {string[]} [options.names] Register names for `lookup`
+ * @param {number[]} [options.values] Contents for `encoded`
+ * @returns {ArrayRet}
+ */
+export function arrayRetOf(glob, style, options = {}) {
+	const type = options.type ?? null;
+	const length = options.length ?? 0;
+	if (!style || style.type === 'traditional') {
+		if (!options.pointer) {
+			throw new InfrastructureNotImplementedExpection('traditional array without a pointer');
+		}
+		return new TraditionalArrayRet(glob, options.pointer, type, length);
+	}
+	if (style.type === 'encoded') {
+		return new EncodedArrayRet(glob, options.values ?? new Array(length).fill(0), type);
+	}
+	// style.type === 'embedded'
+	if (style.implement === 'lookup') {
+		const names = options.names ?? [];
+		const category = options.category ?? 'item';
+		return new LookupArrayRet(glob, category, names, type);
+	}
+	// 'divided', or 'embedded' left unspecified
+	return new DividedArrayRet(glob, options.baseName ?? '__divided', type, length);
 }
 
 /* ------------------------------------------------------------------ *
@@ -1106,7 +2175,11 @@ export function valueClassOf(glob, type) {
 	if (type.kind === 'pointer' || type.kind === 'array') {
 		return RefPointerRet;
 	}
-	if (type.kind === 'struct' || type.kind === 'union') return StructRefRet;
+	if (type.kind === 'struct' || type.kind === 'union') {
+		// Registry structs live in registers (one variable per member); the others
+		// are laid out in memory and referred to through a pointer.
+		return type.isRegStruct() ? RegistryStructRet : StructRefRet;
+	}
 	if (glob.semantic.isLogicalType(type.name)) {
 		if (type.name === 'bool') return BoolRet;
 		if (['float', 'double'].includes(type.name)) return FloatRet;
@@ -1142,12 +2215,35 @@ export function symbolRef(glob, symbol) {
 			return new StructRefRet(glob, [], symbol.accessThroughPointer ? `${assembly}.__pointer` : assembly,
 				type, false, symbol);
 		}
-		return new StructRefRet(glob, [], assembly, type, false, symbol);
+		// Registry struct: the members are `X.member` registers
+		const reg = new RegistryStructRet(glob, [], assembly, type, false, symbol);
+		reg.setAttribute('isSymbolic', true);
+		reg.setAttribute('relevantSymbol', symbol);
+		reg.setAttribute('relevantSymbolRead', symbol);
+		reg.setAttribute('disallowReplacement', true);
+		reg.setAttribute('isTemporary', symbol.isVirtualSymbol);
+		return reg;
+	}
+
+	// Pointers that store the NAME of what they point at
+	if (symbol.usesNamePointer === true) {
+		const ret = new NamePointerRet(glob, [], assembly, type, symbol.isVirtualSymbol, null);
+		ret.setAttribute('isSymbolic', true);
+		ret.setAttribute('relevantSymbol', symbol);
+		ret.setAttribute('relevantSymbolRead', symbol);
+		ret.setAttribute('disallowReplacement', true);
+		ret.setAttribute('isTemporary', symbol.isVirtualSymbol);
+		return ret;
 	}
 
 	// Pointer-like values (pointer / array): the value *is* a pointer
 	if (symbol.implementAsPointer) {
-		if (symbol.accessThroughPointer) {
+		/*
+		An array is delivered BY REFERENCE: its value IS the address held in
+		`X_block` / `X_pos`. Reading it out of `X.__pointer` instead treats the
+		array's own data as a pointer, which is what broke `&a[1]`.
+		*/
+		if (symbol.accessThroughPointer && !(type && type.kind === 'array')) {
 			const fixed = symbol.memoryRef();
 			return new MemPointerRet(glob, [], `${assembly}.__pointer`, type, false, fixed, symbol);
 		}
@@ -1177,6 +2273,7 @@ export function symbolRef(glob, symbol) {
 	ret.setAttribute('disallowReplacement', true);
 	ret.setAttribute('isTemporary', symbol.isVirtualSymbol);
 	ret.setAttribute('isNearPointer', symbol.isNearPointer);
+	if (symbol.namePointersOnly === true) ret.setAttribute('namePointersOnly', true);
 	return ret;
 }
 
@@ -1280,14 +2377,4 @@ export function ExportRet(glob, inst, type = null) {
 	return buildRet(glob, inst, type, width, throughPointer, temporary, relevant);
 }
 
-// `create` is a uniform constructor entry point so that factories above do not need
-// to know how many arguments each subclass takes.
-for (const cls of [VariableRet, BasicRet, IntRet, BoolRet, FloatRet,
-	ContentRet, DeviceRet, NullRet, PointerRet, RefPointerRet, MemPointerRet,
-	VolatilePointerRet, MemoryRefRet, StructRefRet]) {
-	cls.create = function (glob, instructions, returner, type, temporary = false, symbol = null) {
-		if (cls === MemoryRefRet) return new cls(glob, instructions, returner, type, temporary, null, symbol);
-		if (cls === StructRefRet) return new cls(glob, instructions, returner, type, temporary, symbol);
-		return new cls(glob, instructions, returner, type, temporary);
-	};
-}
+

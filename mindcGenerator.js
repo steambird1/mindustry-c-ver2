@@ -9,7 +9,7 @@ import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 	StructDefinitionNode, UnionDefinitionNode, StructMemberNode,
 	TypeQualifierNode, AsmStatementNode, PointerTypeNode, DeclaratorNode,
 	DeletedStatement, ASTBuilder, ASTVisitor, __convert, objectList,
-	liquidList, unitList, buildingList, findRecursiveFunctions
+	liquidList, unitList, buildingList
  } from "./mindcBase.js";
 
 import { SymbolEntry, Scope, TypeInfo, MemberInfo, SemanticAnalyzer } from "./mindcSemantic.js";
@@ -17,15 +17,17 @@ import { SymbolEntry, Scope, TypeInfo, MemberInfo, SemanticAnalyzer } from "./mi
 import { ArrayStateReferrer, Optimizer } from "./mindcOptimizer.js";
 
 import { Instruction, InstructionBuilder, InstructionReferrer, MemoryBlock, MemoryBlockInfo,
-    MemoryManager, FunctionRegisterer, BuildingLinker, SingleInstruction, EmptyInstruction,
-	
+    MemoryManager, FunctionRegisterer, BuildingLinker, SingleInstruction, EmptyInstruction
  } from "./mindcGeneratorBase.js";
+import { findRecursiveFunctions } from "./mindcBase.js";
 
 import { Globals, VariableRet, ImmediateRet, BasicRet, IntRet, BoolRet, FloatRet, ContentRet,
 	PointerRet, RefPointerRet, MemPointerRet, VolatilePointerRet, MemoryRefRet, StructRefRet,
 	symbolRef, ExportRet, valueClassOf, readThrough, writeThrough, pointerStep,
+	RegistryStructRet, NamePointerRet,
+	arrayRetOf, selectArrayImplementation, accessCostOf,
 	pointerToValue, valueToPointer, contentTypeOf, SPECIAL_CONTENT_TYPES,
-	arithmetic, InvalidCastException, InfrastructureNotImplementedExpection
+	arithmetic, widthOfType, memberTypeOf, InvalidCastException, InfrastructureNotImplementedExpection
  } from "./mindcInfrastructure.js";
 
 export class InternalGenerationFailure {
@@ -62,7 +64,8 @@ export class CodeGenerator extends ASTVisitor {
 		this.temporarySpaceId = 0;
         this.outputCode = new Instruction();
 		this.memory = new MemoryManager(compiler.memoryInfo);
-		this.functionManagement = new FunctionRegisterer(this.memory);
+		const stackCheckOption = (compiler?.extraConfig?.getAttribute('optimizeOption') ?? {}).stackCheck;
+		this.functionManagement = new FunctionRegisterer(this.memory, stackCheckOption);
 		/**
 		 * The object-oriented value layer (see mindcInfrastructure.js).
 		 * @type {Globals}
@@ -132,7 +135,10 @@ export class CodeGenerator extends ASTVisitor {
 				result.concat(this.memory.outputLinkInitializer());	
 			}
 			if (!noMemory && !this.compiler.config.getAttribute('noPointerFunction')) {
-				result.concat(this.memory.outputPointerForwardFunction(this.functionManagement));
+				// Only the stack frame walker gets the capacity check; ordinary pointer
+			// stepping keeps the old behaviour.
+			result.concat(this.memory.outputPointerForwardFunction(
+				this.functionManagement, '__pointerForward', '__ptr', true, false));
 				result.concat(this.memory.outputPointerBackwardFunction(this.functionManagement));
 				result.concat(this.memory.outputMemcpyFunction(this.functionManagement));
 			}
@@ -183,202 +189,337 @@ export class CodeGenerator extends ASTVisitor {
 	}
 
 	/**
-	 * 
-	 * @param {Scope} scope 
+	 * Decide where every symbol of a scope lives and give it memory when it
+	 * needs some.
+	 *
+	 * Three independent questions are answered for every symbol:
+	 *
+	 *  1. *Does the object live in memory?* (`accessThroughPointer`)
+	 *     - `volatile` : the variable MUST be in memory, whatever its type.
+	 *       Note that `volatile int *p` is not volatile itself -- only the
+	 *       thing it points at is. `int *volatile p` is.
+	 *     - `&x` is taken somewhere (`isAddressed`);
+	 *     - the function is recursive and the variable is not `static`: a
+	 *       register does not survive the nested call;
+	 *     - `mustAlloc` was asked for by the caller.
+	 *
+	 *  2. *Is the value itself a pointer?* (`implementAsPointer`, two words)
+	 *     pointer / array / a struct that is implemented through memory.
+	 *     Independent from (1): `int *volatile p` is both.
+	 *
+	 *  3. *How much memory, and where?* -- see `allocateSymbolMemory`.
+	 *
+	 * @param {Scope} scope
 	 * @param {boolean} [staticAllocOnly=false]
-	 * @param {boolean} [mustAlloc=false] 
-	 * @param {string} [insideFunctionName=""] Unused
-	 * @remark Adding all heap memories (static variable and global variables)
-	 * Note:
-	 * accessThroughPointer - This value is stored in heap memory area (e.g. volatile int)
-	 * implementAsPointer - This value is a pointer
-	 * (These can be used simultaneously)
-	 * 
+	 * @param {boolean} [mustAlloc=false]
+	 * @param {string} [insideFunctionName=""]
 	 * @returns {SymbolEntry[]}
 	 */
-	 processHeapMemory(scope, staticAllocOnly = false, mustAlloc = false, insideFunctionName = "") {
-		
-		if (scope.astNode && scope.astNode.type === 'FunctionDeclaration') {
-			if (this.recursiveInfo.has(scope.astNode.name)) {
-				mustAlloc = true;
-			}
+	processHeapMemory(scope, staticAllocOnly = false, mustAlloc = false, insideFunctionName = "") {
+		const functionName = (scope.astNode && scope.astNode.type === 'FunctionDeclaration')
+			? scope.astNode.name : insideFunctionName;
+		// Anything inside a recursive function has to be reachable after the
+		// nested call returns, which a register is not.
+		if (functionName && this.recursiveInfo.has(functionName)) {
+			mustAlloc = true;
 		}
 		/**
 		 * @type {SymbolEntry[]}
 		 */
 		let regStructHandling = [];
-		
-		// let extraCommand = new Instruction([]);
-		const handler = /**
-			 * 
-			 * @param {SymbolEntry} symbol 
-			 */
-			symbol => {
 
-			const doImmediateAlloc = !staticAllocOnly || symbol.isStatic || symbol.isVirtualSymbol;
+		const context = { staticAllocOnly, mustAlloc, functionName };
 
-			// Update symbol size information
-			if ((mustAlloc || symbol.isAddressed || symbol.isVolatile) && symbol.kind !== 'function') {
-				/*
-				if (symbol.isBasic()) {
-					symbol.accessThroughPointer = true;
-				} else {
-					symbol.implementAsPointer = true;
-				}
-					*/
-				if (symbol.isStructOrUnion()) {
-					symbol.implementAsPointer = true;	// Use recursive processor otherwise
-				}
-				symbol.needMemoryAllocation = true;
-			}
-			switch (symbol.kind) {
-				case 'variable':
-				//case 'struct':	// Not allocating memory space for structures for now
-				case 'parameter':
-				//case 'union':
-					if (symbol.kind === 'parameter') {
-						const funcRegion = symbol.getFunctionRegion();
-						if (!this.recursiveInfo.has(funcRegion)) {
-							break;	// Not necessary!
-						}
-					}
-					const symbolType = symbol.myType();
-					symbol.size = symbolType.size;
-					switch (symbolType.kind) {
-						case 'struct':
-						case 'union': 
-							// Notice: configuring them as virtual symbols right away causes errors!
-							const { stackSymbols, singular, regStructMem } = this.handleStructExtra([symbol], scope, false);
-							stackSymbols.forEach(symb => {
-								// Assign memory space for these symbols first (as long as it is necessary)
-								handler(symb);
-							});
-							if (doImmediateAlloc) symbol.memberHandler = { stackSymbols, regStructMem };
-							// Otherwise the allocation is NOT handled until reaching the top of the function call.
-
-							regStructHandling.push(symbol);
-							break;
-						case 'device':
-						case 'null':
-							case 'null_t':
-							if (symbol.isAutoDevice) {
-								symbol.implementAsPointer = false;
-								//symbol.accessThroughPointer = false;
-								//symbol.needMemoryAllocation = false;
-							} else if (symbol.accessThroughPointer || symbol.implementAsPointer || symbol.needMemoryAllocation) {
-								const diagnosis = `symbol ${symbol.name} with device-like type ('device' or 'content_t') is stored in memory. This will result in data loss.`;
-								if (this.compiler.config.getAttribute('noDevicePointerError')) {
-									this.addWarning(diagnosis);
-								} else {
-									this.addError(diagnosis);
-								}
-								
-							}
-							break;
-						case 'basic':
-							break;
-						case 'pointer':
-							symbol.size = 2;
-							symbol.implementAsPointer = true;	// There's no need to give them memory space
-							break;
-						case 'array':
-							symbol.implementAsPointer = true;
-							symbol.needMemoryAllocation = true;
-							break;
-						case 'function':
-							break;
-						default:
-							// struct/union, etc.
-							symbol.implementAsPointer = true;
-							symbol.needMemoryAllocation = true;
-							//symbol.accessThroughPointer = false;	// They aren't actually pointers
-							// BE ADVISED: This implementation means that struct and union ARE CONSIDERED
-							// 'access through pointer' but not a real pointer.
-					}
-					break;
-				default:
-					break;
-			}
-			// Assign heap memory
-			if (symbol.accessThroughPointer || symbol.needMemoryAllocation) {
-
-				/**
-				 * 
-				 * @param {number} size
-				 * @param {boolean} requireNear
-				 * @param {string} name
-				 * @returns {{position: MemoryBlockInfo?; near: boolean; success: boolean}} 
-				 */
-				const allocator = (size, requireNear, name) => {
-					let allocated = false;
-					let location = null;
-					if (requireNear) {
-						let attempt = this.memory.currentState().duplicate(), skippedPage = 0;
-						while (!attempt.full && attempt.currentRemain() < size) {
-							attempt.skipToNextPage();
-							skippedPage++;
-						}
-						if (attempt.full) {
-							this.addWarning(`Cannot assign a complete block for ${name}`);
-							requireNear = false;
-						} else {
-							location = attempt.duplicate();
-							this.memory.pushStack();
-							this.memory.setState(attempt.forwarding(size));
-							if (skippedPage > 0) {
-								this.addWarning(`Skipping ${skippedPage} page(s) for near pointer assignment. This may cause memory insufficiency`);
-							}
-							allocated = true;
-						}
-					}
-					if (!allocated) {
-						location = this.memory.assign(name, size);
-						allocated = true;
-					}
-					const dupSymb = location.duplicate();
-					if (dupSymb.forwarding(size).block === location.block) {
-						requireNear = true;
-					}
-					return {
-						position: location,
-						near: requireNear,
-						success: allocated
-					}
-				};
-
-				symbol.needMemoryAllocation = true;
-				// The memory space is otherwise dynamically allocated
-				if (doImmediateAlloc) {
-					// if () {
-					const result = allocator(symbol.size, symbol.isNearPointer, symbol.getAssemblySymbol());
-					if (!result.success) {	// This is actually unused
-						this.addError(`Cannot assign memory for symbol ${symbol.describe()}`);
-					}
-					if (!(symbol.myType() && symbol.myType().kind === 'pointer')) {
-						symbol.isNearPointer = result.near;
-					}
-					symbol.memoryLocation = result.position;
-					// }
-					if (symbol.requireExtraMemory()) {
-						// Additional space
-						// TODO: Configure corresponding components... (i.e. In declaration part, the pointer should be assigned memory location)
-						// Using this extra field (instead of assigning memoryLocation another meaning) is for the compatibility of initializer list
-						const additional = allocator(2, true, `${symbol.getAssemblySymbol()}.__pointer`);
-						if (!additional.success) {	// This is actually unused
-							this.addError(`Cannot assign essential additional memory for symbol ${symbol.describe()}`);
-						}
-						symbol.isExtraNear = additional.near;
-						symbol.extraMemoryLocation = additional.position;
-					}
-				}
+		const handler = symbol => {
+			this.decideSymbolStorage(symbol, context);
+			this.allocateSymbolMemory(symbol, context);
+			if (symbol.isStructOrUnion() && symbol.isRegistryStruct?.()) {
+				regStructHandling.push(symbol);
 			}
 		};
+
 		scope.getAllSymbols().forEach(symb => void(handler(symb)));
 		scope.children.forEach(child => {
-			this.processHeapMemory(child, true, mustAlloc);
+			this.processHeapMemory(child, true, mustAlloc, functionName);
 		});
 
 		return regStructHandling;
+	}
+
+	/**
+	 * Whether pointers that store the NAME of their target are in use. They need
+	 * `read`/`write @this <name>`, which only exists from v150 on, and they are
+	 * off unless `#pragma optimize(pointer)` asks for them.
+	 * @returns {boolean}
+	 */
+	namePointerAllowed() {
+		const config = this.compiler?.extraConfig?.getAttribute('optimizeOption') ?? {};
+		if (config.doPointerOptimize !== true) return false;
+		return (this.semantic.targetVersion ?? this.compiler?.config?.getAttribute('targetVersion') ?? 0) >= 150;
+	}
+
+	/**
+	 * Whether the symbol's function is recursive. Everything local to one has to
+	 * live in memory.
+	 * @param {SymbolEntry} symbol
+	 * @returns {boolean}
+	 */
+	isInRecursiveFunction(symbol) {
+		if (symbol.isStatic) return false;
+		const region = symbol.getFunctionRegion?.() ?? null;
+		return !!region && this.recursiveInfo.has(region);
+	}
+
+	/**
+	 * Work out the storage class of one symbol: whether it lives in memory, and
+	 * whether its value is a pointer.
+	 *
+	 * @param {SymbolEntry} symbol
+	 * @param {{staticAllocOnly: boolean, mustAlloc: boolean, functionName: string}} ctx
+	 * @returns {void}
+	 */
+	decideSymbolStorage(symbol, ctx) {
+		const type = symbol.myType();
+		const kind = (type && type.kind) ? type.kind : 'basic';
+		const isStructLike = ['struct', 'union'].includes(kind);
+		const isPointerLike = ['pointer', 'array'].includes(kind);
+
+		/* ---------- 1. Does it have to live in memory? ---------- */
+		const recursive = this.isInRecursiveFunction(symbol);
+		/*
+		`&x` normally forces x into memory -- but when the address is only ever
+		taken by NAME pointers it is the *name* that is needed, and x can stay
+		where it is. (Not in a recursive function: the register is gone by the
+		time the nested call returns.)
+		*/
+		const addressedByName = symbol.namePointersOnly === true && this.namePointerAllowed();
+		/*
+		A struct whose very DEFINITION demands memory -- it embeds an array, or
+		another such struct -- can never be a group of registers, so it is forced
+		into memory regardless of how it is used. (`&s` sets the same flag on a
+		copy of the type, see `SemanticAnalyzer.memoryVariantOf`.)
+		*/
+		const structDemandsMemory = isStructLike
+			&& !!(type && typeof type.isStrictPointerImpl === 'function' && type.isStrictPointerImpl());
+		const forced = ctx.mustAlloc || recursive || symbol.isVolatile || structDemandsMemory
+			|| (symbol.isAddressed && !addressedByName);
+
+		/*
+		`volatile` means "keep this variable in memory". It applies to the
+		variable itself, so `int *volatile p` is a pointer that is kept in
+		memory -- while `volatile int *p` is an ordinary register pointer whose
+		target happens to be volatile. `TypeInfo.isVolatile()` already makes
+		that distinction.
+		*/
+		const selfVolatile = symbol.isVolatile === true || (type && type.isVolatile && type.isVolatile());
+
+		/*
+		A variable that is only ever reached through a name pointer can stay in a
+		register: the name alone is enough to find it. Not inside a recursive
+		function though -- the register would be gone when the call returns.
+		*/
+		const staysInRegister = !forced && addressedByName;
+
+		if (staysInRegister) {
+			symbol.accessThroughPointer = false;
+			symbol.needMemoryAllocation = false;
+		} else if ((forced || selfVolatile) && symbol.kind !== 'function') {
+			if (isStructLike) {
+				// A struct in memory is reached through a pointer (recursive processor)
+				symbol.implementAsPointer = true;
+			}
+			if (isPointerLike && !isStructLike) {
+				// The value is still a pointer; it just happens to be stored in memory
+				symbol.implementAsPointer = true;
+				if (kind === 'pointer') symbol.accessThroughPointer = true;
+			}
+			symbol.needMemoryAllocation = true;
+			if (!isPointerLike && !isStructLike && selfVolatile) {
+				// A plain value kept in memory (a `volatile int`, say)
+				symbol.accessThroughPointer = true;
+			}
+		}
+
+		/* ---------- 2. Per-kind bookkeeping ---------- */
+		if (symbol.kind !== 'function') {
+			if (symbol.kind === 'parameter' && !recursive
+				&& !ctx.mustAlloc && !symbol.isVolatile) {
+				// A parameter of a non-recursive function is a register
+				symbol.size = type ? type.size : 1;
+				if (isPointerLike) symbol.implementAsPointer = true;
+				return;
+			}
+			symbol.size = type ? type.size : 1;
+			switch (kind) {
+				case 'struct':
+				case 'union': {
+					/*
+					A registry struct keeps every member in a register, but a member
+					that needs memory of its own (an array, for instance) has to be
+					given some -- and since a recursive call may need any number of
+					them, the whole struct is memory implemented instead (see
+					`TypeInfo.isStrictPointerImpl`). Here we only handle what is
+					left: a registry struct with no such member needs nothing.
+					*/
+					const { stackSymbols, regStructMem } = this.handleStructExtra([symbol], symbol.scope, false);
+					stackSymbols.forEach(symb => {
+						this.decideSymbolStorage(symb, ctx);
+						this.allocateSymbolMemory(symb, ctx);
+					});
+					const immediate = !ctx.staticAllocOnly || symbol.isStatic || symbol.isVirtualSymbol;
+					if (immediate) symbol.memberHandler = { stackSymbols, regStructMem };
+					break;
+				}
+				case 'device':
+				case 'null':
+				case 'null_t':
+					if (symbol.isAutoDevice) {
+						symbol.implementAsPointer = false;
+					} else if (symbol.accessThroughPointer || symbol.implementAsPointer || symbol.needMemoryAllocation) {
+						const diagnosis = `symbol ${symbol.name} with device-like type ('device' or 'content_t') is stored in memory. This will result in data loss.`;
+						if (this.compiler.config.getAttribute('noDevicePointerError')) {
+							this.addWarning(diagnosis);
+						} else {
+							this.addError(diagnosis);
+						}
+					}
+					break;
+				case 'basic':
+					break;
+				case 'pointer':
+					symbol.size = 2;
+					symbol.implementAsPointer = true;	// There's no need to give them memory space
+					break;
+				case 'array':
+					symbol.size = type ? type.size : symbol.size;
+					symbol.implementAsPointer = true;
+					symbol.needMemoryAllocation = true;
+					break;
+				case 'function':
+					break;
+				default:
+					// struct/union, etc.
+					symbol.implementAsPointer = true;
+					symbol.needMemoryAllocation = true;
+					//symbol.accessThroughPointer = false;	// They aren't actually pointers
+					// BE ADVISED: This implementation means that struct and union ARE CONSIDERED
+					// 'access through pointer' but not a real pointer.
+					break;
+			}
+		}
+	}
+
+	/**
+	 * Give a symbol the heap space it asked for in `decideSymbolStorage`.
+	 *
+	 * An array is special: if there is no room left it can be held in registers
+	 * instead (see `arrayStyleFor`), unless it must be in memory anyway
+	 * (recursion, `volatile`).
+	 *
+	 * @param {SymbolEntry} symbol
+	 * @param {{staticAllocOnly: boolean, mustAlloc: boolean, functionName: string}} ctx
+	 * @returns {void}
+	 */
+	allocateSymbolMemory(symbol, ctx) {
+		if (!(symbol.accessThroughPointer || symbol.needMemoryAllocation)) return;
+		if (symbol.kind === 'function') return;
+
+		const immediate = !ctx.staticAllocOnly || symbol.isStatic || symbol.isVirtualSymbol;
+		if (!immediate) {
+			// The allocation is deferred to the top of the function call
+			symbol.needMemoryAllocation = true;
+			return;
+		}
+
+		const allocator = (size, requireNear, name) => {
+			let allocated = false;
+			let location = null;
+			if (requireNear) {
+				let attempt = this.memory.currentState().duplicate(), skippedPage = 0;
+				while (!attempt.full && attempt.currentRemain() < size) {
+					attempt.skipToNextPage();
+					skippedPage++;
+				}
+				if (attempt.full) {
+					this.addWarning(`Cannot assign a complete block for ${name}`);
+					requireNear = false;
+				} else {
+					location = attempt.duplicate();
+					this.memory.pushStack();
+					this.memory.setState(attempt.forwarding(size));
+					if (skippedPage > 0) {
+						this.addWarning(`Skipping ${skippedPage} page(s) for near pointer assignment. This may cause memory insufficiency`);
+					}
+					allocated = true;
+				}
+			}
+			if (!allocated) {
+				try {
+					location = this.memory.assign(name, size);
+					allocated = true;
+				} catch (e) {
+					// Out of memory: the caller decides whether that is fatal
+					allocated = false;
+					location = null;
+				}
+			}
+			if (!allocated || !location) {
+				return { position: null, near: false, success: false };
+			}
+			const dupSymb = location.duplicate();
+			if (dupSymb.forwarding(size).block === location.block) {
+				requireNear = true;
+			}
+			return { position: location, near: requireNear, success: allocated };
+		};
+
+		symbol.needMemoryAllocation = true;
+		const result = allocator(symbol.size, symbol.isNearPointer, symbol.getAssemblySymbol());
+		if (!result.success || !result.position) {
+			const canUseRegisters = this.canDegradeToRegisters(symbol);
+			symbol.memoryAllocationFailed = true;
+			if (!canUseRegisters) {
+				this.addError(`Cannot assign memory for symbol ${symbol.describe()}`);
+				return;
+			}
+			this.addWarning(`Not enough memory for ${symbol.describe()}; it will be held in registers instead`);
+			symbol.needMemoryAllocation = false;
+			symbol.implementAsPointer = false;
+			symbol.accessThroughPointer = false;
+			symbol.memoryLocation = null;
+			// Pick the register layout now, while "no memory" is still true
+			this.arrayStyleFor(symbol);
+			return;
+		}
+		if (!['pointer'].includes(symbol.myType()?.kind)) {
+			symbol.isNearPointer = result.near;
+		}
+		symbol.memoryLocation = result.position;
+		if (symbol.requireExtraMemory()) {
+			// Additional space: `X.__pointer` holds the address of the data
+			const additional = allocator(2, true, `${symbol.getAssemblySymbol()}.__pointer`);
+			if (!additional.success) {
+				this.addError(`Cannot assign essential additional memory for symbol ${symbol.describe()}`);
+				symbol.memoryAllocationFailed = true;
+				return;
+			}
+			symbol.isExtraNear = additional.near;
+			symbol.extraMemoryLocation = additional.position;
+		}
+	}
+
+	/**
+	 * Whether an array may be kept in registers when there is no memory left.
+	 *
+	 * Not for a `volatile` array (it has to be in memory by definition), and not
+	 * inside a recursive function (a register would be overwritten by the nested
+	 * call, and the layout needs a slot per activation anyway).
+	 *
+	 * @param {SymbolEntry} symbol
+	 * @returns {boolean}
+	 */
+	canDegradeToRegisters(symbol) {
+		return this.forcedTraditionalReason(symbol) === null;
 	}
 
 	requireRValueMemory(size) {
@@ -428,11 +569,24 @@ export class CodeGenerator extends ASTVisitor {
 					// result = this.memory.outputFetchOf(symbol.memoryLocation, `${temporary}_block`);
 					// result.concat(this.memory.outputFetchOf(symbol.memoryLocation.duplicate().forwarding(1), `${temporary}_pos`));
 				} else {
+					/*
+					Read the two words of the pointer out of its slot. Stepping to
+					the second word moves the slot address itself, so keep it first
+					and put it back afterwards -- otherwise every read of the
+					pointer shifts the slot one cell further and it soon lands on
+					somebody else's storage.
+					*/
+					const slot = `${symbol.getAssemblySymbol()}.__pointer`;
+					const keepB = `${temporary}_keepb`, keepP = `${temporary}_keepp`;
 					result = new Instruction([
-						InstructionBuilder.reads(`${temporary}_block`, `${symbol.getAssemblySymbol()}.__pointer_block`, `${symbol.getAssemblySymbol()}.__pointer_pos`),
+						InstructionBuilder.set(keepB, `${slot}_block`),
+						InstructionBuilder.set(keepP, `${slot}_pos`),
+						InstructionBuilder.reads(`${temporary}_block`, `${slot}_block`, `${slot}_pos`),
 						this.memory.outputSymbolForwardCall(1, symbol, this.functionManagement,
 							false, false),
-						InstructionBuilder.reads(`${temporary}_pos`, '__ptrblock', '__ptrpos')
+						InstructionBuilder.reads(`${temporary}_pos`, '__ptrblock', '__ptrpos'),
+						InstructionBuilder.set(`${slot}_block`, keepB),
+						InstructionBuilder.set(`${slot}_pos`, keepP)
 					]);
 				}
 				result.instructionReturn = temporary;
@@ -472,55 +626,53 @@ export class CodeGenerator extends ASTVisitor {
 	}
 
 	/**
-	 * 
-	 * @param {SymbolEntry} symbol 
-	 * @param {any} data 
-	 * @return {Instruction}
+	 * Wrap a raw operand into a `VariableRet`.
+	 *
+	 * Accepted forms: an already built `VariableRet`, or an assembly name /
+	 * numeric literal (which becomes an immediate value).
+	 *
+	 * @param {VariableRet | string | number} source
+	 * @param {TypeInfo?} type The type of the *target*, which decides whether the
+	 *                         name refers to a single register or to a `_block` /
+	 *                         `_pos` pair.
+	 * @returns {VariableRet}
+	 */
+	asRet(source, type = null) {
+		const glob = this.glob;
+		if (source instanceof VariableRet) return source;
+		const literal = new ImmediateRet(glob, String(source), type);
+		if (widthOfType(type) >= 2) {
+			// The name refers to a pair of `X_block` / `X_pos` registers
+			return new RefPointerRet(glob, [], literal.name, type, false);
+		}
+		return literal;
+	}
+
+	/**
+	 * Write a value into a symbol.
+	 *
+	 * This is the object oriented replacement of the old `generateSymbolWrite`:
+	 * *how* the value reaches the symbol (a plain `set`, a `write` through a
+	 * pointer, or a two-word `_block` / `_pos` pair) is decided by the value class
+	 * of the symbol -- see `mindcInfrastructure.js` -- instead of by a chain of
+	 * `if (symbol.implementAsPointer) ... else if (symbol.accessThroughPointer) ...`.
+	 *
+	 * @param {SymbolEntry} symbol
+	 * @param {VariableRet | string | number} source
+	 * @returns {VariableRet}
 	 * @warning This has **no** operation on structures. Be careful!
 	 */
-	generateSymbolWrite(symbol, data) {
-		let hasTemplate = null;
-		if (typeof data === 'object' && data.template) {
-			hasTemplate = data.template;
+	writeSymbol(symbol, source) {
+		const target = symbolRef(this.glob, symbol);
+		if (target instanceof NamePointerRet && !(source instanceof VariableRet)) {
+			/*
+			The value of a name pointer is the NAME of something, i.e. a single
+			word -- even though `int **` looks like a two word type. Passing the
+			bare register name through keeps it that way.
+			*/
+			return target.set(new ImmediateRet(this.glob, String(source), symbol.myType()));
 		}
-		if (symbol.implementAsPointer) {
-			//throw new InternalGenerationFailure(`Pointer can't be directly written: ${symbol.name}`);
-			if (symbol.accessThroughPointer) {
-				if (symbol.memoryRef()) {
-					return new Instruction([
-						this.memory.outputStorageOf(symbol.memoryRef(), hasTemplate ? `{${hasTemplate}_block_entry}` : `${data}_block`),
-						this.memory.outputStorageOf(symbol.memoryRef().duplicate().forwarding(1), hasTemplate ? `{${hasTemplate}_ptr_entry}` :`${data}_pos`)
-						// this.memory.outputStorageOf(symbol.memoryLocation, hasTemplate ? `{${hasTemplate}_block_entry}` : `${data}_block`),
-						// this.memory.outputStorageOf(symbol.memoryLocation.duplicate().forwarding(1), hasTemplate ? `{${hasTemplate}_ptr_entry}` :`${data}_pos`)
-					]);
-				} else {
-					return new Instruction([
-						this.memory.outputPointerStorageOf(`${symbol.getAssemblySymbol()}.__pointer`, hasTemplate ? `{${hasTemplate}_block_entry}` : `${data}_block`),
-						this.memory.outputSymbolForwardCall(1, symbol, this.functionManagement,
-							false, false),
-						this.memory.outputPointerStorageOf('__ptr', hasTemplate ? `{${hasTemplate}_ptr_entry}` : `${data}_pos`)
-					]);
-				}
-			} else {
-				return new Instruction([
-					InstructionBuilder.set(`${symbol.getAssemblySymbol()}_block`, hasTemplate ? `{${hasTemplate}_block_entry}` : `${data}_block`),
-					InstructionBuilder.set(`${symbol.getAssemblySymbol()}_pos`, hasTemplate ? `{${hasTemplate}_ptr_entry}` : `${data}_pos`)
-				]);
-			}
-		}
-		if (symbol.accessThroughPointer) {
-			if (symbol.memoryLocation) {
-				return this.memory.outputStorageOf(symbol.memoryLocation, hasTemplate ?? data);
-			} else {
-				// Heap variables
-				return InstructionBuilder.writes(hasTemplate ?? data, 
-					`${symbol.getAssemblySymbol()}.__pointer_block`, `${symbol.getAssemblySymbol()}.__pointer_pos`
-				);
-			}
-			
-		} else {
-			return InstructionBuilder.set(symbol.getAssemblySymbol(), hasTemplate ?? data);
-		}
+		return target.set(this.asRet(source, symbol.myType()));
 	}
 
 	/**
@@ -538,7 +690,7 @@ export class CodeGenerator extends ASTVisitor {
 		} else {
 			const tmpVar = this.getTempVariable();
 			result = instruction.raw_replace_all('op', tmpVar);
-			result.concat(this.generateSymbolWrite(symbol, tmpVar));
+			result.concat(this.writeSymbol(symbol, tmpVar));
 		}
 		result.set_returns(symbol);
 		return result;
@@ -1030,7 +1182,7 @@ export class CodeGenerator extends ASTVisitor {
 					// Must be copied (NOTE: They are NOT .__pointer NOw!)
 					return [this.copyStruct(sym.getAssemblySymbol(), paramName, sym.type.type)];
 				}
-				return [this.generateSymbolWrite(sym, paramName)];
+				return [this.writeSymbol(sym, paramName)];
 			})));	// Copy the parameters
 			// If there's no function address calling, this is not necessary
 		}
@@ -1052,7 +1204,7 @@ export class CodeGenerator extends ASTVisitor {
 		/*
 		if (recursive) {
 			this.currentScope.recursivelyGetAllSymbols().forEach(symbol => {
-				result.concat(this.generateSymbolWrite(symbol, `${symbol.getAssemblySymbol()}.__restore`));
+				result.concat(this.writeSymbol(symbol, `${symbol.getAssemblySymbol()}.__restore`));
 			});
 		}
 			*/
@@ -1175,7 +1327,7 @@ export class CodeGenerator extends ASTVisitor {
 		} else if (consequent.getAttribute('isPointer')) {
 			returner.accessThroughPointer = true;
 		}
-		result.concat(this.generateSymbolWrite(returner, consequent.instructionReturn));
+		result.concat(this.writeSymbol(returner, consequent.instructionReturn));
 		const finalize = InstructionBuilder.jump('{end}', 'always');
 		result.concat(finalize);
 		result.concat(new InstructionReferrer(jumper, 'alt', 0));
@@ -1186,7 +1338,7 @@ export class CodeGenerator extends ASTVisitor {
 		} else {
 			// What did I intend to write here?
 		}
-		result.concat(this.generateSymbolWrite(returner, alternate.instructionReturn));
+		result.concat(this.writeSymbol(returner, alternate.instructionReturn));
 		result.concat(new InstructionReferrer(finalize, 'end', 0));
 		result.set_returns(returner);
 		return result;
@@ -1381,6 +1533,17 @@ export class CodeGenerator extends ASTVisitor {
 			// Usually for those access-through-pointer but no memory location ones
 			finalize.concat(symbol.extraMemoryLocation.getAssignmentInstruction(`${symbol.getAssemblySymbol()}.__pointer`));
 		}
+		/*
+		An array that is NOT laid out in memory (its elements are registers, or a
+		single encoded string) carries its initial values in that representation
+		already. Building a memory image and copying it in would be pointless --
+		and would write to memory the array does not have.
+		*/
+		if (node.initializer && this.arraySymbolOfIdentifier(symbol)
+			&& this.arrayStyleFor(symbol).type !== 'traditional') {
+			node.initializer.setAttribute('embeddedInRepresentation', true);
+			return finalize;
+		}
 		if (!symbol.memoryLocation || node.initializer) {
 			let endJumper = null;
 			const endTag = `${symbol.getAssemblySymbol()}:_static_tag`;
@@ -1405,14 +1568,23 @@ export class CodeGenerator extends ASTVisitor {
 				
 				// Oh no, this was wrong. YOU CAN'T ASSUME THAT THE RIGHT SIDE IS SIMILAR THING AS WELL!
 				// 'isStructRet' is used only for initializer list
-				if (symbol.accessThroughPointer || evaluation.getAttribute('disallowReplacement')) {
+				/*
+				`replace_variable` below works by renaming the variable inside the
+				instructions that produced the value. That only works when there
+				ARE instructions: `int *p = &x;` yields the address of x with no
+				code at all, and renaming nothing leaves p uninitialised. In that
+				case the value has to be copied explicitly.
+				*/
+				const noCodeToRename = !(evaluation.instructions && evaluation.instructions.length > 0);
+				if (symbol.accessThroughPointer || noCodeToRename
+					|| evaluation.getAttribute('disallowReplacement')) {
 					finalize.concat(evaluation);
 					if (node.initializer.dataType && (
 						node.initializer.dataType.kind === 'struct' || node.initializer.dataType.kind === 'union' || evaluation.getAttribute('isStructRet')
 					)) {
 						finalize.concat(this.copyStruct(symbol.getAssemblySymbol(), evaluation.instructionReturn ?? 'null', symbol.myType(), node.initializer.dataType));
 					} else {
-						finalize.concat(this.generateSymbolWrite(symbol, evaluation.instructionReturn ?? 'null'));
+						finalize.concat(this.writeSymbol(symbol, evaluation.instructionReturn ?? 'null'));
 					}
 				} else {
 					finalize.concat(evaluation.replace_variable(symbol.getAssemblySymbol(), evaluation.instructionReturn));
@@ -1599,13 +1771,13 @@ export class CodeGenerator extends ASTVisitor {
 				case 'bool':
 					result = this.visitAndRead(node);
 					temporary = this.getTempSymbol(this.semantic.getTypeInfo('int'));//this.getTempVariable();
-					result.concat(this.generateSymbolWrite(temporary, 0));
+					result.concat(this.writeSymbol(temporary, 0));
 					let jumper = this.operatesWith(
 						InstructionBuilder.jump('{notequal_end}', 'equal', 'false', '{opw}'),
 						result
 					);
 					result.concat(jumper);
-					result.concat(this.generateSymbolWrite(temporary, 1));
+					result.concat(this.writeSymbol(temporary, 1));
 					result.concat(new InstructionReferrer(jumper, 'notequal_end', 0));
 					result.set_returns(temporary);
 					return result;
@@ -1681,13 +1853,13 @@ export class CodeGenerator extends ASTVisitor {
 					temporary
 				));
 			} else {
-				result.concat(this.generateSymbolWrite(temporary, 'false'));
+				result.concat(this.writeSymbol(temporary, 'false'));
 				let jumper = this.operatesWith(
 					InstructionBuilder.jump('{equal_end}', 'equal', '0', '{opw}'),
 					result
 				);
 				result.concat(jumper);
-				result.concat(this.generateSymbolWrite(temporary, 'true'));
+				result.concat(this.writeSymbol(temporary, 'true'));
 				result.concat(new InstructionReferrer(jumper, 'equal_end', 0));
 			}
 			result.set_returns(temporary);
@@ -1776,10 +1948,7 @@ export class CodeGenerator extends ASTVisitor {
 		// The VM's `div` is a floating point division: integers need an explicit floor.
 		if (node.operator === '/' && node.dataType
 			&& this.semantic.isTypeCompatibleForAny(node.dataType, ['int', 'long', 'signed', 'unsigned', 'bool'], true)) {
-			const target = result.name;
-			result = valueClassOf(glob, node.dataType).create(glob,
-				[result.instructions, InstructionBuilder.op('floor', target, target)],
-				target, node.dataType, true);
+			result = this.applyFloor(result, node.dataType);
 		}
 		return result;
 	}
@@ -1789,72 +1958,77 @@ export class CodeGenerator extends ASTVisitor {
 	 * @param {CastExpression} node 
 	 * @todo
 	 */
+	/**
+	 * 
+	 * @param {CastExpression} node 
+	 * @returns {VariableRet}
+	 * @remark Only conversions the Mindustry VM cannot do on its own are emitted;
+	 *         everything else is a no-op that just changes the static type.
+	 */
 	visitCastExpression(node) {
+		const glob = this.glob;
 		if (node.getAttribute('disposeReturn')) {
-			return this.visit(node);
+			return this.visit(node.expression);
 		}
-		let casting;
+		const target = node.dataType;
+		const source = node.expression;
+		const sourceType = source ? source.dataType : null;
 
-		const transmitToSymbol = () => {
-			const copiedSymbol = this.getTempSymbol(node.dataType);
-			casting.concat(this.generateSymbolWrite(copiedSymbol, casting.instructionReturn));
-			casting.set_returns(copiedSymbol);	
-		};
-
-		if (node.dataType) {
-			if (node.dataType.qualifiers.indexOf('volatile') != -1) {
-				// This means EXPLICITLY reserve everything.
-				if (node.expression.type === 'Identifier') {
-					// Directly return it.
-					if (node.expression.name.length > 0 && node.expression.name[0] == '@') {
-						return new Instruction([], node.expression.name, new Map([['disallowReplacement', true]]));
-					}
-					const symbol = this.currentScope.lookup(node.expression.name);
-					casting = new Instruction([], symbol.getAssemblySymbol(), new Map([['disallowReplacement', true]]));
-				} else {
-					casting = this.visit(node.expression);	// Don't convert it directly, if volatile is given
+		/*
+		`(volatile T)x` converts nothing: it only demands that the result lives in
+		memory. For an identifier that means "use the variable itself" (its in-memory
+		reference), so that later reads and writes really go through the memory cell.
+		*/
+		if (target && (target.qualifiers ?? []).indexOf('volatile') !== -1) {
+			if (source && source.type === 'Identifier') {
+				if (source.name.length > 0 && source.name[0] === '@') {
+					return new ImmediateRet(glob, source.name, target, true);
 				}
-				// Still, transmission is necessary
-				//transmitToSymbol();
-			} else if (node.expression && node.expression.dataType && !this.semantic.isSameType(node.dataType, node.expression.dataType)) {
-				if (node.expression.dataType.kind === 'pointer' && node.dataType.name === 'int') {
-					casting = this.visitAndRead(node.expression);
-					const receiver = this.getTempVariable();
-					const result = this.castPointerToValue(casting.instructionReturn);
-					casting.concat(result);
-					casting.concat(InstructionBuilder.set(receiver, '__builtin_return'));
-					casting.instructionReturn = receiver;
-					transmitToSymbol();
-				} else if (this.semantic.isSameType(node.expression.dataType, this.semantic.getTypeInfo('int')) && node.dataType.kind === 'pointer') {
-					casting = this.visitAndRead(node.expression);
-					const receiver = this.getTempVariable();
-					const result = this.memory.outputPointerForwardCall(casting.instructionReturn, receiver, this.functionManagement, true);
-					casting.concat(result);
-					casting.instructionReturn = receiver;
-					transmitToSymbol();
-				} else if (['float', 'double'].includes(node.expression.dataType.name)) {
-					casting = this.implicitToNumeric(node.expression);
-				} else if (this.semantic.isSameType(node.dataType, this.semantic.getTypeInfo('bool'))) {
-					casting = this.implicitToBoolean(node.expression);
-				} else if (
-					this.semantic.isTypeCompatibleForAny(node.expression.dataType, ['item_t', 'liquid_t', 'unit_t', 'block_t', 'content_t'], true) //['item_t', 'liquid_t', 'unit_t', 'block_t', 'content_t'].includes(node.expression.dataType.name)
-					 && this.semantic.isTypeCompatibleForAny(node.dataType, ['item_t', 'liquid_t', 'unit_t', 'block_t', 'int'], true)) {
-					casting = this.implicitToNumeric(node.expression);
-				} else if (['item_t', 'liquid_t', 'unit_t', 'block_t', 'int'].includes(node.expression.dataType.name) 
-					&& this.semantic.isSameType(this.semantic.getTypeInfo('content_t'), node.dataType)) {
-					const referrer = typeName => typeName.slice(0, typeName.length - 2);
-					casting = this.implicitToContent(node.expression, referrer(node.expression.dataType.name));
+				const symbol = this.currentScope.lookup(source.name);
+				if (!symbol) {
+					throw new InternalGenerationFailure(`Unknown identifier ${source.name}`, source);
 				}
+				return symbolRef(glob, symbol);
 			}
-		} 
-		if (!casting) {
-			casting = this.visitAndRead(node.expression);
+			// Not an identifier: whatever the expression produced has to stay in memory,
+			// so do not convert it either.
+			return ExportRet(glob, this.visit(source), sourceType);
 		}
-		casting.setAttribute('fromCast', true);
-		// Make a copy
-		return casting;
+
+		let value = ExportRet(glob, this.visit(source), sourceType);
+		if (!target || !sourceType || this.semantic.isSameType(target, sourceType)) {
+			return value.get();
+		}
+
+		const intType = this.semantic.getTypeInfo('int');
+		const contentType = this.semantic.getTypeInfo('content_t');
+		// pointer <-> int : the linear address has to be computed explicitly
+		if (sourceType.kind === 'pointer' && target.name === 'int') {
+			return value.convertTo(target);
+		}
+		if (this.semantic.isSameType(sourceType, intType) && target.kind === 'pointer') {
+			return value.convertTo(target);
+		}
+		// float -> integer : truncate
+		if (['float', 'double'].includes(sourceType.name)) {
+			return value.convertTo(target);
+		}
+		// -> bool
+		if (this.semantic.isSameType(target, this.semantic.getTypeInfo('bool'))) {
+			return value.convertTo(target);
+		}
+		// content types <-> numeric ids
+		if (this.semantic.isTypeCompatibleForAny(sourceType, [...SPECIAL_CONTENT_TYPES, 'content_t'], true)
+			&& this.semantic.isTypeCompatibleForAny(target, [...SPECIAL_CONTENT_TYPES, 'int'], true)) {
+			return value.convertTo(target);
+		}
+		if (this.semantic.isTypeCompatibleForAny(sourceType, [...SPECIAL_CONTENT_TYPES, 'int'], true)
+			&& this.semantic.isSameType(contentType, target)) {
+			return value.convertTo(target, contentTypeOf(sourceType.name));
+		}
+		return value.get();
 	}
-	
+
 	/**
 	 * 
 	 * @param {AssignmentExpressionNode} node 
@@ -1862,72 +2036,143 @@ export class CodeGenerator extends ASTVisitor {
 	 * @todo Consider some "invaded operations." (e.g. Especially for arrays and structs:
 	 * don't let the right side assign to a temporary symbol first.)
 	 */
+	/**
+	 * 
+	 * @param {AssignmentExpressionNode} node 
+	 * @returns {VariableRet}
+	 * @remark The LValue is evaluated exactly ONCE. That matters for code size and,
+	 *         more importantly, for expressions with side effects such as `a[i()] += 1`.
+	 * @remark Arrays and pointers are assigned by reference; structs and unions
+	 *         are copied (member-wise for registry structs, by memcpy otherwise).
+	 */
 	visitAssignmentExpression(node) {
-		let value = null;
-		const special = ['item_t', 'liquid_t', 'unit_t', 'block_t'];
-		const referrer = typeName => typeName.slice(0, typeName.length - 2);
+		const glob = this.glob;
+		const leftType = node.left.dataType ?? null;
+		const rightType = node.right.dataType ?? null;
 
+		/* ---------------- compound assignment: read / compute / write ---------------- */
 		if (node.operator !== '=') {
-			value = this.visitBinaryExpression(ASTBuilder.binaryExpression(
-				node.operator.slice(null, -1),
-				node.left, node.right
-			));
-		} else {
-			// struct will be copied through memcpy.
-			// Note that arrays or pointers are "byref".
-			if (node.right.dataType && (node.right.dataType.kind === 'struct' || node.right.dataType.kind === 'union')) {
-				const leftPointer = this.processLValGetter(node.left, true, true);
-				const structData = this.visitAndRead(node.right, {
-					assignmentTarget: leftPointer.instructionReturn
-				});
-				
-				if (structData.getAttribute('disallowReplacement')) {	// Rarely used
-					return leftPointer
-						.concat(structData)
-						.concat(this.copyStruct(leftPointer.instructionReturn, structData.instructionReturn, 
-							node.right.dataType, node.left.dataType));
-				} else {
-					return leftPointer.concat(structData.replace_variable(leftPointer.instructionReturn, 
-						structData.instructionReturn));
-				}
-				
-			} else if (node.right.type === 'InitializerList') {
-				// Pre-evaluated pointer with initializer list, perform something like memcpy
-				let result = new Instruction();
-				const leftPointer = this.processLValGetter(node.left, true, true);	// Because we want the array information
-				node.setAttribute('generatedLVal', leftPointer);
-				const listData = this.visitAndRead(node.right, {
-					assignmentTarget: leftPointer.instructionReturn
-				});
-				result.concat(leftPointer);
-				result.concat(listData);
-				if (node.left.dataType && node.left.dataType.kind === 'pointer') {
-					const lret = leftPointer.instructionReturn, rret = listData.instructionReturn;
-					result.concat(new Instruction([
-						InstructionBuilder.set(`${lret}_block`, `${rret}_block`),
-						InstructionBuilder.set(`${lret}_pos`, `${rret}_pos`)
-					]));
-				} else {
-					result.concat(this.memory.outputMemcpyCall(leftPointer.instructionReturn, listData.instructionReturn,
-						node.right.dataType.size ?? 0, this.functionManagement
-					));
-				}
-				result.setAttribute('isPointer', true);	// Must be a pointer...
-				result.instructionReturn = leftPointer.instructionReturn;
-				return result;
-			} else if (node.left.dataType && node.right.dataType && !this.semantic.isSameType(node.left.dataType, node.right.dataType)) {
-				if (special.includes(node.right.dataType.name) && node.left.dataType.name === 'content_t') {
-					value = this.implicitToContent(node.right, referrer(node.right.dataType.name));
-				} else if (special.includes(node.left.dataType.name)) {
-					value = this.implicitToNumeric(node.right);
-				} else if (this.semantic.isTypeCompatibleForAny(node.right.dataType, ['float', 'double'], true) && !this.semantic.isTypeCompatibleForAny(node.left.dataType, ['float', 'double'], true)) {
-					value = this.implicitToNumeric(node.right);
-				}
+			const operatorTranslation = new Map([['+=', 'add'], ['-=', 'sub'], ['*=', 'mul'], ['/=', 'div'], ['%=', 'mod'],
+				['&=', 'and'], ['|=', 'or'], ['^=', 'xor'], ['<<=', 'shl'], ['>>=', 'shr']]);
+			const op = operatorTranslation.get(node.operator);
+			if (!op) {
+				this.addWarning(`Unsupported compound assignment: ${node.operator}`, node);
+				return this.processAssignment(node.left, this.visitBinaryExpression(
+					ASTBuilder.binaryExpression(node.operator.slice(0, -1), node.left, node.right)), node.dataType);
 			}
-			if (!value) value = this.visitAndRead(node.right);
+			const { setup, ref } = this.splitLValue(this.getLValue(node.left));
+			// Both operands are materialized: the right one may contain calls.
+			const left = ref.get();
+			const right = ExportRet(glob, this.visit(node.right), rightType);
+			let result = arithmetic(glob, op, left, right, node.dataType ?? leftType);
+			if (node.operator === '/=' && leftType
+				&& this.semantic.isTypeCompatibleForAny(leftType, ['int', 'long', 'signed', 'unsigned', 'bool'], true)) {
+				result = this.applyFloor(result, leftType);
+			}
+			return this.mergeSetup(setup, ref.set(result));
 		}
-		
-		return this.processAssignment(node.left, value, node.dataType);
+
+		/* ---------------- plain assignment ---------------- */
+		const lval = this.getLValue(node.left);
+
+		// Structs and unions are copied (never "by reference")
+		if (rightType && ['struct', 'union'].includes(rightType.kind)) {
+			return lval.set(ExportRet(glob, this.visit(node.right), rightType));
+		}
+
+		// Initializer lists build the data first, then copy it into the target
+		if (node.right.type === 'InitializerList') {
+			return this.assignInitializerList(node, lval);
+		}
+
+		let value = ExportRet(glob, this.visit(node.right), rightType);
+		if (leftType && rightType && !this.semantic.isSameType(leftType, rightType)) {
+			const intType = this.semantic.getTypeInfo('int');
+			if (SPECIAL_CONTENT_TYPES.includes(rightType.name) && leftType.name === 'content_t') {
+				value = value.convertTo(this.semantic.getTypeInfo('content_t'), contentTypeOf(rightType.name));
+			} else if (SPECIAL_CONTENT_TYPES.includes(leftType.name)) {
+				// item_t & friends are plain numeric ids underneath
+				value = value.convertTo(intType);
+			} else if (['float', 'double'].includes(rightType.name)
+				&& !this.semantic.isTypeCompatibleForAny(leftType, ['float', 'double'], true)) {
+				value = value.convertTo(intType);
+			}
+		}
+		return lval.set(value);
+	}
+
+	/**
+	 * Split an LValue into the instructions that compute its address and a bare
+	 * reference (carrying no instructions) that can be read and written afterwards.
+	 * 
+	 * @param {VariableRet} lval 
+	 * @returns {{setup: Instruction, ref: VariableRet}}
+	 */
+	splitLValue(lval) {
+		if (!lval.instructions || lval.instructions.length === 0) {
+			return { setup: new Instruction(), ref: lval };
+		}
+		const setup = new Instruction([...lval.instructions]);
+		const ref = lval.clone();
+		ref.instructions = [];
+		return { setup, ref };
+	}
+
+	/**
+	 * Prepend `setup` to the instructions of `stored`, keeping everything else.
+	 * 
+	 * @param {Instruction} setup 
+	 * @param {VariableRet} stored 
+	 * @returns {VariableRet}
+	 */
+	mergeSetup(setup, stored) {
+		if (!setup || !setup.instructions || setup.instructions.length === 0) return stored;
+		const merged = stored.clone();
+		merged.instructions = [...setup.instructions, ...stored.instructions];
+		return merged;
+	}
+
+	/**
+	 * Integer division in the VM is a floating point one: apply `floor` to `value`.
+	 * 
+	 * @param {VariableRet} value 
+	 * @param {TypeInfo?} type 
+	 * @returns {VariableRet}
+	 */
+	applyFloor(value, type = null) {
+		const glob = this.glob;
+		const name = value.name;
+		const resultType = type ?? value.type;
+		return valueClassOf(glob, resultType).create(glob,
+			[value.instructions, InstructionBuilder.op('floor', name, name)], name, resultType, true);
+	}
+
+	/**
+	 * `T x = {...}` : the initializer list produces the data, which is then moved
+	 * into the target (by reference for pointers, by memcpy otherwise).
+	 * 
+	 * @param {AssignmentExpressionNode} node 
+	 * @param {VariableRet} lval 
+	 * @returns {Instruction}
+	 */
+	assignInitializerList(node, lval) {
+		const target = lval.instructionReturn;
+		node.setAttribute('generatedLVal', lval);
+		const listData = this.visitAndRead(node.right, { assignmentTarget: target });
+		const result = new Instruction([lval.instructions, listData]);
+		if (node.left.dataType && node.left.dataType.kind === 'pointer') {
+			const rret = listData.instructionReturn;
+			result.concat(new Instruction([
+				InstructionBuilder.set(`${target}_block`, `${rret}_block`),
+				InstructionBuilder.set(`${target}_pos`, `${rret}_pos`)
+			]));
+		} else {
+			result.concat(this.memory.outputMemcpyCall(target, listData.instructionReturn,
+				node.right.dataType.size ?? 0, this.functionManagement));
+		}
+		result.setAttribute('isPointer', true);
+		result.instructionReturn = target;
+		return result;
 	}
 
 	/**
@@ -1966,7 +2211,7 @@ export class CodeGenerator extends ASTVisitor {
 				asPointer = node.argument.dataType && node.argument.dataType.isPointerImpl();
 				const shouldDuplicate = (!node.prefix) && (!node.getAttribute('disposeReturn'));
 				if (shouldDuplicate) {
-					result.concat(this.generateSymbolWrite(duplicate, result.instructionReturn));
+					result.concat(this.writeSymbol(duplicate, result.instructionReturn));
 				}
 				if (asPointer) {
 					result.concat(node.operator === '++'
@@ -1993,17 +2238,42 @@ export class CodeGenerator extends ASTVisitor {
 				// Thus demand some small changes of L-value getting.
 				return this.processLValGetter(node.argument, true);	// -- Notice: this is not 'traditional' because we really want something to MODIFY IT
 				break;
-			case '*':
+			case '*': {
 				// Get value from given address (variable address).
 				// Assume that this is only about RValue (LValue is independently handled.)
-				// ...
+				const pointer = ExportRet(this.glob, this.visitAndRead(node.argument), node.argument.dataType);
+				if (pointer instanceof NamePointerRet) {
+					// The pointer holds a NAME: `read @this <name>`
+					return pointer.fetch(this.getTempSymbol(node.dataType));
+				}
 				collector = this.getTempSymbol(node.dataType);
-				result = this.visitAndRead(node.argument);
-				result.concat_returns(this.operates(
-					InstructionBuilder.reads('{op}', `${result.instructionReturn}_block`, `${result.instructionReturn}_pos`),
-					collector
-				));
-				return result;
+				if (widthOfType(node.dataType) >= 2) {
+					/*
+					Pointing at something that is itself two words (an `int **`,
+					say): keep the old path, which hands back a pointer view of
+					that location.
+					*/
+					result = this.visitAndRead(node.argument);
+					result.concat_returns(this.operates(
+						InstructionBuilder.reads('{op}', `${result.instructionReturn}_block`, `${result.instructionReturn}_pos`),
+						collector
+					));
+					result.instructionReturn = collector.getAssemblySymbol();
+					return result;
+				}
+				/*
+				The value pointed at is a SINGLE word. It must be returned as a
+				value of the dereferenced type -- NOT as the pointer object we
+				read it through, otherwise `*p + 1` would be compiled as pointer
+				arithmetic instead of an addition.
+				*/
+				const pointerValue = pointer.get();
+				const target = collector.getAssemblySymbol();
+				const instructions = [pointerValue.instructions,
+					InstructionBuilder.reads(target, `${pointerValue.name}_block`, `${pointerValue.name}_pos`)];
+				return valueClassOf(this.glob, node.dataType).create(this.glob, instructions,
+					target, node.dataType, true);
+			}
 				break;
 				
 			case '!':
@@ -2038,9 +2308,200 @@ export class CodeGenerator extends ASTVisitor {
 	 * @param {ASTNode} node
 	 * @returns {VariableRet}
 	 */
+	/**
+	 * Resolve `a.b` / `a[b]` into an LValue: a reference that can be read (`get`)
+	 * and written (`set`).
+	 *
+	 * Three cases:
+	 *  - the object is a **registry struct**: `a.b` is simply the variable `a.b`,
+	 *    so nothing at all has to be computed;
+	 *  - `a[i]`: the element address is the object address plus `i * size`;
+	 *  - `a.b` (struct member): the offset has already been computed by the
+	 *    semantic analyzer (`memberOffset` / `totalMemberOffset`).
+	 *
+	 * @param {MemberExpressionNode} node
+	 * @returns {VariableRet}
+	 */
+	/* ------------------------------------------------------------------ *
+	 * Array representations
+	 *
+	 * An array normally lives in memory and is reached through its
+	 * `X_block` / `X_pos` pointer. When memory (or instructions) run short it
+	 * may instead be held as a set of registers, as a name lookup, or -- for a
+	 * constant array -- as a string. See mindcInfrastructure.js.
+	 * ------------------------------------------------------------------ */
+
+	/**
+	 * Whether pointers may store the NAME of what they point at.
+	 * @returns {boolean}
+	 */
+	namePointerAllowed() {
+		const config = this.compiler?.extraConfig?.getAttribute('optimizeOption') ?? {};
+		if (config.doPointerOptimize !== true) return false;
+		return (this.semantic.targetVersion ?? this.compiler?.config?.getAttribute('targetVersion') ?? 0) >= 150;
+	}
+
+	/**
+	 * How many elements an array symbol has.
+	 * @param {SymbolEntry} symbol
+	 * @returns {number}
+	 */
+	arrayLengthOf(symbol) {
+		const type = symbol.myType();
+		let sizes = (type && type.arraySize) ? type.arraySize : null;
+		// `arraySize` may be a list of numbers, a single number, or the AST
+		// literal node that the parser stored there.
+		const asNumber = item => {
+			if (item === null || item === undefined) return null;
+			if (typeof item === 'number') return item;
+			if (typeof item.value === 'number') return item.value;
+			return null;
+		};
+		if (!Array.isArray(sizes)) sizes = [sizes];
+		const numbers = sizes.map(asNumber).filter(n => n !== null && n > 0);
+		if (numbers.length > 0) return numbers.reduce((a, b) => a * b, 1);
+		if (type && type.size) return type.size;
+		return symbol.size ?? 0;
+	}
+
+	/**
+	 * Memory cells still free.
+	 * @returns {number}
+	 */
+	remainingMemory() {
+		if (!this.memory) return Infinity;
+		try {
+			// Total capacity: how much there *is*, not how much is left right now.
+			return this.memory.memoryBlocks.reduce((sum, block) => sum + block.size, 0);
+		} catch (e) {
+			return Infinity;
+		}
+	}
+
+	/**
+	 * How many instructions may still be emitted.
+	 * @returns {number}
+	 */
+	instructionBudget() {
+		const limit = this.compiler?.extraConfig?.getAttribute('maxInstructions') ?? 1000;
+		return Math.max(0, Number(limit) || 1000);
+	}
+
+	/**
+	 * The names used by the `lookup` representation, taken from the content
+	 * lists in mindcBase.js (they are what `lookup` + `sensor @name` can name).
+	 * @param {number} length
+	 * @returns {{category: string, names: string[]}}
+	 */
+	lookupNamesOf(length) {
+		const strip = list => list.map(s => s.replace(/^@/, ''));
+		if (length <= objectList.length) return { category: 'item', names: strip(objectList).slice(0, length) };
+		if (length <= liquidList.length) return { category: 'liquid', names: strip(liquidList).slice(0, length) };
+		if (length <= unitList.length) return { category: 'unit', names: strip(unitList).slice(0, length) };
+		if (length <= buildingList.length) return { category: 'building', names: strip(buildingList).slice(0, length) };
+		return { category: 'item', names: [] };
+	}
+
+	/**
+	 * Which representation an array symbol uses. Decided once and remembered.
+	 *
+	 * An implementation asked for with `array("...")` always wins; otherwise
+	 * memory is used while there is enough of it, and when it runs out the
+	 * representation with the fewest instructions is taken.
+	 *
+	 * @param {SymbolEntry} symbol
+	 * @returns {{type: string, implement: string?, reason: string}}
+	 */
+	/**
+	 * Why an array has to stay in memory, or `null` if it may be held in
+	 * registers.
+	 *
+	 * @param {SymbolEntry} symbol
+	 * @returns {string?}
+	 */
+	forcedTraditionalReason(symbol) {
+		if (symbol.isVolatile) return 'a volatile array must be kept in memory';
+		if (symbol.myType()?.isVolatile?.()) return 'a volatile array must be kept in memory';
+		if (this.isInRecursiveFunction(symbol)) {
+			return 'an array in a recursive function must be kept on the stack';
+		}
+		return null;
+	}
+
+	arrayStyleFor(symbol) {
+		if (symbol.chosenArrayStyle) return symbol.chosenArrayStyle;
+		const forced = this.forcedTraditionalReason(symbol);
+		if (forced) {
+			symbol.chosenArrayStyle = { type: 'traditional', implement: null, reason: forced };
+			return symbol.chosenArrayStyle;
+		}
+		const type = symbol.myType();
+		const length = this.arrayLengthOf(symbol);
+		const size = (type && type.size) ? type.size : 1;
+		const lookup = this.lookupNamesOf(length);
+		const style = selectArrayImplementation({
+			length, size,
+			isConst: symbol.isConst === true,
+			values: symbol.arrayInitialValues ?? null,
+			availableMemory: symbol.memoryAllocationFailed ? 0 : this.remainingMemory(),
+			instructionBudget: this.instructionBudget(),
+			targetVersion: this.semantic.targetVersion ?? this.compiler?.config?.getAttribute('targetVersion') ?? 0,
+			requested: symbol.requestedArrayImplementation ?? null,
+			lookupNames: lookup.names
+		});
+		symbol.chosenArrayStyle = style;
+		symbol.lookupCategory = lookup.category;
+		return style;
+	}
+
+	/**
+	 * Build the `ArrayRet` describing an array symbol.
+	 * @param {SymbolEntry} symbol
+	 * @param {PointerRet} pointer Address of the first element (traditional layout)
+	 * @returns {import('./mindcInfrastructure.js').ArrayRet}
+	 */
+	arrayRetFor(symbol, pointer) {
+		const glob = this.glob;
+		const style = this.arrayStyleFor(symbol);
+		const type = symbol.myType();
+		const length = this.arrayLengthOf(symbol);
+		return arrayRetOf(glob, style, {
+			pointer, type, length,
+			baseName: symbol.getAssemblySymbol(),
+			category: symbol.lookupCategory ?? 'item',
+			names: this.lookupNamesOf(length).names,
+			values: symbol.arrayInitialValues ?? new Array(length).fill(0)
+		});
+	}
+
+	/**
+	 * Whether the symbol is an array that is not laid out in memory.
+	 *
+	 * @param {SymbolEntry} symbol
+	 * @returns {boolean}
+	 */
+	arraySymbolOfIdentifier(symbol) {
+		const type = symbol?.myType?.() ?? null;
+		return !!type && type.kind === 'array';
+	}
+
+	/**
+	 * The array symbol a subscript is applied to, if any.
+	 * @param {ASTNode} node
+	 * @returns {SymbolEntry?}
+	 */
+	arraySymbolOf(node) {
+		if (node.type !== 'Identifier') return null;
+		const symbol = this.currentScope.lookup(node.name);
+		if (!symbol) return null;
+		const type = symbol.myType();
+		if (!type || type.kind !== 'array') return null;
+		if (this.arrayStyleFor(symbol).type === 'traditional') return null;
+		return symbol;
+	}
+
 	resolveMemberExpression(node) {
 		const glob = this.glob;
-		let finalResult = new Instruction(), index;
 		if (node.getAttribute('stringAccess')) {
 			// Special string access: read one word out of the string
 			const finalSymbol = this.getTempSymbol(this.semantic.getTypeInfo('char'));
@@ -2050,85 +2511,119 @@ export class CodeGenerator extends ASTVisitor {
 			return new BasicRet(glob, reading.instructions, reading.instructionReturn, node.dataType, true);
 		}
 
-		let objectRoot = node.children[0];	// Will be altered if there's total offset
+		let objectRoot = node.children[0];	// Altered if a total offset is known
+		const object = this.getLValue(objectRoot);
 
-		let leftsideOrigin = this.getLValue(objectRoot);
-		const isNearPointerHere = leftsideOrigin.isNear === true;
-		const isRegStructHere = leftsideOrigin.getAttribute('isRegStruct') === true;
-
-		if (isRegStructHere) {
-			// Registry struct: the member is a plain variable named `X.member`
-			const nodeType = node.dataType;
-			const memberName = `${leftsideOrigin.instructionReturn}.${node.children[1].name}`;
-			// Registry struct members are real, persistent names (they live on the
-			// stack), so they can be used as operands directly -- no copy needed.
-			const member = valueClassOf(glob, nodeType).create(glob, leftsideOrigin.instructions,
-				memberName, nodeType, true);
-			member.setAttribute('isNearPointer', isNearPointerHere);
-			member.setAttribute('isFromRegStruct', true);
-			if (nodeType && nodeType.isTypeInfo) member.set_returns_type(nodeType);
-			return member;
+		// Registry struct: every member is a variable of its own, named `X.member`
+		if (object instanceof RegistryStructRet) {
+			return object.member(node.children[1].name, node.dataType);
 		}
 
-		// Memory access, from then on
+		/* From here on the object lives in memory and we need its address. */
+		const isNearPointerHere = object.isNear === true;
 		let knownTotalOffset = null;
-		if (node.hasAttribute('totalSource') && node.hasAttribute('totalMemberOffset')) {
-			objectRoot = node.getAttribute('totalSource');
-			leftsideOrigin = this.getLValue(objectRoot).get();
-			knownTotalOffset = node.getAttribute('totalMemberOffset');
-		} else if (node.getAttribute('computed')) {
-			index = this.visitAndRead(node.children[1]);	// Simple calculation
-			finalResult.concat(index);				// Make such visit first!!
-		}
-		// The address of the object: get() makes sure it is a real pointer value
-		// (a pointer stored in memory has to be read out first).
-		const objectAddress = leftsideOrigin.get();
-		finalResult.concat(objectAddress);	// Deferred evaluation
+		let index = null;
+		let setup = new Instruction();
 
-		const finalSymbol = this.getTempSymbol(this.semantic.getTypeInfo('null_t*'));
-		const leftsideDuplicate = this.guaranteeTemporarySymbolReg
-			? finalSymbol.getAssemblySymbol() : this.getTempVariable();
-		finalResult.concat(InstructionBuilder.set(`${leftsideDuplicate}_block`, `${objectAddress.instructionReturn}_block`));
-		finalResult.concat(InstructionBuilder.set(`${leftsideDuplicate}_pos`, `${objectAddress.instructionReturn}_pos`));
 		if (node.getAttribute('computed')) {
-			// Array: the index has to be multiplied by the element size
-			let ratio = node.dataType.size > 0 ? node.dataType.size : 1;
-			/**
-			 * @type {number | string}
-			 */
-			let resultIndex;
+			/*
+			An array that is not laid out in memory: the elements are registers
+			(or, for a constant array, a string), and the subscript picks one of
+			them instead of stepping a pointer.
+			*/
+			const arraySymbol = this.arraySymbolOf(objectRoot);
+			if (arraySymbol) {
+				/*
+				Hand over the WHOLE subscript value, not just its name: the name
+				alone loses the instructions that computed it, so `b[i + 4]`
+				would read from an uninitialised register.
+				*/
+				const subscript = this.visitAndRead(node.children[1]);
+				const subscriptValue = ExportRet(glob, subscript,
+					node.children[1].dataType ?? null);
+				const element = this.arrayRetFor(arraySymbol, null).element(subscriptValue);
+				element.setAttribute('isNearPointer', isNearPointerHere);
+				element.setAttribute('isFromRegStruct', false);
+				return element;
+			}
+			// Array subscript: evaluate the index first
+			index = this.visitAndRead(node.children[1]);
+			setup.concat(index);
+		} else if (node.hasAttribute('totalSource') && node.hasAttribute('totalMemberOffset')) {
+			// The semantic analyzer already folded `a.b.c` into `a` + a total offset
+			objectRoot = node.getAttribute('totalSource');
+			knownTotalOffset = node.getAttribute('totalMemberOffset');
+		}
+		const objectValue = (objectRoot === node.children[0]) ? object.get()
+			: this.getLValue(objectRoot).get();
+		setup.concat(objectValue);	// Deferred evaluation
+
+		/**
+		 * The address of the object itself: `get()` already made sure that a pointer
+		 * stored in memory has been read out.
+		 * @type {PointerRet}
+		 */
+		const objectAddress = (objectValue instanceof PointerRet) ? objectValue
+			: new RefPointerRet(glob, [], objectValue.name, objectValue.type, objectValue.temporary);
+
+		/**
+		 * How far to move: either a constant (struct member) or `index * size`.
+		 * @type {number | string}
+		 */
+		let step;
+		if (node.getAttribute('computed')) {
+			const ratio = node.dataType.size > 0 ? node.dataType.size : 1;
 			if (knownTotalOffset !== null && knownTotalOffset !== undefined) {
-				resultIndex = knownTotalOffset;
+				step = knownTotalOffset;
 			} else if (ratio > 1) {
 				if (node.children[1].type === 'NumericLiteral') {
-					resultIndex = ratio * node.children[1].value;
+					step = ratio * node.children[1].value;
 				} else {
-					resultIndex = this.getTempVariable();
-					finalResult.concat(InstructionBuilder.op('mul', resultIndex, index.instructionReturn, ratio));
+					const scaled = this.getTempVariable();
+					setup.concat(InstructionBuilder.op('mul', scaled, index.instructionReturn, ratio));
+					step = scaled;
 				}
 			} else {
-				resultIndex = index.instructionReturn;
+				step = index.instructionReturn;
 			}
-			finalResult.concat(this.memory.outputPointerForwardCall(resultIndex, leftsideDuplicate,
-				this.functionManagement, false, true, isNearPointerHere));
 		} else {
-			// Struct/union: seek member inside it. Already calculated by SEM.
-			finalResult.concat(this.memory.outputPointerForwardCall(
-				knownTotalOffset ?? node.getAttribute('memberOffset'),
-				leftsideDuplicate, this.functionManagement, false, true, isNearPointerHere));
+			step = knownTotalOffset ?? node.getAttribute('memberOffset');
 		}
-		if (!this.guaranteeTemporarySymbolReg) {
-			// (Legacy path) Store the address into the temporary symbol's own memory.
-			finalResult.concat(this.generateSymbolWrite(finalSymbol, leftsideDuplicate));
+
+		// Moving the pointer is the only thing left to do
+		const address = objectAddress.offset(step);
+
+				// Whatever the member is, we now hold its address
+		const instructions = [setup, address.instructions];
+		/*
+		A member that is an array / struct / union is delivered BY REFERENCE: its
+		value IS the address, nothing is stored there. Returning a MemoryRefRet made
+		`a.data[2]` read two words out of the array's own data and mistake them for
+		the pointer it was supposed to step from.
+		*/
+		if (this.deliversByReference(node.dataType && node.dataType.kind)) {
+			const byRef = new RefPointerRet(glob, instructions, address.name, node.dataType, true);
+			byRef.setAttribute('isNearPointer', isNearPointerHere);
+			byRef.setAttribute('isFromRegStruct', false);
+			return byRef;
 		}
-		// Because it is an address whatever happens
-		const reference = new MemoryRefRet(glob, finalResult.instructions,
-			finalSymbol.getAssemblySymbol(), node.dataType, true);
-		reference.setAttribute('isNearPointer', isNearPointerHere); // inherit the feature
+		const reference = new MemoryRefRet(glob, instructions,
+			address.name, node.dataType, true);
+		reference.setAttribute('isNearPointer', isNearPointerHere);	// inherit the feature
 		reference.setAttribute('isFromRegStruct', false);
 		return reference;
 	}
 
+	/**
+	 * Whether a member of the given kind is delivered "by reference" (i.e. no copy
+	 * is made when it is read) instead of being read out of memory.
+	 * 
+	 * @param {string?} kind 
+	 * @returns {boolean}
+	 */
+	deliversByReference(kind) {
+		return ['array', 'struct', 'union'].includes(kind);
+	}
 
 	getLValue(left) {
 		const glob = this.glob;
@@ -2150,6 +2645,10 @@ export class CodeGenerator extends ASTVisitor {
 				if (left.getAttribute('isDereference')) {
 					// *p : the address IS the value of p
 					const pointer = ExportRet(glob, this.visitAndRead(left.argument), left.argument.dataType);
+					if (pointer instanceof NamePointerRet) {
+						// The pointer holds a NAME, so `*p` is `read/write @this <name>`
+						return pointer.slot();
+					}
 					if (!(pointer instanceof PointerRet)) {
 						this.addWarning(`Dereferencing a non-pointer value`, left.location);
 						return new MemoryRefRet(glob, pointer.instructions, pointer.name, left.dataType, false);
@@ -2183,7 +2682,15 @@ export class CodeGenerator extends ASTVisitor {
 	processLValGetter(left, returnOnlyPointer = false, traditional = false) {
 		const lval = this.getLValue(left);
 		if (returnOnlyPointer) {
-			return traditional ? lval : lval.address();
+			try {
+				return traditional ? lval : lval.address();
+			} catch (e) {
+				if (e instanceof InfrastructureNotImplementedExpection) {
+					this.addError(String(e.message).replace(/^Feature not implemented in infrastructure:\s*/, ''), left);
+					return new Instruction([], 'null', new Map([['disallowReplacement', true]]));
+				}
+				throw e;
+			}
 		}
 		const name = lval.instructionReturn;
 		const glob = this.glob;
@@ -2239,191 +2746,184 @@ export class CodeGenerator extends ASTVisitor {
 	 * @returns {Instruction}
 	 * @todo To make it suitable for function pointer (in order of parameter...)
 	 */
-	visitFunctionCall(node) {
-		const referrer = typeName => typeName.slice(0, typeName.length - 2);
-		const special = ['item_t', 'liquid_t', 'unit_t', 'block_t'];
-		let recursive = this.recursiveInfo.has(this.currentFunction);
-		let result = new Instruction();
-		// Prepare for all parameters
-		/**
-		 * @type {SymbolEntry?}
-		 */
-		let relevantFunction = node.callee ? node.callee.symbol : null;
+	/**
+	 * Work out *what* is being called: a function symbol, or a value of function
+	 * pointer type. Also decides whether the recursive calling protocol is needed.
+	 *
+	 * @param {FunctionCallNode} node
+	 * @returns {{symbol: SymbolEntry?, type: TypeInfo, isFunctionPointer: boolean, recursive: boolean}}
+	 */
+	resolveCallee(node) {
+		let symbol = node.callee ? node.callee.symbol : null;
+		let type = null;
 		let isFunctionPointer = true;
-		/**
-		 * @deprecated
-		 */
-		let detFunctionSymbol = null;
-		/**
-		 * @type {TypeInfo?}
-		 */
-		let relevantFunctionType = null;
-		if (!relevantFunction) {
+		let recursive = this.recursiveInfo.has(this.currentFunction);
+		if (!symbol) {
+			// Not a name: the callee must have a function (pointer) type
 			if (node.callee.dataType && node.callee.dataType.functionTo) {
-				relevantFunctionType = node.callee.dataType.functionTo.type;
+				type = node.callee.dataType.functionTo.type;
 			}
 			// Otherwise, be ready for failure
-		} else if (relevantFunction.kind !== 'function') {
-			relevantFunction = relevantFunction.type.type.functionTo;
-			relevantFunctionType = relevantFunction.myType();
-			if (relevantFunction.isAuto) {
+		} else if (symbol.kind !== 'function') {
+			// A variable of function pointer type
+			symbol = symbol.type.type.functionTo;
+			type = symbol.myType();
+			if (symbol.isAuto) {
 				recursive = true;
 			}
 		} else {
-			detFunctionSymbol = relevantFunction;	// ?
-			relevantFunctionType = relevantFunction.type;
+			type = symbol.type;
 			isFunctionPointer = false;
 		}
-		if (!relevantFunctionType) {
+		if (!type) {
 			throw new InternalGenerationFailure(`Unknown function ${node.callee ? (node.callee.name ?? '<unknown-function>') : '<error-function>'}`);
 		}
+		return { symbol, type, isFunctionPointer, recursive };
+	}
+
+	/**
+	 * Where the i-th argument has to be delivered, and under which type.
+	 *
+	 * @param {number} index
+	 * @param {SymbolEntry?} symbol
+	 * @param {TypeInfo} functionType
+	 * @param {boolean} isFunctionPointer
+	 * @returns {{name: string, type: TypeInfo}}
+	 */
+	parameterSlot(index, symbol, functionType, isFunctionPointer) {
+		if (isFunctionPointer) {
+			// Indirect calls pass everything through the fixed `__param_N` slots
+			return {
+				name: `__param_${index}`,
+				type: this.compiler.semanticAnalyzer.getTypeInfo(functionType.parameters[index].type)
+			};
+		}
+		const parameter = symbol.owningScope.lookupCurrent(functionType.parameters[index].name);
+		return {
+			name: parameter.getAssemblySymbol(),
+			type: parameter.type.type
+		};
+	}
+
+	/**
+	 * Deliver one argument into its parameter slot.
+	 *
+	 * @param {string} slotName
+	 * @param {TypeInfo} slotType
+	 * @param {VariableRet} argument The already evaluated argument
+	 * @returns {VariableRet}
+	 */
+	deliverArgument(slotName, slotType, argument) {
+		const glob = this.glob;
+		// `get()` + `materialize()`: the argument ends up in a temporary symbol of
+		// its own, so that evaluating the *next* argument (which may call a function,
+		// possibly this very one) cannot clobber it.
+		const value = argument.get().materialize();
+		if (value instanceof ImmediateRet) {
+			// A constant cannot be renamed: write it out instead.
+			if (value.width >= 2) {
+				return new RefPointerRet(glob, [
+					InstructionBuilder.set(`${slotName}_block`, 'null'),
+					InstructionBuilder.set(`${slotName}_pos`, 'null')
+				], slotName, slotType, false);
+			}
+			return valueClassOf(glob, slotType).create(glob,
+				[InstructionBuilder.set(slotName, value.name)], slotName, slotType, false);
+		}
+		// Reusing the storage the argument already owns is free and avoids a copy
+		const delivery = value.rename(slotName);
+		if (slotType && value.type && !this.semantic.isSameType(slotType, value.type)) {
+			// Types differ enough to require an explicit conversion
+			return new Instruction([delivery.instructions,
+				this.copyObject(slotName, slotName, slotType, value.type)]);
+		}
+		return delivery;
+	}
+
+	/**
+	 * 
+	 * @param {FunctionCallNode} node 
+	 * @throws {InternalGenerationFailure}
+	 * @returns {VariableRet}
+	 * @remark A call is an operation with **many** operands; every argument is
+	 *         therefore materialized into a temporary symbol before the next one is
+	 *         evaluated (see `deliverArgument`).
+	 */
+	visitFunctionCall(node) {
+		const glob = this.glob;
+		const callee = this.resolveCallee(node);
+		let result = new Instruction();
 		// Warning: function pointer does NOT care about this
-		if (recursive) {
+		if (callee.recursive) {
 			result.concat(this.functionManagement.getPreservationCall(this.currentFunction));
 		}
-		//let paramDelivery = new Map();
 
-		/**
-		 * 
-		 * @param {TypeInfo} actualType
-		 * @param {string} paramName
-		 * @param {Instruction} param
-		 * @param {TypeInfo | null} [paramType=null]
-		 */
-		/**
-		 * Put one argument into its parameter slot.
-		 *
-		 * A function call is an operation with MANY operands, so every argument has to
-		 * end up in a temporary symbol of its own before the next one is evaluated --
-		 * otherwise a call inside argument N+1 (or a recursive call) reuses the very
-		 * same register that holds argument N.
-		 *
-		 * @param {TypeInfo} actualType
-		 * @param {string} paramName
-		 * @param {VariableRet} param
-		 * @param {TypeInfo | null} [paramType=null]
-		 * @returns {Instruction}
-		 */
-		const tackleWithParam = (actualType, paramName, param, paramType = null) => {
-			const glob = this.glob;
-			// `get()` + `materialize()`: a real value in a temporary symbol.
-			const value = param.get().materialize();
-			if (value instanceof ImmediateRet) {
-				// Constants cannot be renamed: write them out explicitly.
-				if (value.width >= 2) {
-					return new Instruction([
-						InstructionBuilder.set(`${paramName}_block`, 'null'),
-						InstructionBuilder.set(`${paramName}_pos`, 'null')
-					]);
-				}
-				return InstructionBuilder.set(paramName, value.name);
-			}
-			// Reusing the temporary storage of the argument is free and avoids a copy.
-			const delivery = value.rename(paramName);
-			if (paramType && actualType && !this.semantic.isSameType(actualType, paramType)) {
-				// Types differ enough to require an explicit conversion
-				return new Instruction([delivery.instructions,
-					this.copyObject(paramName, paramName, actualType, paramType)]);
-			}
-			return delivery;
-		};
-
-		for (let i = 0; i < relevantFunctionType.parameters.length && i < node.arguments.length; i++) {
-			/**
-			 * @type {TypeInfo}
-			 */
-			let actualType;
-			if (isFunctionPointer) {
-				actualType = this.compiler.semanticAnalyzer.getTypeInfo(relevantFunctionType.parameters[i].type);
-			} else {
-				actualType = relevantFunction.owningScope.lookupCurrent(relevantFunctionType.parameters[i].name).type.type;
-			}
+		const contentType = this.semantic.getTypeInfo('content_t');
+		for (let i = 0; i < callee.type.parameters.length && i < node.arguments.length; i++) {
+			const slot = this.parameterSlot(i, callee.symbol, callee.type, callee.isFunctionPointer);
 			const argument = node.arguments[i];
-			const raw = this.visit(argument);
-			/**
-			 * @type {VariableRet}
-			 */
-			let param = ExportRet(this.glob, raw, argument.dataType);
-			if (this.compiler.semanticAnalyzer.isSameType(actualType, this.compiler.semanticAnalyzer.getTypeInfo('content_t'))) {
-				param = param.convertTo(this.compiler.semanticAnalyzer.getTypeInfo('content_t'),
+			let value = ExportRet(glob, this.visit(argument), argument.dataType);
+			if (this.semantic.isSameType(slot.type, contentType)) {
+				value = value.convertTo(contentType,
 					contentTypeOf(argument.dataType ? argument.dataType.name : null));
 			}
-			const paramName = isFunctionPointer ? `__param_${i}`
-				: relevantFunction.owningScope.lookupCurrent(relevantFunction.type.parameters[i].name).getAssemblySymbol();
-			result.concat(tackleWithParam(actualType, paramName, param, argument.dataType));
+			result.concat(this.deliverArgument(slot.name, slot.type, value));
 		}
 
-		// Pre-call ended.
-		// Calling
-		if (isFunctionPointer) {
-			const callee = this.visitAndRead(node.callee);
-			result.concat(callee);
-			result.concat(this.functionManagement.getRawFunctionCall(callee.instructionReturn,
-				new Map(), this.currentFunction === 'main', recursive ? null : this.currentFunction));
+		// Pre-call ended. Calling
+		if (callee.isFunctionPointer) {
+			const calleeValue = this.visitAndRead(node.callee);
+			result.concat(calleeValue);
+			result.concat(this.functionManagement.getRawFunctionCall(calleeValue.instructionReturn,
+				new Map(), this.currentFunction === 'main', callee.recursive ? null : this.currentFunction));
 		} else {
 			result.concat(this.functionManagement.getFunctionCall(
-				node.callee.name, new Map(), this.memory, this.currentFunction === 'main', recursive ? null : this.currentFunction));
+				node.callee.name, new Map(), this.memory, this.currentFunction === 'main',
+				callee.recursive ? null : this.currentFunction));
 		}
 
 		// If recursive:
 		// (The position will be otherwise incorrect!!!)
-		if (recursive) {
+		if (callee.recursive) {
 			// Restore all information (by rolling back and then forward)
 			result.concat(this.functionManagement.getRollbackCall(this.currentFunction));
-			// Then reread them
-			/*
-			result.concat(new Instruction(
-				this.currentFunctionScope.recursivelyGetAllSymbols().map(
-				symbol => {
-					
-			})
-			));
-			*/
-		}
-		
-		// Get a copy of function return
-		if (relevantFunctionType.returnType !== 'void' && !node.getAttribute('disposeReturn')) {
-			//this.getTempVariable();
-			const returnTypeContent = this.semantic.getTypeInfo(relevantFunctionType.returnType);
-			if (!returnTypeContent) {
-				this.addError("Return type unclear");
-			}
-			const returnContainer = this.getTempSymbol(returnTypeContent);
-			result.set_returns(returnContainer);
-			if (returnTypeContent.kind === 'struct' || returnTypeContent.kind === 'union') {
-				// Do memcpy (this involves some strange memory allocation...)
-				if (returnTypeContent.isPointerImpl()) {
-					const temporaryMemory = this.requireRValueMemory(returnTypeContent.size);
-					result.setAttribute('isRValueMem', true);
-					result.concat(temporaryMemory.getAssignmentInstruction(result.instructionReturn));
-					result.concat(this.memory.outputMemcpyCall(result.instructionReturn, '__return', returnTypeContent.size, this.functionManagement));
-				} else {
-					result.concat(this.copyStruct(returnContainer.getAssemblySymbol(), '__return', returnTypeContent));
-				}
-			} else {
-				result.concat(this.generateSymbolWrite(returnContainer, '__return'));
-			}
-			/*
-			if (returnTypeContent.isPointerImpl()) {
-				result.setAttribute('isPointer', true);
-				if (returnTypeContent.kind === 'struct' || returnTypeContent.kind === 'union') {
-					// Do memcpy (this involves some strange memory allocation...)
-					const temporaryMemory = this.requireRValueMemory(returnTypeContent.size);
-					result.concat(temporaryMemory.getAssignmentInstruction(result.instructionReturn));
-					result.concat(this.memory.outputMemcpyCall(result.instructionReturn, '__return', returnTypeContent.size, this.functionManagement));
-				} else {
-					result.concat(new Instruction([
-						InstructionBuilder.set(`${result.instructionReturn}_pos`, '__return_pos'),
-						InstructionBuilder.set(`${result.instructionReturn}_block`, '__return_block')
-					]))
-				}
-			} else {
-				result.concat(InstructionBuilder.set(result.instructionReturn, '__return'));
-			}
-			*/
 		}
 
-		return result;
+		/* ---------------- the returned value ---------------- */
+		if (callee.type.returnType === 'void' || node.getAttribute('disposeReturn')) {
+			return result;
+		}
+		const returnType = this.semantic.getTypeInfo(callee.type.returnType);
+		if (!returnType) {
+			this.addError("Return type unclear");
+			return result;
+		}
+		/*
+		`__return` is a single global register: it is overwritten by the next call
+		(and by a recursive call to the very same function), so the value has to be
+		moved into a temporary symbol of its own immediately.
+		*/
+		const returned = this.asRet('__return', returnType);
+		if (returnType.kind === 'struct' || returnType.kind === 'union') {
+			// Structs are copied: memcpy for the memory layout, member-wise otherwise
+			const container = this.getTempSymbol(returnType);
+			if (returnType.isPointerImpl()) {
+				const temporaryMemory = this.requireRValueMemory(returnType.size);
+				result.setAttribute('isRValueMem', true);
+				result.concat(temporaryMemory.getAssignmentInstruction(container.getAssemblySymbol()));
+				result.concat(this.memory.outputMemcpyCall(container.getAssemblySymbol(),
+					'__return', returnType.size, this.functionManagement));
+			} else {
+				result.concat(this.copyStruct(container.getAssemblySymbol(), '__return', returnType));
+			}
+			return valueClassOf(glob, returnType).create(glob, result.instructions,
+				container.getAssemblySymbol(), returnType, true, null);
+		}
+		const container = this.getTempSymbol(returnType);
+		const stored = returned.storeTo(container, true);
+		result.concat(stored);
+		return valueClassOf(glob, returnType).create(glob, result.instructions,
+			stored.name, returnType, true, null);
 	}
 
 	/**
@@ -2497,16 +2997,15 @@ export class CodeGenerator extends ASTVisitor {
 	 *          in the member) are read out.
 	 */
 	visitMemberExpression(node) {
-		const memberResolution = this.resolveMemberExpression(node);
+		const member = this.resolveMemberExpression(node);
 		const kind = node.dataType ? node.dataType.kind : null;
-		if ((memberResolution instanceof StructRefRet) || node.getAttribute('stringAccess')
-			|| kind === 'array' || kind === 'struct' || kind === 'union'
-			|| memberResolution.getAttribute('isFromRegStruct')) {
-			// Deliver them by reference (no copy is made)
-			return memberResolution;
+		// Aggregates, registry struct members and string accesses are delivered by
+		// reference; a scalar (or a pointer) is read out of its memory slot.
+		if (node.getAttribute('stringAccess') || member.getAttribute('isFromRegStruct')
+			|| (member instanceof StructRefRet) || this.deliversByReference(kind)) {
+			return member;
 		}
-		// Scalars (and pointers) are read out of the memory slot
-		return memberResolution.get();
+		return member.get();
 	}
 
 	/**
@@ -2858,7 +3357,7 @@ export class CodeGenerator extends ASTVisitor {
 				result.concat(posRef);
 				result.concat(InstructionBuilder.set(`${returner}_block`, blockRef.instructionReturn));
 				result.concat(InstructionBuilder.set(`${returner}_pos`, posRef.instructionReturn));
-				result.concat(this.generateSymbolWrite(returningSymbol, returner));
+				result.concat(this.writeSymbol(returningSymbol, returner));
 				result.instructionReturn = returningSymbol.getAssemblySymbol();
 				result.setAttribute('isPointer', true);
 				return result;
@@ -2935,12 +3434,20 @@ export class CodeGenerator extends ASTVisitor {
 			/*if (!sTarget.map(symb => symb.describe()).includes(symbol.describe())) {
 				sTarget.push(symbol);
 			}*/
-			const sNames = sTarget.filter(symb => symb.name == symbol.name);
+			/*
+			Compare by the FULL name: `__tempsym_0` in two different block scopes
+			are two different variables, and in a recursive function both have to
+			be saved. Matching on the bare name made the second one invisible, so
+			its value was clobbered by the nested call.
+			*/
+			const fullName = symbol.getAssemblySymbol();
+			const sameSlot = symb => (symb.getAssemblySymbol?.() ?? symb.name) === fullName;
+			const sNames = sTarget.filter(sameSlot);
 			// Given that memory allocation is essential in this environment, there's no need to compare
 			if (sNames.length == 0 
 				|| Math.max(...sNames.map(symb => symb.size)) < symbol.size) {
 				if (sNames.length > 0)
-					sTarget = sTarget.filter(symb => symb.name != symbol.name);
+					sTarget = sTarget.filter(symb => !sameSlot(symb));
 				sTarget.push(symbol);	// So the type information doesn't really matter!
 			}
 		}

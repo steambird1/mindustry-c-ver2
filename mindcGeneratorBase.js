@@ -547,12 +547,82 @@ export class InstructionBuilder {
  * @typedef {{body: Instruction, scope: Scope, preservedStack: SymbolEntry,
  * 			stackSymbols: SymbolEntry[], stackTotal: number, specialBuiltin: boolean, recursive: boolean | undefined, calls: number}} functionInfo
  */
+/**
+ * How much stack a symbol needs in a recursive function.
+ *
+ * An ordinary symbol needs room for its value. A POINTER-VALUED one
+ * (`implementAsPointer` without `accessThroughPointer`: an array, or a pointer)
+ * needs two words *more*: its value is the pair `X_block` / `X_pos`, and that
+ * pair lives in registers, so a nested call would overwrite it. The extra two
+ * words are the slot `X.__pointer` where the pair is stashed and restored.
+ *
+ * @param {SymbolEntry} symbol
+ * @returns {number}
+ */
+export function stackFrameSizeOf(symbol) {
+	return (symbol.size != null) ? symbol.size : 0;
+}
+/**
+ * Whether the symbol's value has to be written to (and read back from) a save
+ * slot when a recursive call happens.
+ *
+ * A symbol whose value *is* an address into the frame (`implementAsPointer`
+ * without `accessThroughPointer`: an array, say) needs nothing: after the frame
+ * pointer has been rolled back, walking the frame again yields exactly the same
+ * address. Everything else lives in a register that the nested call overwrites,
+ * so it has to be saved.
+ *
+ * @param {SymbolEntry} symbol
+ * @returns {boolean}
+ */
+export function needsSaveSlot(symbol) {
+	/*
+	Only an ARRAY / STRUCT / UNION is laid out inside the frame: its `X_block` /
+	`X_pos` *are* its address, so walking the frame again reproduces them
+	exactly. A POINTER symbol is different -- its two words hold a VALUE (the
+	thing it points at), which is not recoverable and must be saved.
+	*/
+	const kind = symbol.myType?.()?.kind ?? null;
+	/*
+	An array's value IS its address, so walking the frame reproduces it -- even
+	when the array is marked "accessed through a pointer" (taking `&a[1]` does
+	that), `X.__pointer` is only a slot for that address, not the data itself.
+	*/
+	if (kind === 'array') return false;
+	if (['struct', 'union'].includes(kind) && !symbol.accessThroughPointer) return false;
+	return true;
+}
+
+/**
+ * Read or write the cell that `outputPointerForwardCall(..., doSet = false)`
+ * left behind.
+ *
+ * That call leaves its result in `__ptrblock` / `__ptrpos` -- note there is NO
+ * underscore before "block". `outputPointerFetchOf('__ptr', ...)` would look
+ * for `__ptr_block` / `__ptr_pos`, which nothing ever writes, so the advanced
+ * address has to be used through these helpers instead.
+ *
+ * @param {string} data
+ * @returns {Instruction}
+ */
+export function readAtAdvancedPointer(data) {
+	return InstructionBuilder.reads(data, '__ptrblock', '__ptrpos');
+}
+
+/**
+ * @param {string} data
+ * @returns {Instruction}
+ */
+export function writeAtAdvancedPointer(data) {
+	return InstructionBuilder.writes(data, '__ptrblock', '__ptrpos');
+}
+
 export class FunctionRegisterer {
 	/**
 	 * 
 	 * @param {MemoryManager} memoryObject 
 	 */
-	constructor(memoryObject) {
+	constructor(memoryObject, stackCheck = undefined) {
 		/**
 		 * @type {Map<string, functionInfo>}
 		 */
@@ -561,7 +631,7 @@ export class FunctionRegisterer {
 		this.memoryObject = memoryObject;
 
 		if (this.memoryObject.memoryBlocks.length > 0) {
-			memoryObject.outputPointerForwardFunction(this, '__stackframe_forward', '__stackframe_', false);
+			memoryObject.outputPointerForwardFunction(this, '__stackframe_forward', '__stackframe_', false, stackCheck);
 			memoryObject.outputPointerBackwardFunction(this, '__stackframe_backward', '__stackframe_', false);
 		}
 	}
@@ -589,7 +659,7 @@ export class FunctionRegisterer {
 			stackSymbols.push(new SymbolEntry('__stackpos', '__builtin_int', scope, 'variable', null, 1));
 		}
 		stackSymbols.forEach(element => {
-			if (element.size != null) stackTotal += element.size;
+			stackTotal += stackFrameSizeOf(element);
 		});
 		let preservedStack = null;
 		// Meaningless:
@@ -635,11 +705,12 @@ export class FunctionRegisterer {
 		 */
 		const mapper = symbol => {
 				if (symbol.name === '__stackpos') return [];
+				if (!needsSaveSlot(symbol)) return [];	// Re-derived from the frame
 				if (symbol.implementAsPointer) {
 					return [
 						this.memoryObject.outputPointerStorageOf(`${symbol.getAssemblySymbol()}.__pointer`, `${symbol.getAssemblySymbol()}_block`),
 						this.memoryObject.outputPointerForwardCall(1, `${symbol.getAssemblySymbol()}.__pointer`, this, false, false),
-						this.memoryObject.outputPointerStorageOf('__ptr', `${symbol.getAssemblySymbol()}_pos`)
+						writeAtAdvancedPointer(`${symbol.getAssemblySymbol()}_pos`)
 					];
 				} else {
 					return [this.memoryObject.outputPointerStorageOf(`${symbol.getAssemblySymbol()}.__pointer`, symbol.getAssemblySymbol())];
@@ -678,12 +749,16 @@ export class FunctionRegisterer {
 			*/
 		refFunction.stackSymbols.forEach(symbol => {
 			// So pointer-forward and -backward can't have stack symbols!
-			totalStackframeSize += symbol.size;
+			totalStackframeSize += stackFrameSizeOf(symbol);
 			const memFwdCall = this.getFunctionCall('__stackframe_forward', new Map([['__step', symbol.size]]), null);
 			//memoryObject.outputPointerForwardCall(symbol.size, '__stackframe', this);
 			// This has even taken array into account
-			if (symbol.implementAsPointer && !symbol.accessThroughPointer) {
-				// Already pointer, simply assigning memory space
+			if (!needsSaveSlot(symbol)) {
+				/*
+				An array / struct / union: its two words ARE its address, so they
+				are simply recomputed here. Everything else gets a save slot
+				(`X.__pointer`) whose address is recorded the same way.
+				*/
 				heapPreparation.concat(new Instruction([
 					InstructionBuilder.set(`${symbol.getAssemblySymbol()}_block`, '__stackframe_block'),
 					InstructionBuilder.set(`${symbol.getAssemblySymbol()}_pos`, '__stackframe_pos')
@@ -720,7 +795,21 @@ export class FunctionRegisterer {
 			// Requires something more for resetting
 			refFunction.stackSymbols.forEach(symb => {
 				if (symb.name === '__stackpos') return;	// Already considered
-				temp.concat(this.memoryObject.outputPointerFetchOf(`${symb.getAssemblySymbol()}.__pointer`, symb.getAssemblySymbol()));
+				if (!needsSaveSlot(symb)) return;		// Re-derived from the frame
+				const name = symb.getAssemblySymbol();
+				if (symb.implementAsPointer) {
+					/*
+					Two words, matching what `getFunctionStackStorage` wrote:
+					`X_block` at `X.__pointer`, `X_pos` one cell further on. This
+					is true for a pointer stored in memory as well, whose value is
+					also the pair `X_block` / `X_pos`.
+					*/
+					temp.concat(this.memoryObject.outputPointerFetchOf(`${name}.__pointer`, `${name}_block`));
+					temp.concat(this.memoryObject.outputPointerForwardCall(1, `${name}.__pointer`, this, false, false));
+					temp.concat(readAtAdvancedPointer(`${name}_pos`));
+				} else {
+					temp.concat(this.memoryObject.outputPointerFetchOf(`${name}.__pointer`, name));
+				}
 			});
 			return temp;
 		};
@@ -812,7 +901,7 @@ export class FunctionRegisterer {
 			// Re-evaluate the size!
 			func.stackTotal = 0;
 			func.stackSymbols.forEach(symb => {
-				func.stackTotal += symb.size;
+				func.stackTotal += stackFrameSizeOf(symb);
 			});
 
 			if (func.specialBuiltin && func.calls <= 0) return;
@@ -1239,27 +1328,72 @@ export class MemoryManager {
 	// This is a function for pointer, satisfying cdecl standard.
 	// Tested to be OK
 	// These two functions directly modify the pointers, so we don't use a 'ret'.
-	outputPointerForwardFunction(funcReg, name = '__pointerForward', target = '__ptr', removable = true) {
+	outputPointerForwardFunction(funcReg, name = '__pointerForward', target = '__ptr', removable = true, stackCheck = undefined) {
 		/*
 		Logic: First read the remaining number and compare current step and the previous pointer. Add if not exceeding, or jump to next page.
+		
+		`stackCheck` applies to the stack frame walker (`__stackframe_forward`):
+		  undefined -- write a fixed message to __error and stop (the default)
+		  false    -- `#pragma stackcheck()`: no capacity check at all
+		  string   -- `#pragma stackcheck(fn)`: call fn, then leave the walker
 		*/
-		funcReg.addFunction(name, new Instruction([
-			InstructionBuilder.jump('{0}', 'greaterThanEq', '__mxstep', 0, [2]),			// 0
-			InstructionBuilder.end(),														// 1
-			InstructionBuilder.getlink('__curptrblock', `${target}block`),					// 2
-			InstructionBuilder.jump('{0}', 'lessThanEq', '__step', 0, [15]),				// 3
-			InstructionBuilder.read('__block', '__curptrblock', 2),							// 4
-			InstructionBuilder.op('sub', '__mxstep', '__block', `${target}pos`),				// 5
-			InstructionBuilder.jump('{0}', 'greaterThanEq', '__step', '__mxstep', [10]),	// 6
-			InstructionBuilder.op('add', `${target}pos`, `${target}pos`, '__step'),					// 7
-			InstructionBuilder.set('__step', 0),											// 8
-			InstructionBuilder.jump('{0}', 'always', null, null, [15]),						// 9
-			InstructionBuilder.read(`${target}block`, '__curptrblock', 1),						// 10
-			InstructionBuilder.op('sub', '__step', '__step', '__mxstep'),					// 11
-			InstructionBuilder.op('add', '__step', '__step', 1),							// 12
-			InstructionBuilder.set(`${target}pos`, this.reservedSize),							// 13
-			InstructionBuilder.jump('{0}', 'always', null, null, [0])						// 14
-		]), null, [], true, false, removable);
+		let body;
+		if (stackCheck === false) {
+			body = [
+				InstructionBuilder.jump('{0}', 'greaterThanEq', '__mxstep', 0, [2]),
+				InstructionBuilder.end(),
+				InstructionBuilder.getlink('__curptrblock', `${target}block`),
+				InstructionBuilder.jump('{0}', 'lessThanEq', '__step', 0, [15]),
+				InstructionBuilder.read('__block', '__curptrblock', 2),
+				InstructionBuilder.op('sub', '__mxstep', '__block', `${target}pos`),
+				InstructionBuilder.jump('{0}', 'greaterThanEq', '__step', '__mxstep', [10]),
+				InstructionBuilder.op('add', `${target}pos`, `${target}pos`, '__step'),
+				InstructionBuilder.set('__step', 0),
+				InstructionBuilder.jump('{0}', 'always', null, null, [15]),
+				InstructionBuilder.read(`${target}block`, '__curptrblock', 1),
+				InstructionBuilder.op('sub', '__step', '__step', '__mxstep'),
+				InstructionBuilder.op('add', '__step', '__step', 1),
+				InstructionBuilder.set(`${target}pos`, this.reservedSize),
+				InstructionBuilder.jump('{0}', 'always', null, null, [0]),
+			];
+		} else {
+			const overflow = [];
+			if (typeof stackCheck === 'string' && stackCheck.length > 0) {
+				overflow.push(
+					InstructionBuilder.set('__stackcheck_return', '__stackpos'),
+					InstructionBuilder.op('add', '__stackpos', '@counter', 1),
+					InstructionBuilder.set('@counter', '_' + stackCheck),
+					InstructionBuilder.set('@counter', '__stackcheck_return'),
+				);
+			} else {
+				overflow.push(
+					InstructionBuilder.set('__error', '"stack overflow"'),
+					InstructionBuilder.end(),
+				);
+			}
+			const ret = 16 + overflow.length;
+			body = [
+				InstructionBuilder.jump('{0}', 'greaterThanEq', '__mxstep', 0, [2]),
+				InstructionBuilder.end(),
+				InstructionBuilder.getlink('__curptrblock', `${target}block`),
+				InstructionBuilder.jump('{0}', 'lessThanEq', '__step', 0, [ret]),
+				InstructionBuilder.read('__block', '__curptrblock', 2),
+				InstructionBuilder.op('sub', '__mxstep', '__block', `${target}pos`),
+				InstructionBuilder.jump('{0}', 'greaterThanEq', '__step', '__mxstep', [11]),
+				InstructionBuilder.op('add', `${target}pos`, `${target}pos`, '__step'),
+				InstructionBuilder.set('__step', 0),
+				InstructionBuilder.jump('{0}', 'always', null, null, [ret]),
+				InstructionBuilder.read(`${target}block`, '__curptrblock', 1),
+				// A block id of 0 or less means there is no next block at all
+				InstructionBuilder.jump('{0}', 'lessThanEq', `${target}block`, 0, [16]),
+				InstructionBuilder.op('sub', '__step', '__step', '__mxstep'),
+				InstructionBuilder.op('add', '__step', '__step', 1),
+				InstructionBuilder.set(`${target}pos`, this.reservedSize),
+				InstructionBuilder.jump('{0}', 'always', null, null, [0]),
+				...overflow
+			];
+		}
+		funcReg.addFunction(name, new Instruction(body), null, [], true, false, removable);
 	}
 	
 	/**

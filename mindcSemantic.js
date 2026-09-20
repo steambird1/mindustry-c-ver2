@@ -334,9 +334,10 @@ export class SymbolEntry {
 	 */
 	getFunctionRegion() {
 		const search = scope => {
-			if (scope.type === 'f') return scope.astNode.name;
-			else if (!scope.parent) return null;
-			else return search(scope);
+			if (!scope) return null;
+			if (scope.type === 'f') return scope.astNode ? scope.astNode.name : null;
+			if (!scope.parent) return null;
+			return search(scope.parent);
 		};
 		return this.scope ? search(this.scope) : null;
 	}
@@ -539,11 +540,50 @@ export class TypeInfo {
 	 * 
 	 * @returns {boolean}
 	 */
+	/**
+	 * Whether the DEFINITION itself forces this struct into memory, i.e. whether
+	 * it embeds something that needs memory (an array, or a struct that needs
+	 * memory) at any depth. This is a property of the type, so every instance of
+	 * it must be stored in memory -- no copy can stay in registers.
+	 *
+	 * @param {Set<string>} [seen] Guard against recursive definitions
+	 * @returns {boolean}
+	 */
+	intrinsicallyRequiresMemory(seen = null) {
+		if (!['struct', 'union'].includes(this.kind)) return false;
+		const visited = seen ?? new Set();
+		if (this.name) {
+			if (visited.has(this.name)) return false;
+			visited.add(this.name);
+		}
+		return (this.members ?? []).some(member =>
+			member && member.type && member.type.isTypeInfo && member.type.isRequireMem());
+	}
+
 	isStrictPointerImpl() {
 		const pointerImplementation = ['pointer', 'array'];
+		if (this.kind === 'struct' || this.kind === 'union') {
+			/*
+			`forceMemoryImpl` is set on a COPY of the type when an instance of it
+			has its address taken. A processor has no way to point at a group of
+			registers, so that copy has to become a piece of memory. Instances
+			whose address is never taken keep the original type and stay in
+			registers.
+			*/
+			if (this.forceMemoryImpl === true) return true;
+			/*
+			A struct that CONTAINS an array -- or a struct that itself must live in
+			memory -- can never be held in registers either: the array needs memory
+			of its own, and how many of them a running program needs is not known
+			at compile time (a recursive call may need arbitrarily many).
+			*/
+			return (this.members ?? []).some(member =>
+				member && member.type && member.type.isTypeInfo && member.type.isRequireMem());
+		}
 		return ((typeof this.kind === 'object') && this.kind.isStrictPointerImpl()) ||
 		 pointerImplementation.includes(this.kind);
 	}
+
 
 	/**
 	 * 
@@ -746,6 +786,8 @@ export class SemanticAnalyzer extends ASTVisitor {
 		
 		// 第一遍：收集类型定义（typedef, struct, union）
         this.collectTypeDefinitions(ast);
+		// In-memory copies of struct types, made on demand by `&s`
+		this.memoryVariants = new Map();
 
         this.visit(ast);
 
@@ -1487,10 +1529,21 @@ export class SemanticAnalyzer extends ASTVisitor {
 				//pointerAccess = true;
             }
 
+			/*
+			Peel off pointers and array layers. A struct/union has no "single"
+			type underneath it, so the recursion stops there -- otherwise the
+			walk would run off the end into `null`.
+			*/
 			const extractToBottom = /**
 			@param {TypeInfo} extr
 			@returns {TypeInfo}
-			*/ extr => extr.isStrictPointerImpl() ? extractToBottom(extr.extractSingle()) : extr;
+			*/ extr => {
+				if (!extr || !extr.isTypeInfo) return extr;
+				if (!extr.isStrictPointerImpl()) return extr;
+				const single = extr.extractSingle?.() ?? null;
+				if (!single || single === extr) return extr;
+				return extractToBottom(single);
+			};
 
 			if ((finalType.qualifiers.some(q => warningStorages.includes(q)) || warningKinds.includes(finalType.kind)) && warningTypes.includes(extractToBottom(finalType).name)) {
 				this.addWarning(`Variable ${declarator.name} (with type ${varType.toString()}) cannot be stored in memory`, declarator.location);
@@ -1553,6 +1606,14 @@ export class SemanticAnalyzer extends ASTVisitor {
 
             this.currentScope.addSymbol(varSymbol);
 
+			/*
+			`int a[10] = array("embedded_divided", {3, 4});`
+			`array(...)` is a compile time directive: it names the layout the
+			array must use, and may carry the initial contents. It is consumed
+			here -- the rest of the compiler only ever sees the contents.
+			*/
+			this.consumeArrayDirective(declarator, varSymbol);
+
             // 检查初始化表达式
             if (declarator.initializer) {
                 this.visit(declarator.initializer, {
@@ -1577,6 +1638,55 @@ export class SemanticAnalyzer extends ASTVisitor {
 			}
         });
     }
+
+	/**
+	 * Recognize `T a[N] = array("<implementation>"[, <initializer list>])`.
+	 *
+	 * The directive is removed from the tree; what is left behind is the
+	 * initializer list (if any), so that everything downstream sees an
+	 * ordinary array declaration carrying one extra attribute.
+	 *
+	 * @param {ASTNode} declarator
+	 * @param {SymbolEntry} symbol
+	 */
+	consumeArrayDirective(declarator, symbol) {
+		const initializer = declarator.initializer;
+		if (!initializer || initializer.type !== 'FunctionCall') return;
+		const callee = initializer.callee;
+		if (!callee || callee.name !== 'array') return;
+		const args = initializer.arguments ?? [];
+		if (args.length === 0) {
+			this.addError(`array() needs the name of an implementation`, initializer.location);
+			return;
+		}
+		const first = args[0];
+		if (first.type !== 'StringLiteral') {
+			this.addError(`The first parameter of array() must be a string literal`, initializer.location);
+			return;
+		}
+		const requested = String(first.raw).replace(/^"|"$/g, '');
+		const known = ['traditional', 'embedded', 'embedded_divided', 'embedded_lookup', 'encoded'];
+		if (!known.includes(requested)) {
+			this.addError(`Unknown array implementation '${requested}' (expected one of ${known.join(', ')})`,
+				initializer.location);
+			return;
+		}
+		const contents = (args.length >= 2 && args[1].type === 'InitializerList') ? args[1] : null;
+		if (requested === 'encoded' && !contents) {
+			this.addError(`An encoded array must be given its contents: array("encoded", {...})`,
+				initializer.location);
+			return;
+		}
+		declarator.setAttribute('arrayImplementation', requested);
+		symbol.requestedArrayImplementation = requested;
+		declarator.initializer = contents;
+		if (contents) {
+			// Remember the constants: an encoded array needs them to build its table
+			symbol.arrayInitialValues = (contents.values ?? contents.children ?? [])
+				.map(item => (item && item.value !== undefined) ? Number(item.value) : null)
+				.filter(v => v !== null && Number.isFinite(v));
+		}
+	}
 
 	/**
 	 * 
@@ -1851,12 +1961,120 @@ export class SemanticAnalyzer extends ASTVisitor {
 		return false;
 	}
 	
+	/**
+	 * Mark a struct/union type as one that must be stored in memory.
+	 *
+	 * The flag goes onto the *canonical* type -- the object kept in
+	 * `structTable`, which is shared by every use of the struct, including the
+	 * member entries of every struct that embeds it. That sharing is what makes
+	 * the requirement spread outwards: once `struct inner` must live in memory,
+	 * `struct outer { struct inner i; ... }` reports `isStrictPointerImpl()` as
+	 * well and is forced into memory too.
+	 *
+	 * @param {TypeInfo} type
+	 * @returns {void}
+	 */
+	/**
+	 * The "in memory" variant of a struct/union type.
+	 *
+	 * Taking the address of a struct held in registers is impossible -- a
+	 * processor cannot name a group of registers. Rather than degrading the whole
+	 * type (which would drag every other instance of it into memory too), an
+	 * implicit COPY of the type is made and only that copy is marked as stored in
+	 * memory. The variable whose address was taken switches to the copy; every
+	 * other instance of the same struct keeps the original type and stays in
+	 * registers.
+	 *
+	 * A struct whose DEFINITION already demands memory (it embeds an array, say)
+	 * has no such copy: every instance of it is in memory anyway, so the type
+	 * itself is handed back unchanged.
+	 *
+	 * @param {TypeInfo} type
+	 * @returns {TypeInfo}
+	 */
+	memoryVariantOf(type) {
+		if (!type || !type.isTypeInfo) return type;
+		if (!['struct', 'union'].includes(type.kind)) return type;
+		// Already a memory implementation? Nothing to do.
+		if (type.isStrictPointerImpl()) return type;
+		this.memoryVariants = this.memoryVariants ?? new Map();
+		const existing = this.memoryVariants.get(type.name);
+		if (existing) return existing;
+		const copy = type.duplicate();
+		copy.forceMemoryImpl = true;
+		this.memoryVariants.set(type.name, copy);
+		/*
+		Every pointer to this struct must now see the memory copy: a pointer can
+		only ever point at an instance that has an address, and those are exactly
+		the ones using the copy.
+		*/
+		this.retargetPointersTo(type.name, copy);
+		return copy;
+	}
+
+	/**
+	 * Repoint every pointer-to-`structName` at `variant`, so that `p->m` is
+	 * resolved through memory.
+	 *
+	 * @param {string} structName
+	 * @param {TypeInfo} variant
+	 * @returns {void}
+	 */
+	retargetPointersTo(structName, variant) {
+		const fixType = type => {
+			if (!type || !type.isTypeInfo) return;
+			if (type.kind === 'pointer' && type.pointerTo
+				&& type.pointerTo.name === structName
+				&& ['struct', 'union'].includes(type.pointerTo.kind)) {
+				type.pointerTo = variant;
+			}
+		};
+		for (const type of this.typeTable.values()) fixType(type);
+		for (const structType of this.structTable.values()) {
+			(structType.members ?? []).forEach(member => {
+				if (member && member.type) fixType(member.type);
+			});
+		}
+		const visitScope = scope => {
+			if (!scope) return;
+			(scope.getAllSymbols?.() ?? []).forEach(symbol => {
+				const type = symbol.myType?.() ?? null;
+				if (type && type.isTypeInfo) fixType(type);
+			});
+			scope.children?.forEach(visitScope);
+		};
+		visitScope(this.globalScope);
+	}
+
 	// 添加辅助方法标记变量已被取地址
 	markVariableAsAddressed(node) {
 		if (node.type === 'Identifier') {
 			const symbol = this.currentScope.lookup(node.name);
 			if (symbol) {
 				symbol.isAddressed = true;
+				/*
+				A struct held in registers has no address at all: a processor
+				cannot name "the group of registers called s". Rather than
+				refusing the program, the struct is degraded to a piece of
+				memory -- and so is every struct that embeds it (see
+				`TypeInfo.requireMemoryImplementation`).
+				*/
+				const symbolType = symbol.myType?.() ?? null;
+				if (symbolType && ['struct', 'union'].includes(symbolType.kind)) {
+					/*
+					Give this variable the in-memory COPY of its type. Only this
+					variable changes; other instances of the same struct are left
+					alone.
+					*/
+					const variant = this.memoryVariantOf(symbolType);
+					if (variant !== symbolType) {
+						if (symbol.type && typeof symbol.type === 'object' && symbol.type.type) {
+							symbol.type.type = variant;
+						} else {
+							symbol.type = variant;
+						}
+					}
+				}
 				if (symbol.kind === 'variable') {
 					symbol.accessThroughPointer = true;
 				} else if (symbol.kind === 'struct' || symbol.kind === 'union') {
@@ -1872,6 +2090,12 @@ export class SemanticAnalyzer extends ASTVisitor {
 		} else if (node.type === 'MemberExpression') {
 			// 处理结构体成员被取地址的情况
 			const object = node.getChild(0);
+			/*
+			A registry struct keeps each member in a register of its own, so
+			`&s.m` needs no memory at all -- and the struct itself can never be
+			given an address (a processor cannot build the name). Forcing it into
+			memory here would therefore be pure waste.
+			*/
 			this.markVariableAsAddressed(object);
 		} else if (node.type === 'UnaryExpression' && node.operator === '*') {
 			// 解引用表达式的地址（如&*ptr）等于ptr
@@ -2025,7 +2249,12 @@ export class SemanticAnalyzer extends ASTVisitor {
                 this.addWarning(`Array index should be of intergal type`, member.location);
             }
 			if (member.type === 'NumericLiteral' && member.value) {
-				const objectSize = objectType.extractSingle().size ?? 1;
+				/*
+				For a string (`char s`), `s[i]` indexes single characters, and
+				there is no element type underneath to ask for a size.
+				*/
+				const elementType = objectType.extractSingle?.() ?? null;
+				const objectSize = (elementType && elementType.size) ? elementType.size : 1;
 				regOffset(objectSize * member.value);
 			}
             

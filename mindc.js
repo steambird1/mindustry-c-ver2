@@ -383,7 +383,10 @@ export class Compiler {
 						if (config.length < 2) return;
 						parserConfig.setAttribute(config[0], JSON.parse(config[1]));
 					} else if (info.startsWith("optimize(")) {
-						// #pragma optimize(array[, mutable_optimize[, const_optimize]])
+						/*
+						#pragma optimize(array[, mutable_optimize[, const_optimize]])
+						#pragma optimize(pointer)          -- name pointers, off by default
+						*/
 						const comment = info.substring(info.indexOf('(') + 1, info.lastIndexOf(')'));
 						const config = comment.split(',').map(s => s.trim());
 						switch (config[0]) {
@@ -396,7 +399,21 @@ export class Compiler {
 									optimizerConfig.constArrayOptimize = JSON.parse(config[2]);
 								}
 								break;
+							case "pointer":
+								// Pointers may store the NAME of what they point at.
+								// Off unless asked for: it needs v150 and forbids
+								// pointer arithmetic on the affected pointers.
+								optimizerConfig.doPointerOptimize = true;
+								break;
 						}
+					} else if (info.startsWith("stackcheck(")) {
+						/*
+						#pragma stackcheck(fn) -- call `fn` when the stack frame cannot grow
+						#pragma stackcheck()   -- do not check the capacity at all
+						Without the pragma: write a fixed message to __error and stop.
+						*/
+						const handler = info.substring(info.indexOf('(') + 1, info.lastIndexOf(')')).trim();
+						optimizerConfig.stackCheck = handler === '' ? false : handler;
 					}
 			});
 			parserConfig.setAttribute('optimizeOption', optimizerConfig);
