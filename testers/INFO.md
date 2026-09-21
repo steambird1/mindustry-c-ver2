@@ -39,6 +39,10 @@ node tools/runall.mjs    # 全部用例
 | `t19_encoded200.c` | 编码数组的多位情况：base-57 拆分 + Horner 拼回 |
 | `t20_encoded_same.c` | 编码数组全部元素相同：修正量还原 |
 | `t21_traditional.c` | 同样的数组不加 pragma：留在内存里 |
+| `t29_embedded_init.c` | `array("embedded")`：元素寄存器必须真的被写入 |
+| `t30_encoded_int.c` | 显式 `array("encoded")`：必须走字符串表，不得退化成 select 链 |
+| `t31_encoded_content.c` | 编码数组里放内容常量：按编号存储 |
+| `t33_lookup_content.c` | `embedded_lookup` 数组里放内容常量：元素寄存器写入的是编号而非内容本身 |
 | `m1.c` | 二维数组：双重循环填充、常量下标、按列求和 |
 | `m2.c` | 二维数组 + volatile 运行时刻下标 |
 | `m3.c` | 三维数组 |
@@ -195,3 +199,4 @@ node tools/runall.mjs    # 全部用例
 | 文件 | 覆盖内容 |
 |---|---|
 | `t25_opaque_reject.c` | 未定义的 `@名字` 隐式赋给 `item_t`，应报 `Cannot initialize 'item_t' with 'content_t'` |
+| `t32_encoded_bad.c` | `array("encoded", {1, "two"})`：非数字元素应报错 |
