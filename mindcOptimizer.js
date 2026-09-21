@@ -252,6 +252,19 @@ export class Optimizer extends ASTVisitor {
         this.warnings = [];
 		this.inlinedScopeId = 0;
 		this.inlineCounter = 0;
+		/**
+		 * Functions that must not be inlined AUTOMATICALLY.
+		 *
+		 * `soft` holds what `#pragma noinline` asked for, which the `inline`
+		 * keyword outranks. `hard` holds what correctness requires (a function
+		 * the generated stack walker jumps to, say) and nothing outranks it.
+		 * `all` means "every function".
+		 *
+		 * @type {{soft: Set<string>, hard: Set<string>, all: boolean, allHard: boolean}}
+		 */
+		this.autoInlineForbidden = {
+			soft: new Set(), hard: new Set(), all: false, allHard: false
+		};
         
         // 优化状态
         this.functionCallGraph = new Map();
@@ -524,6 +537,8 @@ export class Optimizer extends ASTVisitor {
 				else if (node[field] && typeof node[field] === 'object') walk(node[field], scope);
 			}
 		};
+		this.ensureFunctionDeclarations();
+
 		const walkScope = scope => {
 			if (scope?.astNode) walk(scope.astNode, scope);
 			scope?.children?.forEach(walkScope);
@@ -554,6 +569,38 @@ export class Optimizer extends ASTVisitor {
 			if (this.isRecursiveSymbol?.(symbol)) continue;
 			symbol.addressedAsBuiltinOutput = true;
 		}
+	}
+
+	/**
+	 * Index every function declaration by name, so a call site can find the
+	 * PARAMETER symbol an argument lands in.
+	 */
+	ensureFunctionDeclarations() {
+		if (this.functionDeclarations) return this.functionDeclarations;
+		/** @type {Map<string, any>} */
+		this.functionDeclarations = new Map();
+		const collect = node => {
+			if (!node || typeof node !== 'object') return;
+			if (Array.isArray(node)) { node.forEach(collect); return; }
+			if (node.type === 'FunctionDeclaration' && node.name) {
+				this.functionDeclarations.set(node.name, node);
+			}
+			for (const key of ['functions', 'globalDeclarations', 'statements',
+				'declarations', 'children', 'body']) {
+				const child = node[key];
+				if (Array.isArray(child)) child.forEach(collect);
+				else if (child && typeof child === 'object') collect(child);
+			}
+		};
+		collect(this.ast ?? this.globalScope?.astNode ?? null);
+		const collectFromScope = scope => {
+			if (scope?.astNode?.type === 'FunctionDeclaration' && scope.astNode.name) {
+				this.functionDeclarations.set(scope.astNode.name, scope.astNode);
+			}
+			scope?.children?.forEach(collectFromScope);
+		};
+		collectFromScope(this.globalScope);
+		return this.functionDeclarations;
 	}
 
 	analyzeNamePointers() {
@@ -592,6 +639,29 @@ export class Optimizer extends ASTVisitor {
 		};
 
 		const keyOf = symbol => symbol?.getAssemblySymbol?.() ?? symbol?.name ?? null;
+
+		/**
+		 * Look a name up in `scope`, falling back to a search over every scope:
+		 * the pass runs on a scope tree where a call site may be visited from a
+		 * scope that does not chain up to the one the variable lives in.
+		 * @param {any} scope
+		 * @param {string?} name
+		 */
+		const lookupName = (scope, name) => {
+			if (!name) return null;
+			const direct = scope?.lookup?.(name) ?? null;
+			if (direct) return direct;
+			let found = null;
+			const visit = sc => {
+				if (found) return;
+				sc?.symbols?.forEach(sym => {
+					if (!found && (sym.name === name)) found = sym;
+				});
+				if (!found) sc?.children?.forEach(visit);
+			};
+			visit(this.globalScope);
+			return found;
+		};
 
 		const typeOfSymbol = symbol => symbol?.myType?.() ?? symbol?.type?.type ?? null;
 
@@ -634,7 +704,7 @@ export class Optimizer extends ASTVisitor {
 				return classify(expr, scope);
 			}
 			if (expr.type === 'Identifier') {
-				const symbol = scope?.lookup(expr.name) ?? null;
+				const symbol = lookupName(scope, expr.name);
 				if (!symbol) return { kind: 'invalid', target: null, targetSymbol: null };
 				if (isPointerSymbol(symbol)) {
 					// Pointing at a pointer: only allowed if that one is a name pointer
@@ -759,6 +829,26 @@ export class Optimizer extends ASTVisitor {
 					if (node.name && node.initializer) {
 						const symbol = scope?.lookup(node.name) ?? null;
 						if (isPointerSymbol(symbol)) note(symbol, node.initializer, scope);
+					}
+					break;
+				}
+				case 'FunctionCall': {
+					/*
+					`oper(&x)` stores the address into the PARAMETER. The
+					parameter is a pointer too, so it is judged by the same rules
+					-- if it can hold a name, x never needs a real address.
+					*/
+					const declaration = this.ensureFunctionDeclarations()
+						.get(node.functionName ?? node.callee?.name ?? null) ?? null;
+					if (declaration) {
+						(declaration.parameters ?? []).forEach((parameter, i) => {
+							const argument = node.arguments?.[i];
+							if (!argument) return;
+							const name = parameter?.name?.name ?? parameter?.name ?? parameter;
+							const symbol = declaration.scope?.lookup?.(name)
+								?? declaration.body?.scope?.lookup?.(name) ?? null;
+							if (isPointerSymbol(symbol)) note(symbol, argument, scope);
+						});
 					}
 					break;
 				}
@@ -1402,12 +1492,41 @@ export class Optimizer extends ASTVisitor {
 			afterwards nothing is definite.
 			*/
 			if (info.isLoop) {
+				/*
+				A symbol declared outside the loop survives every iteration, so
+				its ACCESSES are known -- but its VALUE is not, as soon as the
+				loop writes to it: `i = i + 1` is not `i = 1`. Matching by name as
+				well as by symbol, because a body moved here by inlining may
+				still name the symbol it used to have.
+				*/
+				if (symbol && this.loopModifies(info, symbol)) {
+					return info.firstLoopRun ? state.EVAL_TRACKED : state.EVAL_UNKNOWN;
+				}
 				if (symbol && symbol.scope.isParent(info.atLoop)) return state.EVAL_DEFINITE;
 				if (info.firstLoopRun) return state.EVAL_TRACKED;	// Priority relevantly lower
 				return state.EVAL_UNKNOWN;
 			}
 		}
 		return state.EVAL_DEFINITE;
+	}
+
+	/**
+	 * Whether this loop writes to `symbol`.
+	 *
+	 * @param {any} info the analysis context of the loop
+	 * @param {import('./mindcSemantic.js').SymbolEntry} symbol
+	 * @returns {boolean}
+	 */
+	loopModifies(info, symbol) {
+		const modified = info?.modifiedVars;
+		if (!modified || !symbol) return false;
+		for (const entry of modified) {
+			if (!entry || typeof entry !== 'object') continue;
+			if (entry.symbol === symbol) return true;
+			// Fall back on the name: an inlined body may carry a stale symbol
+			if (entry.varName && symbol.name && entry.varName === symbol.name) return true;
+		}
+		return false;
 	}
 
 	/**
@@ -1419,10 +1538,6 @@ export class Optimizer extends ASTVisitor {
 	 * @param {SymbolEntry?} [symbol]
 	 * @returns {boolean}
 	 */
-	shouldRunEvaluation(node, info = null, symbol = null) {
-		return this.isDefinite(this.evaluationState(node, info, symbol));
-	}
-
 	shouldRunEvaluation(node, info = null, symbol = null) {
 		const state = this.evaluationState(node, info, symbol);
 		/*
@@ -1653,7 +1768,9 @@ export class Optimizer extends ASTVisitor {
 						// 标记符号为常量
 						// symbol.markAsConstant(constValue);
 
-						if (shouldEval) {
+						// Same reasoning: a simulation knowing the value is no
+						// reason to delete the declaration.
+						if (shouldEval && !(info && info.optimizingLoop)) {
 							declarator.setAttribute('candidateRemoval', 1);
 						}
 						
@@ -1838,7 +1955,19 @@ export class Optimizer extends ASTVisitor {
 				const localConstants = this.localConstants.get(scopePath);
 				const variableUses = this.variableUses.get(scopePath);
 				const usage = variableUses.get(node.left.name);
-				if (usage && usage.canOptimize) {
+				/*
+				Fold the assignment when the variable may be tracked -- or when
+				we are SIMULATING a loop. There the constants were planted by
+				`simulateLoop` on purpose, and these writes are exactly what
+				computes the final values the loop is then replaced by.
+
+				`canOptimize` is false for anything written inside a loop body
+				(`evaluationState` returns TRACKED there, so that `i = i + 1` is
+				not folded into `i = 1`). That is right for ordinary analysis but
+				must not stop the simulation, which runs in a `optimizingLoop`
+				context where every value really is known.
+				*/
+				if (usage && (usage.canOptimize || (info && info.optimizingLoop))) {
 					// ! Manually modified (now constant expression also consider '+=') !
 					let constValue = undefined;
 					if (node.operator && node.operator !== '=') {
@@ -1852,7 +1981,17 @@ export class Optimizer extends ASTVisitor {
 						if (symbol && this.shouldRunEvaluation(node, info, symbol)) {	// Not considering symbol currently!
 							// symbol.markAsConstant(constValue);
 							this.addWrittenSymbol(symbol, constValue, true);
-							if (this.shouldRunEvaluation(node, info))
+							/*
+							The write folded, so the assignment looks redundant
+							-- but NOT while we are SIMULATING a loop. There the
+							constants describe one imagined iteration, while the
+							statement has to survive for the real loop (which is
+							only replaced when it can be fully optimized).
+							Dropping `i = i + 1` here is what left a loop that
+							never advanced.
+							*/
+							if (this.shouldRunEvaluation(node, info)
+								&& !(info && info.optimizingLoop))
 								node.setAttribute('candidateRemoval', 1);
 						}
 						
@@ -2069,7 +2208,7 @@ export class Optimizer extends ASTVisitor {
 			
 			
 			// 检查条件是否有副作用
-			if (this.hasSideEffects(node.test)) {
+			if (this.hasSideEffects(node.test) || this.controlExpressionHasCall(node.test)) {
 				node.setAttribute('conditionHasSideEffects', true);
 			}
 		}
@@ -2244,12 +2383,12 @@ export class Optimizer extends ASTVisitor {
 			let comparisonOp = null;
 			let constValue = null;
 			
-			if (whileNode.test.left.type === 'Identifier' &&
-				whileNode.test.right.type === 'Identifier') {
-				// 两边都是变量，难以优化
-				return;
-			}
-			
+			/*
+			Both sides being identifiers used to be given up on at once. It
+			should not be: the other side may still be a variable whose value is
+			known here (`while (i < sum)` with `sum` folded to 5). Only the VALUE
+			matters, and `evaluateConstantExpression` below answers that.
+			*/
 			if (whileNode.test.left.type === 'Identifier') {
 				loopVarName = whileNode.test.left.name;
 				comparisonOp = whileNode.test.operator;
@@ -2341,6 +2480,25 @@ export class Optimizer extends ASTVisitor {
 							type: 'assignment',
 							operator: node.operator,
 							step: node.operator === '+=' ? stepValue : -stepValue
+						};
+					}
+				} else if (node.operator === '=' && node.right
+					&& node.right.type === 'BinaryExpression'
+					&& node.right.left && node.right.left.type === 'Identifier'
+					&& node.right.left.name === loopVarName
+					&& (node.right.operator === '+' || node.right.operator === '-')) {
+					/*
+					`i = i + 1` (and `i = i - 1`): the same thing as `i += 1`,
+					just written out. `analyzeLoopUpdate` (used by `for`) already
+					knows this shape; a `while` body needs it too, or
+					`while (i < n) { ... i = i + 1; }` is never optimized.
+					*/
+					const stepValue = this.evaluateConstantExpression(node.right.right);
+					if (stepValue !== undefined) {
+						updateInfo = {
+							type: 'binary',
+							operator: node.right.operator,
+							step: node.right.operator === '+' ? stepValue : -stepValue
 						};
 					}
 				}
@@ -2457,7 +2615,13 @@ export class Optimizer extends ASTVisitor {
 			}
 			
 			// 检查条件是否有副作用
-			node.setAttribute('conditionHasSideEffects', this.hasSideEffects(node.test));
+			/*
+			A call in the condition counts as a side effect even when the call
+			looks harmless: if it were inlined, the loop simulator would count
+			iterations without ever running what it does.
+			*/
+			node.setAttribute('conditionHasSideEffects',
+				Boolean(this.hasSideEffects(node.test) || this.controlExpressionHasCall(node.test)));
 		} else {
 			// 没有条件表达式，是无限循环 (for(;;))
 			// ! Notice that there might be 'break' !
@@ -2469,7 +2633,8 @@ export class Optimizer extends ASTVisitor {
 			this.analyzeNode(node.update, testInfo);
 			
 			// 检查更新是否有副作用
-			node.setAttribute('updateHasSideEffects', this.hasSideEffects(node.update));
+			node.setAttribute('updateHasSideEffects',
+				Boolean(this.hasSideEffects(node.update) || this.controlExpressionHasCall(node.update)));
 		}
 		
 		// 分析循环体
@@ -2920,6 +3085,24 @@ export class Optimizer extends ASTVisitor {
 		
 		// 保存循环前的常量状态
 		const savedConstants = new Map(localConstants);
+		/*
+		If the simulation does NOT end in the loop being replaced (the body
+		reads memory, say, so no final value is known), these imagined constants
+		must not survive: a later pass would then treat `i` as a compile-time
+		constant and delete the very `i = i + 1` that advances the real loop.
+		*/
+		loopNode.setAttribute('savedConstants', savedConstants);
+		loopNode.setAttribute('savedConstantsScopePath', scopePath);
+		/*
+		Ordinary analysis marks everything written inside a loop as not
+		foldable (`canOptimize` false, see `evaluationState`). That is what stops
+		`i = i + 1` from being folded into `i = 1`. Here, though, it would also
+		stop the simulation after zero rounds. Lift it for the loop variable
+		while we simulate; if the loop is not replaced afterwards,
+		`markLoopAsPotentiallyWithSideEffects` puts the mark back.
+		*/
+		const loopUsage = variableUses.get(loopVarName);
+		if (loopUsage) loopUsage.canOptimize = true;
 		
 		// ! Currently, new information might override old ones in combined loop !
 		const info = {
@@ -3284,6 +3467,23 @@ export class Optimizer extends ASTVisitor {
 	}
 
 	/**
+	 * Undo what `simulateLoop` planted, when the loop turned out not to be
+	 * replaceable after all.
+	 *
+	 * @param {ASTNode} loopNode
+	 */
+	restoreLoopConstants(loopNode) {
+		const saved = loopNode?.getAttribute?.('savedConstants');
+		const scopePath = loopNode?.getAttribute?.('savedConstantsScopePath');
+		if (!saved || !scopePath) return;
+		const live = this.localConstants.get(scopePath);
+		if (!live) return;
+		live.clear();
+		for (const [key, value] of saved) live.set(key, value);
+		loopNode.setAttribute('savedConstants', null);	// only once
+	}
+
+	/**
 	 * 优化可确定的for循环
 	 * @param {ASTNode} forNode - for语句节点
 	 * @returns {boolean} - 是否进行了优化
@@ -3313,11 +3513,15 @@ export class Optimizer extends ASTVisitor {
 		// 如果循环有副作用，不能完全删除
 		if (hasSideEffects || forNode.getAttribute('maybeHasSideEffects')) {
 			// 检查是否可以部分优化（减少循环次数）
-			return this.partiallyOptimizeLoop(forNode, loopVarName, iterationCount);
+			const done = this.partiallyOptimizeLoop(forNode, loopVarName, iterationCount);
+			if (!done) this.restoreLoopConstants(forNode);
+			return done;
 		}
 		
 		// 完全可优化的循环
-		return this.fullyOptimizeDeterministicLoop(forNode, iterationCount);
+		const done = this.fullyOptimizeDeterministicLoop(forNode, iterationCount);
+		if (!done) this.restoreLoopConstants(forNode);
+		return done;
 	}
 
 	/**
@@ -3406,11 +3610,15 @@ export class Optimizer extends ASTVisitor {
 		// 如果循环有副作用，不能完全删除
 		if (hasSideEffects || whileNode.getAttribute('maybeHasSideEffects')) {
 			// 检查是否可以部分优化（减少循环次数）
-			return this.partiallyOptimizeLoop(whileNode, loopVarName, iterationCount);
+			const done = this.partiallyOptimizeLoop(whileNode, loopVarName, iterationCount);
+			if (!done) this.restoreLoopConstants(whileNode);
+			return done;
 		}
 		
 		// 完全可优化的循环
-		return this.fullyOptimizeDeterministicLoop(whileNode, iterationCount);
+		const done = this.fullyOptimizeDeterministicLoop(whileNode, iterationCount);
+		if (!done) this.restoreLoopConstants(whileNode);
+		return done;
 	}
 
 	/**
@@ -4720,45 +4928,254 @@ export class Optimizer extends ASTVisitor {
         });
     }
 
+	/**
+	 * Whether this expression (a loop condition or a for-update) contains a
+	 * function call.
+	 *
+	 * @param {ASTNode?} node
+	 * @returns {boolean}
+	 */
+	controlExpressionHasCall(node) {
+		if (!node) return false;
+		let found = false;
+		const walk = n => {
+			if (!n || typeof n !== 'object' || found) return;
+			if (Array.isArray(n)) { n.forEach(walk); return; }
+			if (n.type === 'FunctionCall') { found = true; return; }
+			for (const key of ['children', 'test', 'update', 'argument', 'left', 'right',
+				'expression', 'arguments', 'callee', 'consequent', 'alternate']) {
+				const c = n[key];
+				if (Array.isArray(c)) c.forEach(walk);
+				else if (c && typeof c === 'object') walk(c);
+			}
+		};
+		walk(node);
+		return found;
+	}
+
+	/**
+	 * Call nodes that sit in a loop's controlling position: the `test` of a
+	 * while/for, or the `update` of a for.
+	 *
+	 * These decide how often the body runs. The loop simulator (`simulateLoop`)
+	 * evaluates the condition to count iterations, but it does NOT re-run
+	 * whatever the condition does -- so if a call with side effects were
+	 * inlined there, the compiled loop would run it once per iteration while
+	 * the simulation counted as if it never ran. Inlining at these positions is
+	 * therefore simply not done.
+	 *
+	 * @returns {Set<ASTNode>}
+	 */
+	loopControlCallSites() {
+		if (this._loopControlCallSites) return this._loopControlCallSites;
+		/** @type {Set<ASTNode>} */
+		const found = new Set();
+		const isLoop = node => ['WhileStatement', 'DoWhileStatement', 'ForStatement']
+			.includes(node?.type);
+		const walk = (node, root) => {
+			if (!node || typeof node !== 'object') return;
+			if (Array.isArray(node)) { node.forEach(n => walk(n, root)); return; }
+			if (isLoop(node)) {
+				for (const field of ['test', 'update']) walk(node[field], node);
+				walk(node.body, null);
+				walk(node.init, null);
+				return;
+			}
+			if (root && node.type === 'FunctionCall') {
+				found.add(node);
+				root.setAttribute('controlHasCall', true);
+			}
+			for (const key of ['children', 'statements', 'body', 'consequent', 'alternate',
+				'test', 'init', 'update', 'expression', 'argument', 'left', 'right',
+				'initializer', 'declarators', 'arguments', 'callee']) {
+				const c = node[key];
+				if (Array.isArray(c)) c.forEach(x => walk(x, root));
+				else if (c && typeof c === 'object') walk(c, root);
+			}
+		};
+		walk(this.ast, null);
+		this._loopControlCallSites = found;
+		return found;
+	}
+
+	/**
+	 * Whether this call sits in a loop's controlling position, where inlining
+	 * would break the loop computation.
+	 *
+	 * @param {ASTNode} callNode
+	 * @returns {boolean}
+	 */
+	isLoopControlCall(callNode) {
+		return this.loopControlCallSites().has(callNode);
+	}
+
+	/**
+	 * Register that a function must not be inlined automatically.
+	 *
+	 * @param {string?} name null means "every function"
+	 * @param {boolean} [soft=true] true when the request comes from
+	 *        `#pragma noinline`, which the `inline` keyword outranks
+	 */
+	forbidAutoInline(name = null, soft = true) {
+		const state = this.autoInlineForbidden;
+		if (name === null) {
+			if (soft) state.all = true;
+			else state.allHard = true;
+			return;
+		}
+		(soft ? state.soft : state.hard).add(name);
+	}
+
+	/**
+	 * Whether automatic inlining of this function is allowed AT ALL.
+	 *
+	 * This is the "has anybody forbidden it" question. It says nothing about
+	 * whether inlining is possible or worthwhile.
+	 *
+	 * @param {string} name
+	 * @param {boolean} [declaredInline=false] whether `inline` was written
+	 * @returns {boolean}
+	 */
+	autoInlineAllowed(name, declaredInline = false) {
+		const state = this.autoInlineForbidden;
+		if (state.allHard || state.hard.has(name)) return false;
+		// An explicit `inline` outranks the pragma, but never a hard veto
+		if (declaredInline) return true;
+		if (state.all || state.soft.has(name)) return false;
+		return true;
+	}
+
+	/**
+	 * Apply the `#pragma noinline` requests of this program.
+	 */
+	applyNoInlinePragmas() {
+		const config = this.optimizeConfig ?? {};
+		if (config.noInlineAll === true) this.forbidAutoInline(null, true);
+		for (const name of config.noInlineList ?? []) this.forbidAutoInline(name, true);
+		/*
+		The stack walkers jump to these with `set @counter`, so they must stay
+		real functions: inlining them away would leave the jump with no target.
+		*/
+		for (const key of ['stackCheck', 'stackUnderflow']) {
+			const handler = config[key];
+			if (typeof handler === 'string' && handler) this.forbidAutoInline(handler, false);
+		}
+	}
+
+	/**
+	 * Whether inlining this function is POSSIBLE. Structure only: nothing here
+	 * depends on whether it would be a good idea, and nothing depends on side
+	 * effects -- moving a write from the function body to the call site is
+	 * exactly what inlining means.
+	 *
+	 * @param {string} funcName
+	 * @returns {boolean}
+	 */
+	canInlineFunction(funcName) {
+		const info = this.functionInfo.get(funcName);
+		if (!info) return false;
+		if (funcName === 'main') return false;
+		if (!info.node || !info.node.body) return false;
+		// Reachable through a function pointer: the call sites are not all known
+		if (info.isAddressed) return false;
+		if (this.recuriveInfo?.has(funcName)) return false;
+		// The body shape: no `return`, or a single one at the very end.
+		// (No goto, so a `return` in the middle cannot be reproduced.)
+		if (!info.canInline) return false;
+		return true;
+	}
+
+	/**
+	 * Whether the function is STRICTLY free of side effects, meaning a call to
+	 * it may be deleted when the result is unused.
+	 *
+	 * Deliberately a separate question from `canInlineFunction`: a function that
+	 * writes to a variable can be inlined perfectly well, it just cannot be
+	 * thrown away.
+	 *
+	 * @param {string} funcName
+	 * @returns {boolean}
+	 */
+	isStrictlyPureFunction(funcName) {
+		const info = this.functionInfo.get(funcName);
+		if (!info || !info.node || !info.node.body) return false;
+		if (info.strictlyPure !== undefined) return info.strictlyPure;
+		info.strictlyPure = !this.hasSideEffects(info.node.body, {
+			inFunction: true,
+			atFunction: info.node
+		});
+		return info.strictlyPure;
+	}
+
+	/**
+	 * Whether inlining is worth the code it duplicates.
+	 * @param {string} funcName
+	 * @returns {boolean}
+	 */
+	worthInlining(funcName) {
+		const info = this.functionInfo.get(funcName);
+		if (!info || !info.node) return false;
+		const paraSize = info.node.parameters ? (info.node.parameters.length ?? 0) : 0;
+		/*
+		One call site, or an explicit `inline`: do it. Otherwise compare the size
+		of N copies of the body against keeping the function plus N calls.
+		*/
+		const inlineEstimate = (info.calls + paraSize) * info.size;
+		const noInlineEstimate = (info.size + paraSize + 4 + (4 + paraSize) * info.calls);
+		if (!(info.calls === 1 || info.isInline || inlineEstimate <= noInlineEstimate)) {
+			return false;
+		}
+		const maxSize = this.compiler?.config?.getAttribute('maxInlineSize') ?? 25;
+		const maxDepth = this.compiler?.config?.getAttribute('maxInlineDepth') ?? 5;
+		if (info.size > maxSize && !info.isInline) return false;
+		if (info.maxDepth > maxDepth) return false;
+		return true;
+	}
+
 	// Has manual changes on 'isAddressed'
     inlineFunctions() {
-        // 收集适合内联的函数
-        const inlineCandidates = [];
-        
-        this.functionInfo.forEach((info, funcName) => {
-			if (info.isAddressed) return;	// Can't be inlined!
-			if (!info.node || !info.node.body) return;
-			const paraSize = (info.node.parameters ? (info.node.parameters.length ?? 0) : 0);
-			const inlineEstimate = (info.calls + paraSize) * info.size;
-			const noInlineEstimate = (info.size + paraSize + 4 + (4 + paraSize) * info.calls);
-            if (info.calls === 1 || info.isInline || inlineEstimate <= noInlineEstimate) {
-				const bad = ((info.size > (this.compiler.config.getAttribute('maxInlineSize') ?? 25) && (!info.isInline)) 
-					|| (info.maxDepth > (this.compiler.config.getAttribute('maxInlineDepth') ?? 5)));
-                if (!bad) inlineCandidates.push(funcName);
-            }
-        });
-        
 		this.recuriveInfo = this.findRecursiveFunctions(this.functionCallGraph);
+		this.applyNoInlinePragmas();
+		// 收集适合内联的函数
+		const inlineCandidates = [];
 
-        // 尝试内联候选函数
-        inlineCandidates.forEach(funcName => {
-            if (this.shouldInlineFunction(funcName)) {
-                this.performFunctionInlining(funcName);
-            }
-        });
-    }
+		this.functionInfo.forEach((info, funcName) => {
+			if (!this.canInlineFunction(funcName)) return;
+			if (!this.autoInlineAllowed(funcName, info.isInline === true)) return;
+			if (!this.worthInlining(funcName)) return;
+			inlineCandidates.push(funcName);
+		});
 
-    globalDeadCodeElimination() {
-        // 全局级别的死代码消除
-        // 例如：删除空的全局声明、无用类型定义等
-        
-        if (this.ast.type === 'Program') {
-            // 清理全局声明
-            this.cleanupGlobalDeclarations();
-        }
-    }
+		// 尝试内联候选函数
+		inlineCandidates.forEach(funcName => {
+			if (this.shouldInlineFunction(funcName)) {
+				if (this.performFunctionInlining(funcName)) {
+					// The AST moved: recompute which calls sit where
+					this._loopControlCallSites = null;
+					/*
+					The body now sits in another function, under a different
+					scope path, and next to different constants. Everything
+					known about it was computed where it used to be, so ask for
+					another round: `optimize()` re-runs the whole analysis while
+					`modified` is set.
+					*/
+					this.modified = true;
+				}
+			}
+		});
+	}
 
-    // =============== 辅助方法 ===============
+	globalDeadCodeElimination() {
+		// 全局级别的死代码消除
+		// 例如：删除空的全局声明、无用类型定义等
+
+		if (this.ast.type === 'Program') {
+			// 清理全局声明
+			this.cleanupGlobalDeclarations();
+		}
+	}
+
+	// =============== 辅助方法 ===============
 
 	/**
 	 * @typedef {{
@@ -4766,13 +5183,7 @@ export class Optimizer extends ASTVisitor {
 	 *  category: string,
 	 *  name: string
 	 * }} extBuiltinConstant
-	 * 
-	 */
-	/**
-	 * 
-	 * @param {ASTNode} node 
-	 * @param {boolean} [allowConstants=true] Whether to allow builtin constants to be regarded as constants
-	 * @returns {number | string | extBuiltinConstant | undefined} (`undefined` means it is **not** constant)
+	 *
 	 */
 	/**
 	 * The `#pragma id` / `#pragma var` definitions of this program.
@@ -4781,6 +5192,7 @@ export class Optimizer extends ASTVisitor {
 	get contentTable() {
 		return this.compiler?.extraConfig?.getAttribute('contentTable') ?? null;
 	}
+
 
 	/**
 	 * The value of `@itemCount` / `@liquidCount` / `@unitCount` / `@blockCount`,
@@ -5643,20 +6055,17 @@ export class Optimizer extends ASTVisitor {
     }
 
     shouldInlineFunction(funcName) {
-        const info = this.functionInfo.get(funcName);
-		if (funcName === 'main') return false;
-        if (!info || !info.node.body) return false;
-		if (!info.canInline) return false;
-		if (this.hasSideEffects(info.node.body, {
-			inFunction: true,
-			atFunction: info.node
-		})) return false;
-        
-        // 检查递归调用
-        //const calledFunctions = this.functionCallGraph.get(funcName) || new Set();
-        if (this.recuriveInfo.has(funcName)) return false; // 递归函数不内联
-        
-        return true;
+		/*
+		Three separate questions, deliberately kept apart:
+		  - can it be inlined at all (structure)?
+		  - has anybody forbidden automatic inlining of it?
+		  - (worthwhileness is decided by the caller, see `worthInlining`)
+		Side effects play no part: they only decide whether an unused CALL may
+		be deleted, see `isStrictlyPureFunction`.
+		*/
+		if (!this.canInlineFunction(funcName)) return false;
+		const info = this.functionInfo.get(funcName);
+		return this.autoInlineAllowed(funcName, info?.isInline === true);
     }
 
 	/**
@@ -5665,18 +6074,24 @@ export class Optimizer extends ASTVisitor {
 	performFunctionInlining(funcName) {
 		const funcInfo = this.functionInfo.get(funcName);
 		if (!funcInfo || !funcInfo.node || !funcInfo.node.body) {
-			return;
+			return false;
 		}
 		
 		// 找到所有调用点
 		const callSites = [];
 		this.collectFunctionCallSites(this.ast, funcName, callSites);
 		
-		if (callSites.length === 0) return;
+		if (callSites.length === 0) return false;
+
+		let inlined = false;
 		
 		// 对每个调用点进行内联
 		for (const {callNode, parentNode, context} of callSites) {
-			this.inlineFunctionAtSite(funcInfo.node, callNode, parentNode, context);
+			// A call that decides how often a loop runs is never inlined
+			if (this.isLoopControlCall(callNode)) continue;
+			if (this.inlineFunctionAtSite(funcInfo.node, callNode, parentNode, context)) {
+				inlined = true;
+			}
 			
 			/**
 			 * 
@@ -5693,11 +6108,12 @@ export class Optimizer extends ASTVisitor {
 		}
 		
 		// 如果函数现在没有被调用，可以删除它
-		if (funcInfo.calls === 0) {
+		if (inlined && funcInfo.calls === 0) {
 			this.globalScope.removeSymbol(funcName);	// Manually added
 			this.removeNodeFromParent(funcInfo.node);
 			this.addWarning(`Removed unused function '${funcName}' after inlining`);
 		}
+		return inlined;
 	}
 
 	/**
@@ -5992,6 +6408,25 @@ export class Optimizer extends ASTVisitor {
 					this.further(stmt, scopeRelinker);
 				};
 				scopeRelinker(clonedBody);
+
+				/*
+				The clone still points at the symbols of the function it came
+				from. Every pass that works on symbols -- `collectModifiedVariablesInLoop`
+				first among them -- would then be looking at the OLD symbol while
+				the scope holds the NEW one, and comparing them (as the constant
+				propagation does) simply fails. Re-point every identifier at what
+				its (new) scope resolves the name to.
+				*/
+				const symbolRelinker = stmt => {
+					if (stmt.type === 'Identifier' && typeof stmt.name === 'string'
+						&& stmt.name && stmt.name[0] !== '@') {
+						const found = stmt.scope?.lookup?.(stmt.name) ?? null;
+						if (found) stmt.symbol = found;
+						return;
+					}
+					this.further(stmt, symbolRelinker);
+				};
+				symbolRelinker(clonedBody);
 
 				let originals;// = ASTBuilder.compoundStatement();
 				//newCompound.scope = funcNode.scope;					// Apply similar structure...

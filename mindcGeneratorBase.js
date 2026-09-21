@@ -1398,7 +1398,13 @@ export class MemoryManager {
 		this.memoryBlocks = memoryBlocks;
 		//this.memoryLinker = new BuildingLinker(memoryBlocks.map(block => block.name));
 		this.reservedSize = MEMORY_RESERVE_SIZE;
-		this.memoryPositionStack = [new MemoryBlockInfo(0, this.reservedSize, false, this)];
+		/*
+		No memory block linked at all: there is nowhere to allocate, so the stack
+		starts out full and every allocation fails loudly (instead of pretending
+		to succeed on a block that does not exist).
+		*/
+		const hasMemory = this.memoryBlocks.length > 0;
+		this.memoryPositionStack = [new MemoryBlockInfo(0, this.reservedSize, !hasMemory, this)];
 		this.variableReference = new Map();
 		this.memoryBlocks.forEach(single => {
 			for (let i = 0; i < 4; i++) {
@@ -1430,6 +1436,9 @@ export class MemoryManager {
 	}
 	
 	assign(name, size) {
+		if (this.memoryBlocks.length === 0) {
+			throw new MemoryAllocationException(name, size);
+		}
 		if (this.currentState().full) {
 			throw new MemoryAllocationException(name, 0);
 		}

@@ -109,6 +109,7 @@ export class CodeGenerator extends ASTVisitor {
 			if (this.memory.memoryBlocks.length == 0) {
 				noMemory = true;
 			}
+			this.heapMemoryRequired = false;
 			this.recursiveInfo = findRecursiveFunctions(this.functionCallGraph);
 			this.currentScope = this.semantic.globalScope;
 			this.markArrayStatus(this.currentScope, this.arrayState);
@@ -148,6 +149,15 @@ export class CodeGenerator extends ASTVisitor {
 				this.functionManagement, '__pointerForward', '__ptr', true, false));
 				result.concat(this.memory.outputPointerBackwardFunction(this.functionManagement));
 				result.concat(this.memory.outputMemcpyFunction(this.functionManagement));
+			}
+			/*
+			Nothing is linked, yet something has to live in memory (a `volatile`
+			variable, say): the generated code would read and write a block that
+			does not exist, so refuse instead.
+			*/
+			if (noMemory && this.heapMemoryRequired) {
+				this.addError('This program needs at least one memory block: '
+					+ 'some variables have to be stored in memory (volatile, arrays in recursive functions, ...)');
 			}
 			const programBody = this.visit(ast);
 			const mainSymbol = programBody.getAttribute('mainSymbol');
@@ -470,7 +480,12 @@ export class CodeGenerator extends ASTVisitor {
 
 		const immediate = !ctx.staticAllocOnly || symbol.isStatic || symbol.isVirtualSymbol;
 		if (!immediate) {
-			// The allocation is deferred to the top of the function call
+			/*
+			The allocation is deferred to the top of the function call. Note it
+			anyway: with no memory block linked at all the later attempt cannot
+			succeed either, and the program has to be rejected.
+			*/
+			if (!this.canDegradeToRegisters(symbol)) this.heapMemoryRequired = true;
 			symbol.needMemoryAllocation = true;
 			return;
 		}
@@ -523,6 +538,7 @@ export class CodeGenerator extends ASTVisitor {
 			const canUseRegisters = this.canDegradeToRegisters(symbol);
 			symbol.memoryAllocationFailed = true;
 			if (!canUseRegisters) {
+				this.heapMemoryRequired = true;
 				this.addError(`Cannot assign memory for symbol ${symbol.describe()}`);
 				return;
 			}

@@ -409,6 +409,23 @@ export class Compiler {
 								optimizerConfig.doPointerOptimize = true;
 								break;
 						}
+					} else if (info.startsWith("noinline")) {
+						/*
+						#pragma noinline        -- never inline anything automatically
+						#pragma noinline(fn)    -- never inline `fn` automatically
+						The `inline` keyword outranks both. The names are collected
+						in a LIST because other things may forbid automatic
+						inlining too, without going through a pragma.
+						*/
+						const rest = info.substring("noinline".length).trim();
+						optimizerConfig.noInlineList ??= [];
+						if (rest === '') {
+							optimizerConfig.noInlineAll = true;
+						} else if (rest.startsWith('(')) {
+							const body = rest.substring(1, rest.lastIndexOf(')'));
+							body.split(',').map(t => t.trim()).filter(Boolean)
+								.forEach(name => optimizerConfig.noInlineList.push(name));
+						}
 					} else if (info.startsWith("stackunderflow(")) {
 						/*
 						#pragma stackunderflow(fn) -- call `fn` when the stack is
