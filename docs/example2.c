@@ -1,5 +1,8 @@
 // Example 2: Let poly tirelessly collect copper or lead (depends on which you lacks)
 
+// If you don't use this, then the pointers might have problem.
+#pragma optimize(pointer)
+
 auto device message1;
 
 int coreX, coreY;
@@ -27,11 +30,9 @@ void mining(content_t type, int storage, float deadline) {
     int oreX, oreY;
     bool oreFound;
     device oreDevice;
-    ulocate("ore", type, 
-        (volatile int*)oreX, 
-        (volatile int*)oreY, 
-        (volatile bool*)oreFound,
-        (volatile device*)oreDevice);  // Use volatile pointer to let data fed into it
+	// Note: in version 1.5.x or earlier, (volatile int*) is used here. Now please use standard expression of
+	// getting address.
+    ulocate("ore", type, &oreX, &oreY, &oreFound, &oreDevice);
     if (oreFound) {
         output("Instructing poly to move...");
         movingTo(oreX, oreY);
@@ -57,11 +58,7 @@ void main() {
     output("Binding poly...");
     ubind(@poly);
     wait(3);
-    ulocate("building", "core", false,
-        (volatile int*)coreX,
-        (volatile int*)coreY,
-        (volatile int*)coreFound,
-        (volatile device*)coreDevice);
+    ulocate("building", "core", false, &coreX, &coreY, &coreFound, &coreDevice);
     if (!coreFound) {
         output("No! there's no core found by the logical processor.");
         return;

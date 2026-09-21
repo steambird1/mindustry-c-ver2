@@ -1048,7 +1048,23 @@ export class FunctionRegisterer {
 		first, from the stack layout, whether anybody needs them.
 		*/
 		this.markStackHelpersUsed();
-		this.functionCollection.forEach((func, name) => {
+		/*
+		`main` must come out LAST.
+
+		The chunk of every function ends with a `jump` that skips its body, and
+		that jump is resolved while the whole program is being scanned -- so it
+		points at whatever follows that chunk. Anything emitted after `main`
+		therefore lands between `main` and the little wrapper that calls it, and
+		the wrapper is never reached.
+
+		Functions are normally declared before `main`, so this never showed up;
+		but an extension may register a helper while `main` is being generated,
+		which puts it after `main` in the collection.
+		*/
+		const orderedNames = [...this.functionCollection.keys()];
+		orderedNames.sort((a, b) => (a === 'main' ? 1 : 0) - (b === 'main' ? 1 : 0));
+		orderedNames.forEach(name => {
+			const func = this.functionCollection.get(name);
 			// Re-evaluate the size!
 			func.stackTotal = 0;
 			func.stackSymbols.forEach(symb => {

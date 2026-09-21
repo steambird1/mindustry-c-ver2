@@ -40,7 +40,18 @@ export async function simulate(pathOrSource, memoryBlocks, extraAttributes = {})
 	}
 
 	const links = defaultLinks(blocks);
-	const proc = runProgram(String(result.code ?? ''), { links, devices, maxSteps: 5_000_000 });
+	/*
+	A small default world: `ulocate` finds a core at (11, 22) and
+	`ucontrol "within"` succeeds, so output parameters can be checked. A test
+	that needs something else passes its own provider to runProgram().
+	*/
+	const core = makeDevice('@core', 'core1');
+	devices.core1 = core;
+	const proc = runProgram(String(result.code ?? ''), {
+		links, devices, maxSteps: 5_000_000,
+		ulocateProvider: () => [11, 22, 1, core],
+		ucontrolProvider: () => true
+	});
 	return {
 		success: true,
 		errors: [],

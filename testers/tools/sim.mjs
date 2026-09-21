@@ -143,6 +143,11 @@ export class Processor {
 		this.steps = 0;
 		this.halted = false;
 		this.trap = null;
+		// Callbacks a test may install to model the world itself
+		this.sensorProvider = options.sensorProvider ?? null;
+		this.unitProvider = options.unitProvider ?? null;
+		this.ucontrolProvider = options.ucontrolProvider ?? null;
+		this.ulocateProvider = options.ulocateProvider ?? null;
 	}
 
 	/* ---------------- values ---------------- */
@@ -194,7 +199,8 @@ export class Processor {
 				case '@unitCount': return unitList.length;
 				case '@itemCount': return objectList.length;
 				case '@liquidCount': return liquidList.length;
-				case '@unit': return null;
+				// `ubind` puts the unit here; until then there is no bound unit
+				case '@unit': return this.regs.has('@unit') ? this.regs.get('@unit') : null;
 				case '@thisx': return 0;
 				case '@thisy': return 0;
 				default: return raw;	// a content constant such as @copper
@@ -233,6 +239,7 @@ export class Processor {
 
 	toNumber(value) {
 		if (typeof value === 'number') return value;
+		if (typeof value === 'boolean') return value ? 1 : 0;
 		if (typeof value === 'string') {
 			const n = Number(value);
 			return Number.isNaN(n) ? 0 : n;
@@ -274,7 +281,16 @@ export class Processor {
 				const target = this.nameOfToken(args[1]);
 				const x = a(2);
 				const y = args.length > 3 ? a(3) : 0;
-				this.writeRegister(target, this.applyOp(sub, x, y));
+				const value = this.applyOp(sub, x, y);
+				/*
+				`@counter` is not an ordinary register: WRITING to it is a jump,
+				whatever instruction does the writing. `op add @counter @counter n`
+				is how a computed jump table is built, so treating it as a plain
+				store would run straight through the table instead of picking
+				one entry.
+				*/
+				if (target === '@counter') { this.pc = Math.trunc(this.toNumber(value)); return; }
+				this.writeRegister(target, value);
 				next(); return;
 			}
 			case 'jump': {
@@ -381,18 +397,41 @@ export class Processor {
 			}
 			case 'radar':
 			case 'ubind': {
-				// Nothing is modelled as being in range: the result is "no unit"
-				this.writeRegister(this.nameOfToken(args[0]), null);
+				// Nothing is modelled as being in range unless a caller says so
+				const binder = this.unitProvider;
+				const found = (typeof binder === 'function')
+					? (binder(this.nameOfToken(args[0])) ?? null) : null;
+				this.writeRegister('@unit', found);
+				this.writeRegister(this.nameOfToken(args[0]), found);
 				next(); return;
 			}
 			case 'ulocate': {
-				const target = this.nameOfToken(args[0]);
-				this.writeRegister(target, null);
-				if (args[4]) this.writeRegister(this.nameOfToken(args[4]), null);
+				/*
+				`ulocate <category> ... outx outy found building` -- the last
+				four operands are OUTPUT parameters: the processor writes the
+				result into those registers. Nothing is found by default, which
+				a caller may override with `ulocateProvider`.
+				*/
+				const provider = this.ulocateProvider;
+				const outs = args.slice(-4).map(a => this.nameOfToken(a));
+				const result = (typeof provider === 'function') ? provider(outs) : null;
+				outs.forEach((name, i) => {
+					this.writeRegister(name, result ? (result[i] ?? null) : null);
+				});
 				(this.effects ??= []).push(ins.text);
 				next(); return;
 			}
-			case 'ucontrol':
+			case 'ucontrol': {
+				const provider = this.ucontrolProvider;
+				if (typeof provider === 'function') {
+					const out = provider(this.nameOfToken(args[0]), args.slice(1).map(a => this.nameOfToken(a)));
+					if (out !== undefined) {
+						this.writeRegister(this.nameOfToken(args[4]), out ? 1 : 0);
+					}
+				}
+				(this.effects ??= []).push(ins.text);
+				next(); return;
+			}
 			case 'uradar':
 			case 'effect':
 			case 'spawn':
@@ -475,8 +514,10 @@ export class Processor {
 			case 'lessThanEq': return n(x) <= n(y) ? 1 : 0;
 			case 'greaterThan': return n(x) > n(y) ? 1 : 0;
 			case 'greaterThanEq': return n(x) >= n(y) ? 1 : 0;
-			case 'and': return (n(x) !== 0 && n(y) !== 0) ? 1 : 0;
-			case 'or': return (n(x) !== 0 || n(y) !== 0) ? 1 : 0;
+			// `op and` / `op or` are BITWISE in the machine language (they are
+			// how a packed value is taken apart), not logical.
+			case 'and': return Math.trunc(n(x)) & Math.trunc(n(y));
+			case 'or': return Math.trunc(n(x)) | Math.trunc(n(y));
 			case 'land': return (n(x) !== 0 && n(y) !== 0) ? 1 : 0;
 			case 'xor': return Math.trunc(n(x)) ^ Math.trunc(n(y));
 			case 'shl': return Math.trunc(n(x)) << Math.trunc(n(y));
@@ -554,6 +595,11 @@ export class Processor {
 				this.trap = 'step limit exceeded (probably an infinite loop)';
 				break;
 			}
+			this.counts ??= new Map();
+			this.history ??= [];
+			this.history.push(this.pc);
+			if (this.history.length > 40) this.history.shift();
+			this.counts.set(this.pc, (this.counts.get(this.pc) ?? 0) + 1);
 			try {
 				this.step();
 			} catch (e) {
@@ -565,6 +611,16 @@ export class Processor {
 	}
 
 	/** Everything printed, in order. */
+	hotspots(n = 8) {
+		const counts = this.counts ?? new Map();
+		return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, n)
+			.map(([pc, c]) => `${c}x  ${pc}: ${this.instructions[pc]?.text ?? '?'}`);
+	}
+
+	recent(n = 20) {
+		return (this.history ?? []).slice(-n)
+			.map(pc => `${pc}: ${this.instructions[pc]?.text ?? '?'}`);
+	}
 	output() {
 		return this.lines.map(l => l.text).join('');
 	}
