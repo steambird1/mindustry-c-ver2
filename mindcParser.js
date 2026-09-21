@@ -2138,12 +2138,95 @@ export class Parser {
         return expression;
     }
 
+	/**
+	 * `sizeof(<type>)` and `sizeof(<expression>)`.
+	 *
+	 * A type is told from an expression by how the argument STARTS: a type
+	 * keyword, or one of the dialect's own type names. Anything else is an
+	 * expression. The distinction is recorded in the argument itself -- a
+	 * string literal holds the type's name, anything else is a real
+	 * expression -- so that the semantic pass can tell them apart without
+	 * re-parsing.
+	 *
+	 * @param {object} token The `sizeof` token
+	 * @returns {ASTNode}
+	 */
+	parseSizeof(token) {
+		this.consumeToken();
+		const parenthesized = this.matchToken(TokenType.LEFT_PAREN);
+		if (parenthesized) this.consumeToken();
+		let argument;
+		if (this.isTypeNameStart()) {
+			const name = this.readTypeName(parenthesized);
+			argument = ASTBuilder.stringLiteral(name).setAttribute('location', token.location);
+		} else {
+			argument = this.parseExpression();
+			if (argument) argument.parent = null;
+		}
+		if (parenthesized) this.expectToken(TokenType.RIGHT_PAREN);
+		const call = ASTBuilder.functionCall(ASTBuilder.identifier('sizeof'));
+		call.arguments = [argument];
+		if (argument) argument.parent = call;
+		call.location = token.location;
+		return call;
+	}
+
+	/**
+	 * Whether the token under the cursor can begin a type name.
+	 *
+	 * @returns {boolean}
+	 */
+	isTypeNameStart() {
+		const typeKeywords = ['INT', 'CHAR', 'FLOAT', 'DOUBLE', 'VOID', 'LONG', 'SHORT',
+			'SIGNED', 'UNSIGNED', 'BOOL', 'STRUCT', 'UNION', 'ENUM'];
+		const special = ['device', 'content_t', 'null_t', 'item_t', 'liquid_t', 'unit_t', 'block_t'];
+		const token = this.getCurrentToken();
+		if (!token) return false;
+		if (typeKeywords.includes(token.type)) return true;
+		return token.type === 'IDENTIFIER' && special.includes(token.value);
+	}
+
+	/**
+	 * Collect the tokens that make up a type name.
+	 *
+	 * @param {boolean} parenthesized Stop at the closing parenthesis
+	 * @returns {string}
+	 */
+	readTypeName(parenthesized) {
+		const parts = [];
+		while (true) {
+			const token = this.getCurrentToken();
+			if (!token) break;
+			if (parenthesized && token.type === 'RIGHT_PAREN') break;
+			if (token.type === 'LEFT_PAREN' || token.type === 'SEMICOLON' || token.type === 'COMMA') break;
+			parts.push(token.value ?? String(token.type).toLowerCase());
+			this.consumeToken();
+			// `struct pt` / `union u`: the tag belongs to the name
+			if ((token.type === 'STRUCT' || token.type === 'UNION')
+				&& this.getCurrentToken()?.type === 'IDENTIFIER') {
+				parts.push(this.getCurrentToken().value);
+				this.consumeToken();
+				break;
+			}
+			if (token.type === 'IDENTIFIER') break;
+			if (token.type === 'INT' || token.type === 'CHAR' || token.type === 'FLOAT'
+				|| token.type === 'DOUBLE' || token.type === 'VOID' || token.type === 'BOOL') break;
+		}
+		return parts.join(' ').trim();
+	}
+
     parsePrimaryExpression() {
         const token = this.getCurrentToken();
 
         switch (token.type) {
 			// These cases handles builtin functions.
 			// Why aren't they identifiers?
+			// These cases handles builtin functions.
+			// Why aren't they identifiers?
+			case TokenType.SIZEOF: {
+				return this.parseSizeof(token);
+			}
+
 			case TokenType.ASM:
 			case TokenType.DRAW:
 			case TokenType.PRINT:

@@ -4,7 +4,8 @@ import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 	liquidList, unitList, buildingList,
 	InitializerListNode,
 	TypeSpecifierNode,
-	DeclaratorNode
+	DeclaratorNode,
+	ASTBuilder
  } from "./mindcBase.js";
 import { Instruction, MemoryBlockInfo } from "./mindcGeneratorBase.js";
 
@@ -292,12 +293,21 @@ export class SymbolEntry {
 			// Let it crash otherwise.
 			resultType = this.myType().duplicate();
 			// if (resultType.isTypeInfo) {
-			if (this.isAuto || this.isAutoDevice) resultType.qualifiers.push('auto');
-			if (this.isRegister) resultType.qualifiers.push('register');
-			if (this.isConst || resultType.isConst()) resultType.qualifiers.push('const');
-			if (this.isVolatile || resultType.isVolatile()) resultType.qualifiers.push('volatile');
-			if (this.isExtern) resultType.qualifiers.push('extern');
-			if (this.isStatic) resultType.qualifiers.push('static');
+			/*
+			Every conversion of the type used to push these again, so a type
+			touched more than once ended up with `const const const`. Add each
+			qualifier at most once.
+			*/
+			const withQualifier = name => {
+				if (!resultType.qualifiers.includes(name)) resultType.qualifiers.push(name);
+			};
+			if (this.isAuto || this.isAutoDevice) withQualifier('auto');
+			if (this.isRegister) withQualifier('register');
+			if (this.isConst || resultType.isConst()) withQualifier('const');
+			if (this.isVolatile || resultType.isVolatile()) withQualifier('volatile');
+			if (this.isExtern) withQualifier('extern');
+			if (this.isStatic) withQualifier('static');
+			resultType.qualifiers = [...new Set(resultType.qualifiers)];
 			// }	// I guess it should crash otherwise. If there's no judgment, it will
 		} else {
 			resultType = new TypeInfo(this.name, 'function', 1);
@@ -625,14 +635,58 @@ export class TypeInfo {
 	}	
     
     toString() {
-        let result = this.qualifiers.length > 0 ? this.qualifiers.join(' ') + ' ' : '';
-        result += this.name;
-        if ((this.kind === 'pointer' || this.kind === 'array') && this.pointerTo) {
-            result += this.pointerTo.toString() + '*';
-        }
-		if (this.type === 'array') {
-			result += `[${this.arraySize ?? ''}]`;
-		}
+		/*
+		Qualifiers accumulate while a type is copied around, so print each one
+		once. The pointee is printed WITHOUT re-listing the outer qualifiers and
+		the `*` goes where C puts it, otherwise `const int *` came out as
+		`const const const int*`.
+		*/
+		/*
+		A qualifier describes the level it sits on, and for a POINTER the levels
+		are genuinely different types: `const int *` is a pointer to a constant
+		int, `int *const` is a constant pointer to a plain int. So every level
+		prints its OWN qualifiers and `const int *const` keeps both -- the
+		pointer's own ones go after the `*`, the way C writes them.
+
+		Duplicates are still dropped, but only WITHIN one level: they come from
+		the same type being copied around and say nothing.
+		*/
+		const qualifiersOf = t => [...new Set(t?.qualifiers ?? [])];
+		const render = t => {
+			if (!t) return '';
+			const own = qualifiersOf(t);
+			if ((t.kind === 'pointer' || t.kind === 'array') && t.pointerTo) {
+				const inner = render(t.pointerTo);
+				if (t.kind === 'pointer') {
+					return inner + '*' + (own.length > 0 ? ' ' + own.join(' ') : '');
+				}
+				/*
+				An array has no separate surface syntax -- C writes
+				`const int[5]`, never `int[5] const` -- so the element level
+				carries the qualifier and the array level only adds what the
+				element does not already show.
+				*/
+				const extra = own.filter(q => !qualifiersOf(t.pointerTo).includes(q));
+				/*
+				`arraySize` is not necessarily a number: it is often the
+				literal NODE from the declarator. Interpolating it straight
+				into a template calls its `toString()`, which reaches for a
+				source location and throws.
+				*/
+				const sizeOf = x => {
+					if (x === undefined || x === null) return '';
+					if (typeof x === 'string' || typeof x === 'number') return String(x);
+					if (Array.isArray(x)) return x.map(sizeOf).join('');
+					return String(x.value ?? '');
+				};
+				return (extra.length > 0 ? extra.join(' ') + ' ' : '') + inner
+					+ `[${sizeOf(t.arraySize)}]`;
+			}
+			// `name` may be a node rather than a string in odd cases
+			const name = (typeof t.name === 'string') ? t.name : (t.name?.value ?? '');
+			return (own.length > 0 ? own.join(' ') + ' ' : '') + name;
+		};
+		let result = render(this);
 		if (this.kind === 'function') {
 			if (this.functionTo) {
 				result += '{' + this.functionTo.type.returnType.toString() + ' || ';
@@ -1612,11 +1666,34 @@ export class SemanticAnalyzer extends ASTVisitor {
 			}
             
             // 处理数组
+			/*
+			`int a[] = {3, 4, 5}`: the size is left out and taken from the
+			initializer instead. C only allows the OUTERMOST one to be left out,
+			but there is no harm in accepting an inner one too when the nesting
+			makes it obvious.
+			*/
+			this.deduceArrayDimensions(declarator);
             if (declarator.arrayDimensions && declarator.arrayDimensions.length > 0) {
                 let arrayType = finalType;
                 for (const dim of declarator.arrayDimensions.reverse()) {
+					/*
+					A dimension has to be known while compiling. A const of a
+					literal counts; anything else would be a variable length
+					array, which this compiler does not support (the stack
+					frame size is fixed at compile time), so say so instead of
+					silently pretending the size is 1.
+					*/
 					if (dim.type !== 'NumericLiteral') {
-						this.addWarning('Array size must be literal, or memory space is unallocated');
+						const folded = this.constantDimensionOf(dim);
+						if (folded !== null) {
+							dim.value = folded;
+							dim.type = 'NumericLiteral';
+						} else {
+							this.addError(
+								`Variable length arrays are not supported: the size of ` +
+								`'${declarator.name}' must be a compile time constant`,
+								declarator.location);
+						}
 					}
                     const arrType = new TypeInfo('', 'array', arrayType.size * ((typeof dim.value === 'number') ? dim.value : 1));
                     arrType.arraySize = dim;
@@ -1746,6 +1823,97 @@ export class SemanticAnalyzer extends ASTVisitor {
     }
 
 	/**
+	 * The initializer list behind a declarator's initializer.
+	 *
+	 * `array("embedded", {...})` is still in place at this point (it is
+	 * consumed later), so it has to be looked through -- otherwise
+	 * `int a[] = array("embedded", {1, 2, 3, 4})` would look like it has no
+	 * initializer at all and its size could not be deduced.
+	 *
+	 * @param {ASTNode?} initializer
+	 * @returns {ASTNode?} an InitializerList, or null
+	 */
+	initializerListOf(initializer) {
+		if (!initializer) return null;
+		if (initializer.type === 'InitializerList') return initializer;
+		if (initializer.type === 'FunctionCall' && initializer.callee?.name === 'array') {
+			const second = (initializer.arguments ?? [])[1];
+			if (second && second.type === 'InitializerList') return second;
+		}
+		return null;
+	}
+
+	/**
+	 * Fill in the array dimensions that were left out (`int a[] = {...}`).
+	 *
+	 * Counting is done level by level: the number of items at one level is the
+	 * size of that dimension. A dimension that WAS written is not counted but
+	 * still descends one level.
+	 *
+	 * @param {ASTNode} declarator
+	 * @returns {void}
+	 */
+	deduceArrayDimensions(declarator) {
+		const dims = declarator.arrayDimensions;
+		if (!Array.isArray(dims) || dims.length === 0) return;
+		if (!dims.some(d => !d)) return;	// Nothing left out
+		const list = this.initializerListOf(declarator.initializer);
+		if (!list) {
+			// Same reason as below: do not leave `null` behind
+			this.addError(
+				`The size of array '${declarator.name}' is neither given nor deducible: ` +
+				`write a size, or an initializer list to count`,
+				declarator.location);
+			for (let i = 0; i < dims.length; i++) {
+				if (!dims[i]) dims[i] = ASTBuilder.numericLiteral(1);
+			}
+			return;
+		}
+		let level = list;
+		for (let i = 0; i < dims.length; i++) {
+			if (dims[i]) {
+				level = this.descendInitializer(level);
+				continue;
+			}
+			const count = this.initializerCountOf(level);
+			/*
+			Even on failure put something in: leaving `null` here makes the
+			loop that builds the type read `.type` of null and throw, which
+			hides the real message.
+			*/
+			dims[i] = ASTBuilder.numericLiteral(count > 0 ? count : 1);
+			if (count <= 0) {
+				this.addError(
+					`Cannot deduce dimension ${i + 1} of array '${declarator.name}'`,
+					declarator.location);
+				return;
+			}
+			level = this.descendInitializer(level);
+		}
+	}
+
+	/**
+	 * @param {ASTNode?} list
+	 * @returns {ASTNode?} the first sub-list, if there is one
+	 */
+	descendInitializer(list) {
+		const items = list?.values ?? list?.children ?? null;
+		const first = Array.isArray(items) ? items[0] : null;
+		return (first && first.type === 'InitializerList') ? first : null;
+	}
+
+	/**
+	 * How many items an initializer list holds.
+	 *
+	 * @param {ASTNode?} list
+	 * @returns {number}
+	 */
+	initializerCountOf(list) {
+		const items = list?.values ?? list?.children ?? null;
+		return Array.isArray(items) ? items.length : 0;
+	}
+
+	/**
 	 * Recognize `T a[N] = array("<implementation>"[, <initializer list>])`.
 	 *
 	 * The directive is removed from the tree; what is left behind is the
@@ -1806,6 +1974,15 @@ export class SemanticAnalyzer extends ASTVisitor {
 		if (item.type === 'NumericLiteral') {
 			const value = Number(item.value);
 			return Number.isFinite(value) ? value : null;
+		}
+		/*
+		`{(int)(@thorium), ...}`: the element is a content constant written with
+		an explicit cast, because the array itself is `const int`. The cast does
+		not change which content it is, so look through it -- otherwise such an
+		array silently becomes all zeros.
+		*/
+		if (item.type === 'CastExpression') {
+			return this.numberOfInitializerItem(item.expression);
 		}
 		if (item.type === 'Identifier' && typeof item.name === 'string' && item.name[0] === '@') {
 			const table = this.contentTable;
@@ -2030,6 +2207,19 @@ export class SemanticAnalyzer extends ASTVisitor {
         const rightType = this.getExpressionType(node.right);
 
         if (!leftType || !rightType) {
+            return;
+        }
+
+        /*
+        `char` is a STRING in this dialect, so `+` concatenates. Whether it can
+        actually be done is decided later: only two literals can be joined at
+        compile time, and there is no instruction that joins two strings at
+        run time. The check is here so that the rejection comes from the code
+        generator with a source location, not from here as a type error.
+        */
+        const isCharString = t => !!t && (t.name === 'char');
+        if (node.operator === '+' && isCharString(leftType) && isCharString(rightType)) {
+            node.dataType = this.getTypeInfo('char');
             return;
         }
 
@@ -2525,7 +2715,187 @@ export class SemanticAnalyzer extends ASTVisitor {
 		
     }
 
+	/**
+	 * A dimension written as a name (`const int N = 4; int a[N];`).
+	 *
+	 * @param {ASTNode?} dim
+	 * @returns {number?} null when it is not a compile time constant
+	 */
+	constantDimensionOf(dim) {
+		if (!dim) return null;
+		if (dim.type === 'NumericLiteral') return Number(dim.value);
+		if (dim.type === 'Identifier') {
+			const symbol = this.currentScope?.lookup(dim.name);
+			const init = symbol?.initializer ?? symbol?.declarator?.initializer ?? null;
+			if (symbol?.isConst && init && init.type === 'NumericLiteral') {
+				return Number(init.value);
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * `lenof(a)` -- the number of ELEMENTS, i.e. the outermost dimension.
+	 *
+	 * Only an array symbol has one; a parameter is only a pointer by the time
+	 * it is called, so asking for its length is an error rather than a guess.
+	 *
+	 * @param {ASTNode} node
+	 * @returns {number?}
+	 */
+	lenofOf(node, location) {
+		if (!node) {
+			this.addError(`lenof() needs an array`, location);
+			return null;
+		}
+		/*
+		`lenof(a[1])` is a question about the type of `a[1]`, which is
+		`int[6]` when `a` is `int[5][6]` -- so the answer is the OUTERMOST
+		dimension of that type, 6. Only the outermost one can be given: the
+		rest are not part of the type of the expression.
+		*/
+		const dimensionOfType = (type, what) => {
+			if (!type || type.kind !== 'array') {
+				this.addError(`lenof() needs an array, but ${what} is not one`, location);
+				return null;
+			}
+			const first = (this.dimensionListOf(type) ?? [])[0];
+			if (first === undefined || first === null) {
+				this.addError(`The length of ${what} is not known here`, location);
+				return null;
+			}
+			return first;
+		};
+		if (node.type === 'Identifier') {
+			const symbol = this.currentScope?.lookup(node.name) ?? null;
+			if (!symbol) {
+				this.addError(`Undeclared identifier '${node.name}'`, location);
+				return null;
+			}
+			return dimensionOfType(symbol.myType?.() ?? null, `'${node.name}'`);
+		}
+		// Anything else: what the expression itself stands for
+		this.visit(node);
+		const type = this.getExpressionType(node) ?? node.dataType ?? null;
+		const written = (node.type === 'MemberExpression')
+			? `this element` : `this expression`;
+		return dimensionOfType(type, written);
+	}
+
+	/**
+	 * The dimensions of an array type as numbers, outermost first.
+	 *
+	 * @param {TypeInfo} type
+	 * @returns {number[]?}
+	 */
+	dimensionListOf(type) {
+		const raw = type?.arraySize ?? null;
+		if (raw === null || raw === undefined) return null;
+		const items = Array.isArray(raw) ? raw : [raw];
+		return items.map(item => (item && typeof item.value === 'number')
+			? item.value
+			: (typeof item === 'number' ? item : null));
+	}
+
+	/**
+	 * How many memory cells one value of this type occupies.
+	 *
+	 * @param {TypeInfo} type
+	 * @returns {number?} null when the type has no memory representation
+	 */
+	sizeOfTypeInfo(type) {
+		if (!type) return null;
+		// Types that never reach memory have no meaningful size
+		if (['char', 'content_t', 'device', 'null_t'].includes(type.name)) return null;
+		// An inner array is a value of its own size, so this recurses
+		const elementSize = t => {
+			if (!t) return 1;
+			if (t.kind === 'pointer') return 2;	// block + position
+			if (t.kind === 'array') {
+				const dims = (this.dimensionListOf(t) ?? []).filter(d => d !== null);
+				return dims.reduce((a, b) => a * b, 1) * elementSize(t.pointerTo);
+			}
+			if (t.kind === 'struct' || t.kind === 'union') return t.size ?? 1;
+			return 1;
+		};
+		return elementSize(type);
+	}
+
+	/**
+	 * Fold `sizeof(...)` / `lenof(...)`, which are compile time questions.
+	 *
+	 * The call node is turned into the number it stands for, so that
+	 * everything downstream -- constant folding, array sizes, code generation
+	 * -- only ever sees a literal.
+	 *
+	 * @param {ASTNode} node A FunctionCall
+	 * @returns {boolean} whether it was one of them
+	 */
+	foldCompileTimeFunction(node) {
+		const name = node.callee?.name;
+		if (name !== 'sizeof' && name !== 'lenof') return false;
+		const location = node.location;
+		const args = node.arguments ?? [];
+		let value = null;
+		if (name === 'sizeof') {
+			if (args.length !== 1) {
+				this.addError(`sizeof() takes exactly one operand`, location);
+				return true;
+			}
+			const arg = args[0];
+			if (arg.type === 'StringLiteral') {
+				// `sizeof(<type>)`: the parser left the type's NAME here
+				const resolveType = raw => {
+					const direct = this.getTypeInfo(raw);
+					if (direct) return direct;
+					// `sizeof(struct pt)` -- the tag alone is the name here
+					const stripped = raw.replace(/^(struct|union)\s+/, '').trim();
+					return (stripped !== raw) ? this.getTypeInfo(stripped) : null;
+				};
+				const info = resolveType(String(arg.value));
+				if (!info) {
+					this.addError(`Unknown type '${arg.value}' in sizeof()`, location);
+					return true;
+				}
+				value = this.sizeOfTypeInfo(info);
+				if (value === null) {
+					this.addError(
+						`sizeof() cannot be applied to '${arg.value}': it has no memory representation`,
+						location);
+					return true;
+				}
+			} else {
+				this.visit(arg);
+				const type = this.getExpressionType(arg);
+				value = this.sizeOfTypeInfo(type);
+				if (value === null) {
+					this.addError(
+						`sizeof() cannot be applied to this operand: it has no memory representation`,
+						location);
+					return true;
+				}
+			}
+		} else {
+			if (args.length !== 1) {
+				this.addError(`lenof() takes exactly one operand`, location);
+				return true;
+			}
+			value = this.lenofOf(args[0], location);
+			if (value === null) return true;
+		}
+		// Become the number itself
+		node.type = 'NumericLiteral';
+		node.value = value;
+		node.raw = String(value);
+		node.children = [];
+		node.arguments = undefined;
+		node.callee = undefined;
+		node.dataType = this.getTypeInfo('int');
+		return true;
+	}
+
     visitFunctionCall(node) {
+		if (this.foldCompileTimeFunction(node)) return;
         this.visit(node.callee);
 
         // 检查参数

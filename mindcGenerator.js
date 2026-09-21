@@ -44,7 +44,57 @@ export class InternalGenerationFailure {
 // or through visit-params
 
 // 代码生成器
+
+/**
+ * The `{line, column}` of a diagnostic, whatever the caller handed over.
+ *
+ * @param {any} where A location, a node that has one, a number, or null
+ * @returns {{line: number, column: number}}
+ */
+function locationOfDiagnostic(where) {
+	if (where === null || where === undefined) return { line: 0, column: 0 };
+	if (typeof where === 'number') return { line: where, column: 0 };
+	// A location was handed over directly
+	if (typeof where.line === 'number') {
+		return { line: where.line, column: (typeof where.column === 'number') ? where.column : 0 };
+	}
+	// Otherwise it is a node: take its own location, or the attribute one
+	const candidate = (typeof where.location === 'object' && where.location)
+		? where.location
+		: (typeof where.getAttribute === 'function' ? where.getAttribute('location') : null);
+	if (!candidate) return { line: 0, column: 0 };
+	return locationOfDiagnostic(candidate);
+}
+
 export class CodeGenerator extends ASTVisitor {
+	/**
+	 * Record a failure.
+	 *
+	 * The base class takes the second argument and stores it as `line` as it
+	 * is, but callers here pass a source LOCATION (and sometimes a node), so
+	 * the coordinates ended up nested inside `line` instead of sitting next to
+	 * `message` the way the semantic analyzer reports them. Normalize it, so
+	 * that every stage produces the same shape.
+	 *
+	 * @param {string} message
+	 * @param {any} [location] A location, a node carrying one, or nothing
+	 */
+	addError(message, location = null) {
+		const at = locationOfDiagnostic(location);
+		this.errors.push({ message, line: at.line, column: at.column });
+	}
+
+	/**
+	 * Record a warning; see `addError`.
+	 *
+	 * @param {string} message
+	 * @param {any} [location]
+	 */
+	addWarning(message, location = null) {
+		const at = locationOfDiagnostic(location);
+		this.warnings.push({ message, line: at.line, column: at.column });
+	}
+
 	/**
 	 * 
 	 * @param {Compiler} compiler 
@@ -102,6 +152,10 @@ export class CodeGenerator extends ASTVisitor {
 	 * @param {ASTNode} ast Root program node of the program
 	 */
     generate(ast) {
+		// Kept so that whole-program queries (how often an array is indexed)
+		// can look at the tree while bodies are being emitted.
+		this.ast = ast;
+		this._subscriptCounts = new Map();
         // 将AST转换为目标代码
         let result = new Instruction(), success = true;
 		try {
@@ -2192,6 +2246,112 @@ export class CodeGenerator extends ASTVisitor {
 	}
 
 	/**
+	 * The text a string valued expression stands for, when it is known here.
+	 *
+	 * @param {ASTNode?} node
+	 * @returns {string?} null when it is not a compile time string
+	 */
+	staticStringOf(node) {
+		if (!node) return null;
+		if (node.type === 'StringLiteral') return String(node.value ?? '');
+		return null;
+	}
+
+	/**
+	 * Joining two strings that are not both compile time constants.
+	 *
+	 * This is the entry point for a run time concatenation: the machine
+	 * language has no instruction for it today, so for now it is reported as
+	 * an error. Keeping it separate means the rest of the generator never has
+	 * to know how (or whether) strings can be joined.
+	 *
+	 * @param {ASTNode} node The `+` expression
+	 * @returns {Instruction}
+	 */
+	emitRuntimeStringConcat(node) {
+		/*
+		The position is given to addError on its own, the way the rest of the
+		compiler does it, so that the front end can place the marker instead of
+		having to read the coordinates out of the text.
+		*/
+		this.addError(
+			`Cannot concatenate these strings: only string literals can be joined, ` +
+			`because the target language has no run time concatenation`,
+			node?.location ?? null);
+		return new Instruction();
+	}
+
+	/**
+	 * Whether an operand can be evaluated unconditionally.
+	 *
+	 * Only used to decide between `op land` / `op or` and a real branch: when
+	 * both sides are this, evaluating both is harmless and shorter.
+	 *
+	 * @param {ASTNode?} node
+	 * @returns {boolean}
+	 */
+	isCheapAndPure(node) {
+		const seen = new Set();
+		const walk = n => {
+			if (!n || typeof n !== 'object' || seen.has(n)) return true;
+			seen.add(n);
+			// A call may do anything, including something that must be skipped
+			if (n.type === 'FunctionCall' || n.type === 'BuiltinCall') return false;
+			if (n.type === 'AssignmentExpression') return false;
+			if (n.type === 'UnaryExpression' && (n.operator === '++' || n.operator === '--')) return false;
+			if (n.type === 'Identifier') {
+				if (typeof n.name === 'string' && n.name[0] === '@') return false;
+				if (n.symbol && n.symbol.isVolatile) return false;
+			}
+			const keys = ['children', 'left', 'right', 'argument', 'expression', 'operand',
+				'test', 'consequent', 'alternate', 'arguments', 'callee', 'object', 'property'];
+			for (const key of keys) {
+				const child = n[key];
+				if (Array.isArray(child)) {
+					if (!child.every(walk)) return false;
+				} else if (child && typeof child === 'object') {
+					if (!walk(child)) return false;
+				}
+			}
+			return true;
+		};
+		return walk(node);
+	}
+
+	/**
+	 * `a && b` / `a || b` with the right hand side evaluated only if needed.
+	 *
+	 * The result goes into a temporary SYMBOL, not a register: the two sides
+	 * may themselves contain calls, and a register would not survive them.
+	 *
+	 * @param {BinaryExpressionNode} node
+	 * @returns {Instruction}
+	 */
+	emitShortCircuitLogical(node) {
+		const type = node.dataType ?? this.semantic.getTypeInfo('bool');
+		const temp = this.getTempSymbol(type);
+		const target = temp.getAssemblySymbol();
+		const assigns = value => this.writeSymbol(temp, this.visit(value));
+		/*
+		`&&`: when the left side is false the answer is false, so skip.
+		`||`: when the left side is true the answer is true, so skip.
+		Either way the value left in `target` is normalised to 0/1 below.
+		*/
+		const jumper = InstructionBuilder.jump('{logical_end}',
+			node.operator === '&&' ? 'equal' : 'notEqual', target, 'false');
+		const result = new Instruction([
+			assigns(node.left),
+			jumper,
+			assigns(node.right),
+			// C's `&&`/`||` yield 0 or 1, not the operand's own value
+			InstructionBuilder.op('notEqual', target, target, 'false'),
+			new InstructionReferrer(jumper, 'logical_end')
+		]);
+		result.instructionReturn = target;
+		return result;
+	}
+
+	/**
 	 * 
 	 * @param {BinaryExpressionNode} node 
 	 * @remark MUST CONSIDER: Clear up temporary staff in general expression processor
@@ -2212,6 +2372,35 @@ export class CodeGenerator extends ASTVisitor {
 			return this.visitAssignmentExpression(node);
 		}
 		const op = operatorTranslation.get(node.operator);
+
+		/*
+		`char` is a STRING here, so `+` joins texts. There is no instruction
+		that joins two strings while running, so only two literals can be
+		joined -- at compile time. Anything else goes to
+		`emitRuntimeStringConcat`, which is where a future run time version
+		belongs.
+		*/
+		const isStringType = t => !!t && t.name === 'char';
+		if (node.operator === '+' && (isStringType(node.left?.dataType) || isStringType(node.right?.dataType))) {
+			const leftText = this.staticStringOf(node.left);
+			const rightText = this.staticStringOf(node.right);
+			if (leftText !== null && rightText !== null) {
+				return new Instruction([], `"${leftText}${rightText}"`,
+					new Map([['disallowReplacement', true]]));
+			}
+			return this.emitRuntimeStringConcat(node);
+		}
+
+		/*
+		`&&` and `||` must NOT evaluate the right hand side when the left one
+		already decides the answer. Both sides are evaluated anyway when both
+		are plain and free of side effects -- then短路与否 is the same thing,
+		and one instruction is cheaper than the branch.
+		*/
+		if ((node.operator === '&&' || node.operator === '||')
+			&& !(this.isCheapAndPure(node.left) && this.isCheapAndPure(node.right))) {
+			return this.emitShortCircuitLogical(node);
+		}
 
 		// Evaluate both sides (they may well contain calls, so every operand ends up
 		// in its own temporary symbol -- see `arithmetic()`).
@@ -2815,13 +3004,63 @@ export class CodeGenerator extends ASTVisitor {
 		const style = this.arrayStyleFor(symbol);
 		const type = symbol.myType();
 		const length = this.arrayLengthOf(symbol);
-		return arrayRetOf(glob, style, {
+		const ret = arrayRetOf(glob, style, {
 			pointer, type, length,
 			baseName: symbol.getAssemblySymbol(),
 			category: symbol.lookupCategory ?? 'item',
 			names: this.lookupNamesOf(length).names,
 			values: symbol.arrayInitialValues ?? new Array(length).fill(0)
 		});
+		/*
+		For `embedded.divided` every access emits one `select` per element, so
+		`m` accesses cost `m * n` instructions: the array gets copied into every
+		call site. Above a handful of accesses it is shorter to emit the chain
+		once as a helper and call it. A CONSTANT subscript needs no chain at
+		all, so those do not count.
+		*/
+		if (style?.type === 'embedded' && style?.implement === 'divided' && length >= 4) {
+			const sites = this.countDynamicSubscripts(symbol.name);
+			const perSite = length;			// inline: a `set` plus `n - 1` selects
+			const helperCost = 5;			// set index, call, restore the stack
+			if (sites >= 2 && sites * perSite > sites * helperCost + (length - 1)) {
+				ret.useAccessHelper = true;
+			}
+		}
+		return ret;
+	}
+
+	/**
+	 * How many places take a NON constant subscript of this array.
+	 *
+	 * @param {string} name
+	 * @returns {number}
+	 */
+	countDynamicSubscripts(name) {
+		if (!this._subscriptCounts) this._subscriptCounts = new Map();
+		if (this._subscriptCounts.has(name)) return this._subscriptCounts.get(name);
+		let count = 0;
+		const seen = new Set();
+		const walk = node => {
+			if (!node || typeof node !== 'object' || seen.has(node)) return;
+			seen.add(node);
+			if (Array.isArray(node)) { node.forEach(walk); return; }
+			if (node.type === 'MemberExpression' && node.getAttribute?.('computed')
+				&& node.children?.[0]?.type === 'Identifier'
+				&& node.children[0].name === name) {
+				count++;
+			}
+			for (const key of ['children', 'statements', 'body', 'consequent', 'alternate',
+				'test', 'update', 'init', 'expression', 'argument', 'left', 'right',
+				'initializer', 'declarators', 'arguments', 'callee', 'functions',
+				'globalDeclarations']) {
+				const c = node[key];
+				if (Array.isArray(c)) c.forEach(walk);
+				else if (c && typeof c === 'object') walk(c);
+			}
+		};
+		walk(this.ast);
+		this._subscriptCounts.set(name, count);
+		return count;
 	}
 
 	/**

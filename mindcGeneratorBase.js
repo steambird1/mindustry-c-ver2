@@ -1597,7 +1597,12 @@ export class MemoryManager {
 		if (doReset) {
 			process.concat(InstructionBuilder.set(variable + '_pos', this.reservedSize));
 			process.concat(InstructionBuilder.set(variable + '_block', `${this.memoryBlocks[0].name}_id`));
-		} else if (step === 0) {
+		} else if (Number(step) === 0) {
+			/*
+			Stepping by nothing is nothing. This has to come before the `isNear`
+			branch below, which used to emit `op add X X 0` -- one pointless
+			instruction at EVERY constant subscript.
+			*/
 			if (!doSet) {
 				return new Instruction([
 					InstructionBuilder.set('__ptrblock', variable + '_block'),

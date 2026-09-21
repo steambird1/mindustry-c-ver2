@@ -1758,6 +1758,22 @@ class DividedSlotRet extends VariableRet {
 			return valueClassOf(glob, this.type).create(glob, this.instructions,
 				this.array.elementName(index), this.type, false);
 		}
+		const helper = this.array.useAccessHelper
+			? ensureArrayAccessHelper(glob, this.array, 'get') : null;
+		if (helper) {
+			const call = glob.funcReg.getFunctionCall(helper,
+				new Map([['__arridx', this.operand.name]]), null);
+			/*
+			Copy out of `__arrret` into a real temporary. Handing `__arrret`
+			itself to the caller loses the write: a shared result register is
+			not something a value can own, and the assignment then emits
+			nothing at all.
+			*/
+			const target = glob.tmp(this.type);
+			return valueClassOf(glob, this.type).create(glob,
+				[this.instructions, call, InstructionBuilder.set(target, '__arrret')],
+				target, this.type, true);
+		}
 		const target = glob.tmp(this.type);
 		const parts = [this.instructions,
 			InstructionBuilder.set(target, this.array.elementName(0))];
@@ -1785,6 +1801,14 @@ class DividedSlotRet extends VariableRet {
 				[this.instructions, value.instructions,
 					InstructionBuilder.set(this.array.elementName(index), value.name)],
 				value.name, this.type, false);
+		}
+		const helper = this.array.useAccessHelper
+			? ensureArrayAccessHelper(glob, this.array, 'set') : null;
+		if (helper) {
+			const call = glob.funcReg.getFunctionCall(helper,
+				new Map([['__arridx', this.operand.name], ['__arrval', value.name]]), null);
+			return valueClassOf(glob, this.type).create(glob,
+				[this.instructions, value.instructions, call], value.name, this.type, false);
 		}
 		const chosen = glob.tmp(null);
 		const parts = [this.instructions, value.instructions,
@@ -2152,6 +2176,57 @@ export function accessCostOf(kind, length, digits = 1) {
  * @param {string[]?} [info.lookupNames] Names for the `lookup` layout
  * @returns {{type: string, implement: string?, reason: string}}
  */
+/**
+ * Build (once) a helper function that reads or writes one element of an
+ * "embedded" array, and return the name to call it by.
+ *
+ * Why: `embedded.divided` picks an element with a `select` per element, and
+ * that chain was emitted AT EVERY ACCESS. With `n` elements and `m` accesses
+ * that is `m * n` instructions, so the array is effectively duplicated into
+ * every call site -- which is the opposite of what "embedded" means (embedded
+ * in the PROCESSOR, not in every use).
+ *
+ * With a helper each access costs a fixed handful of instructions and the
+ * chain exists once:
+ *
+ *     set __arridx <i>
+ *     op add __stackpos @counter 1
+ *     set @counter _arrget_NAME
+ *     set __stackpos __internal_stackpos
+ *
+ * @param {Globals} glob
+ * @param {ArrayRet} array
+ * @param {'get'|'set'} kind
+ * @returns {string?} the function name, or null when there is no register to
+ *          put it in
+ */
+export function ensureArrayAccessHelper(glob, array, kind) {
+	const reg = glob?.funcReg;
+	if (!reg) return null;
+	const key = `__arr${kind}_${String(array.name).replace(/[^A-Za-z0-9_]/g, '_')}`;
+	if (reg.functionCollection.has(key)) return key;
+	const length = array.length;
+	const body = new Instruction();
+	if (kind === 'get') {
+		body.concat(InstructionBuilder.set('__arrret', array.elementName(0)));
+		for (let i = 1; i < length; i++) {
+			body.concat(InstructionBuilder.selectx('__arrret', `equal __arridx ${i}`,
+				array.elementName(i), '__arrret'));
+		}
+	} else {
+		// `select` picks a VALUE, not a target, so pick the NAME and write
+		// through `@this` -- the same trick a name pointer uses.
+		body.concat(InstructionBuilder.set('__arrsel', `"${array.elementName(0)}"`));
+		for (let i = 1; i < length; i++) {
+			body.concat(InstructionBuilder.selectx('__arrsel', `equal __arridx ${i}`,
+				`"${array.elementName(i)}"`, '__arrsel'));
+		}
+		body.concat(InstructionBuilder.write('__arrval', '@this', '__arrsel'));
+	}
+	reg.addFunction(key, body, null, [], true, false, true);
+	return key;
+}
+
 export function selectArrayImplementation(info) {
 	const length = info.length ?? 0;
 	const size = info.size ?? 1;
