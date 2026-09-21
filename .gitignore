@@ -263,3 +263,6 @@ __pycache__/
 # Deployment
 deployment/
 outputs/
+
+testers/unit_tests/result.txt
+testers/tools/*.js

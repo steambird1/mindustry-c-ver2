@@ -307,6 +307,20 @@ export class Optimizer extends ASTVisitor {
     }
 
 	/**
+	 * An optimization NOTE -- what the optimizer DID: inlined a call, removed
+	 * a variable, deleted dead code, unrolled a loop, ...
+	 *
+	 * These are not remarks about the program (the way "condition is always
+	 * true" is), but a trace of the compilation, so they belong on the console
+	 * instead of in the warning list a user is supposed to read.
+	 *
+	 * @param {string} message
+	 */
+	logOptimization(message) {
+		console.log(`[Optimizer] ${message}`);
+	}
+
+	/**
 	 * 
 	 * @param {{
 	 * 	globalScope: Scope,
@@ -3677,7 +3691,7 @@ export class Optimizer extends ASTVisitor {
 		
 		// 替换循环
 		this.replaceNode(forNode, replacementNode);
-		this.addWarning(`Replaced never-executed loop with initialization only`);
+		this.logOptimization(`Replaced never-executed loop with initialization only`);
 		return true;
 	}
 
@@ -3851,7 +3865,7 @@ export class Optimizer extends ASTVisitor {
 		// 替换循环节点
 		this.replaceNode(loopNode, replacementNode);
 		
-		this.addWarning(`Optimized deterministic loop with ${iterationCount} iterations to direct assignments`);
+		this.logOptimization(`Optimized deterministic loop with ${iterationCount} iterations to direct assignments`);
 		return true;
 	}
 
@@ -3959,7 +3973,7 @@ export class Optimizer extends ASTVisitor {
 				replacementStatements.push(exprStmt);
 			}
 			*/
-			this.addWarning(`Partially unrolled loop: ${firstSideEffect} side-effect-free iterations converted to direct assignments`);
+			this.logOptimization(`Partially unrolled loop: ${firstSideEffect} side-effect-free iterations converted to direct assignments`);
 		}
 		
 		// 修改原循环，减少迭代次数
@@ -4535,6 +4549,12 @@ export class Optimizer extends ASTVisitor {
 		every member pointing at an undefined register.
 		*/
 		if (symbol.addressedByName === true) return false;
+		/*
+		A `remote` variable is an import of another processor's state: writing it
+		IS the side effect (the other processor sees it), even when this program
+		never reads it back. Deleting the write would delete the message.
+		*/
+		if (symbol.isRemote) return false;
 		return  (!symbol.isVolatile) && (!symbol.isExtern) && (!symbol.isStatic)
 			&& (!symbol.isAddressed) && (!symbol.isRemoteTarget) && varOk;
 	}
@@ -4570,8 +4590,7 @@ export class Optimizer extends ASTVisitor {
                 if (astNode && astNode.parent) {
                     this.removeNodeFromParent(astNode);
                     this.modified = true;
-					if (this.extraConfig.getAttribute('warningAll'))
-                    	this.addWarning(`Removed unused variable '${symbol.name}' in scope ${scope.getPath()}`);
+                    this.logOptimization(`Removed unused variable '${symbol.name}' in scope ${scope.getPath()}`);
                 }
             }
         });
@@ -5066,9 +5085,7 @@ export class Optimizer extends ASTVisitor {
 						// 从AST中删除函数定义
 						this.removeNodeFromParent(funcNode);
 						this.modified = true;
-						if (this.extraConfig.getAttribute('warningAll')) {
-							this.addWarning(`Removed unused function '${funcName}'`);
-						}
+						this.logOptimization(`Removed unused function '${funcName}'`);
 						
 					}
 				}
@@ -5307,7 +5324,7 @@ export class Optimizer extends ASTVisitor {
 				const stmt = node.statements[i];
 				if (!stmt || stmt.type !== 'ForStatement') continue;
 				if (containsContinue(stmt.body ?? stmt)) {
-					this.addWarning(`Left a 'for' loop alone because its body uses 'continue'`);
+					this.logOptimization(`Left a 'for' loop alone because its body uses 'continue'`);
 					continue;
 				}
 				this.replaceForWithWhile(node, i, stmt, scopeOf);
@@ -6503,7 +6520,7 @@ export class Optimizer extends ASTVisitor {
 		if (inlined && funcInfo.calls === 0) {
 			this.globalScope.removeSymbol(funcName);	// Manually added
 			this.removeNodeFromParent(funcInfo.node);
-			this.addWarning(`Removed unused function '${funcName}' after inlining`);
+			this.logOptimization(`Removed unused function '${funcName}' after inlining`);
 		}
 		return inlined;
 	}
@@ -7086,7 +7103,7 @@ export class Optimizer extends ASTVisitor {
 		}
 		
 		this.modified = true;
-		this.addWarning(`Inlined function '${funcNode.name}'`);
+		this.logOptimization(`Inlined function '${funcNode.name}'`);
 		return true;
 	}
 
@@ -7274,7 +7291,7 @@ export class Optimizer extends ASTVisitor {
 				// 检查声明符
 				if (!decl.declarators || decl.declarators.length === 0) {
 					this.modified = true;
-					this.addWarning('Removed empty global variable declaration');
+					this.logOptimization('Removed empty global variable declaration');
 					return false;
 				}
 				
@@ -7300,7 +7317,7 @@ export class Optimizer extends ASTVisitor {
 				
 				if (usefulDeclarators.length === 0) {
 					this.modified = true;
-					this.addWarning(`Removed global variable declaration with no used variables`);
+					this.logOptimization(`Removed global variable declaration with no used variables`);
 					return false;
 				}
 				
@@ -7348,8 +7365,7 @@ export class Optimizer extends ASTVisitor {
 				if (!func.body && func.name !== 'main') {
 					// 函数声明（不是定义），可以删除
 					this.modified = true;
-					if (this.extraConfig.getAttribute('warningAll'))
-						this.addWarning(`Removed unused function declaration '${func.name}'`);
+					this.logOptimization(`Removed unused function declaration '${func.name}'`);
 					return false;
 				}
 				
@@ -7717,7 +7733,7 @@ export class Optimizer extends ASTVisitor {
 			if (hasUnconditionalControlFlow) {
 				// 标记为已修改
 				modified = true;
-				this.addWarning(`Removed dead code after unconditional control flow in compound statement`);
+				this.logOptimization(`Removed dead code after unconditional control flow in compound statement`);
 				continue;
 			}
 			
@@ -7782,18 +7798,18 @@ export class Optimizer extends ASTVisitor {
 					// 删除else分支
 					ifStmt.alternate = null;
 					modified = true;
-					this.addWarning(`Removed else branch from always-true if statement`);
+					this.logOptimization(`Removed else branch from always-true if statement`);
 				}
 			} else {
 				// 条件为假，只保留else分支（如果有）
 				if (ifStmt.alternate) {
 					// 用else分支替换整个if语句
 					// 注意：这里我们只标记修改，实际替换在调用者中处理
-					this.addWarning(`If statement with always-false condition can be replaced with else branch`);
+					this.logOptimization(`If statement with always-false condition can be replaced with else branch`);
 				} else {
 					// 没有else分支，整个if语句都可以删除
 					// 注意：这里我们只标记修改，实际删除在调用者中处理
-					this.addWarning(`If statement with always-false condition and no else branch can be removed`);
+					this.logOptimization(`If statement with always-false condition and no else branch can be removed`);
 				}
 			}
 		}
@@ -7810,7 +7826,7 @@ export class Optimizer extends ASTVisitor {
 				// 条件总是为真
 				if (ifStmt.alternate) {
 					// 有else分支，可以删除else分支
-					this.addWarning(`Removing else branch from always-true if statement`);
+					this.logOptimization(`Removing else branch from always-true if statement`);
 					
 					// 检查else分支是否有副作用
 					const elseHasSideEffects = ifStmt.getAttribute('alternateHasSideEffects');
@@ -7829,7 +7845,7 @@ export class Optimizer extends ASTVisitor {
 				// 条件总是为假
 				if (ifStmt.consequent) {
 					// 有then分支，可以删除then分支
-					this.addWarning(`Removing then branch from always-false if statement`);
+					this.logOptimization(`Removing then branch from always-false if statement`);
 					
 					// 检查then分支是否有副作用
 					const thenHasSideEffects = ifStmt.getAttribute('consequentHasSideEffects');
@@ -7963,7 +7979,7 @@ export class Optimizer extends ASTVisitor {
 		
 		if (neverExecuted) {
 			// 循环永远不会执行
-			this.addWarning(`Removing never-executed loop`);
+			this.logOptimization(`Removing never-executed loop`);
 			
 			// 检查初始化部分是否有副作用
 			// 对于while循环，没有独立的初始化部分，但条件可能有副作用
@@ -8021,7 +8037,7 @@ export class Optimizer extends ASTVisitor {
 		
 		if (neverExecuted) {
 			// 循环永远不会执行
-			this.addWarning(`Removing never-executed for loop`);
+			this.logOptimization(`Removing never-executed for loop`);
 			
 			// 检查初始化和条件是否有副作用
 			const initHasSideEffects = forStmt.getAttribute('initHasSideEffects');
@@ -8059,7 +8075,7 @@ export class Optimizer extends ASTVisitor {
 		if (wasOptimized && iterationCount !== undefined) {
 			if (iterationCount === 1) {
 				// 只有一次迭代，可以展开
-				this.addWarning(`Unrolling single-iteration for loop`);
+				this.logOptimization(`Unrolling single-iteration for loop`);
 				
 				// 创建复合语句代替循环
 				const compoundStmt = ASTBuilder.compoundStatement();
@@ -8236,7 +8252,7 @@ export class Optimizer extends ASTVisitor {
 					
 					if (node.statements.length !== originalLength) {
 						modified = true;
-						this.addWarning(`Removed empty statements from compound statement`);
+						this.logOptimization(`Removed empty statements from compound statement`);
 					}
 					
 					// 递归清理每个语句

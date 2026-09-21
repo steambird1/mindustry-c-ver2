@@ -2549,6 +2549,109 @@ export class RemoteArrayRet extends VariableRet {
  * A pointer over there is two registers (`q_block` / `q_pos`), so it is read
  * with two `read`s and then used here like any other memory pointer.
  */
+/**
+ * `remote struct pt *p`: a pointer whose target lives in another processor.
+ *
+ * A struct cannot be reached by one name, so the pointer carries the NAME of
+ * every member plus the device register -- the remote counterpart of
+ * `NameStructPointerRet`. Reading `p->x` is then one
+ * `read out <device> p.x`, exactly like any other remote scalar.
+ */
+export class RemoteStructPointerRet extends PointerRet {
+
+	/**
+	 * @param {Globals} glob
+	 * @param {string} deviceReg Register holding the other processor
+	 * @param {string} name Base name; member `m` lives in `<name>.<m>`
+	 * @param {TypeInfo?} type
+	 * @param {any} [instructions=[]]
+	 */
+	constructor(glob, deviceReg, name, type = null, instructions = []) {
+		super(glob, instructions, name, type, false);
+		this.deviceReg = deviceReg;
+		this.structType = (type && type.pointerTo) ? type.pointerTo : null;
+		this.setAttribute('isRemoteStructPointer', true);
+		this.setAttribute('isPointer', true);
+		this.setAttribute('disallowReplacement', true);
+	}
+
+	/** The device, plus one register per member. */
+	get width() {
+		return 1 + componentCountOf(this.type);
+	}
+
+	get pointee() {
+		return this.structType;
+	}
+
+	get() {
+		return this;
+	}
+
+	/**
+	 * `p->m` / `(*p).m`: the register `<name>.m` holds the name of the member
+	 * over there, so it is a plain remote slot.
+	 * @param {string} memberName
+	 * @param {TypeInfo?} memberType
+	 * @returns {VariableRet}
+	 */
+	member(memberName, memberType = null) {
+		const glob = this.glob;
+		const type = memberType ?? memberTypeOf(glob, this.structType, memberName);
+		return new RemoteSlotRet(glob, this.deviceReg, `${this.name}.${memberName}`,
+			type, this.instructions);
+	}
+
+	/** The whole struct is the members; nothing to read up front. */
+	deref() {
+		return this;
+	}
+
+	slot() {
+		return this;
+	}
+
+	/**
+	 * Store the packet: the member names, and the device they belong to.
+	 * @param {VariableRet} other
+	 * @returns {RemoteStructPointerRet}
+	 */
+	set(other) {
+		const value = other.get();
+		const members = (this.structType?.members ?? []).map(m => m.name ?? m.memberName);
+		const instructions = [this.instructions, value.instructions];
+		const fromAddress = value.sourceBase ?? null;
+		if (fromAddress) {
+			/*
+			`&st` of a LOCAL struct: the names are constants, and the device is
+			this very processor.
+			*/
+			instructions.push(InstructionBuilder.set(this.deviceReg, '@this'));
+			instructions.push(...members.map(m =>
+				InstructionBuilder.set(`${this.name}.${m}`, `"${fromAddress}.${m}"`)));
+		} else if (value instanceof RemoteStructPointerRet || value instanceof NameStructPointerRet) {
+			/*
+			From another packet: copy the NAMES across (never the text
+			"p.x" -- `q.a` has to hold what `p.a` holds).
+			*/
+			instructions.push(InstructionBuilder.set(this.deviceReg, value.deviceReg));
+			instructions.push(...members.map(m =>
+				InstructionBuilder.set(`${this.name}.${m}`, `${value.name}.${m}`)));
+		} else {
+			const base = value.instructionReturn ?? null;
+			if (!base) throw new InvalidCastException(other, this);
+			instructions.push(...members.map(m =>
+				InstructionBuilder.set(`${this.name}.${m}`, `"${base}.${m}"`)));
+		}
+		return new RemoteStructPointerRet(this.glob, this.deviceReg, this.name, this.type, instructions);
+	}
+
+	offset(step, backward = false) {
+		throw new InfrastructureNotImplementedExpection(
+			'pointer arithmetic on a remote struct pointer');
+	}
+}
+
 export class RemoteStoredPointerRet extends PointerRet {
 
 	/**
@@ -2558,28 +2661,46 @@ export class RemoteStoredPointerRet extends PointerRet {
 	 * @param {TypeInfo?} type
 	 * @param {any} [instructions=[]]
 	 */
-	constructor(glob, deviceReg, remoteAssembly, type = null, instructions = []) {
+	constructor(glob, deviceReg, remoteAssembly, type = null, instructions = [], byName = false) {
 		super(glob, instructions, deviceReg, type, false);
 		this.deviceReg = deviceReg;
 		this.remoteAssembly = remoteAssembly;
+		/*
+		`int *byname remote q`: over there the pointer is stored as a single
+		NAME register instead of the `q_block` / `q_pos` pair.
+		*/
+		this.byName = byName === true;
 		this.setAttribute('isRemoteStoredPointer', true);
 		this.setAttribute('isPointer', true);
 		this.setAttribute('disallowReplacement', true);
 	}
 
 	get width() {
-		return 2;
+		return this.byName ? 1 : 2;
 	}
 
 	get pointee() {
 		return (this.type && this.type.pointerTo) ? this.type.pointerTo : null;
 	}
 
-	/** Read `q_block` / `q_pos` out of the other processor. */
+	/**
+	 * Read the pointer out of the other processor: the pair `q_block`/`q_pos`,
+	 * or the single name register when it is stored by name.
+	 */
 	get() {
 		const glob = this.glob;
 		const base = glob.tmp(this.type, 'rptr');
 		const bn = nameOf(base);
+		if (this.byName) {
+			/*
+			One register holding a NAME: that is exactly what a name pointer
+			carries, so the result is used through `read @this <name>`.
+			*/
+			return new NamePointerRet(glob,
+				[this.instructions,
+					InstructionBuilder.read(bn, this.deviceReg, `"${this.remoteAssembly}"`)],
+				bn, this.type, true);
+		}
 		return new RefPointerRet(glob,
 			[this.instructions,
 				InstructionBuilder.read(`${bn}_block`, this.deviceReg, `"${this.remoteAssembly}_block"`),
@@ -2590,6 +2711,22 @@ export class RemoteStoredPointerRet extends PointerRet {
 	/** Write the pointer into the other processor. */
 	set(other) {
 		const value = other.get();
+		if (this.byName) {
+			/*
+			What travels is a NAME. A `byname(&c)` pointer already holds one in
+			its own register; anything else has to be turned into the name of
+			the variable it points at.
+			*/
+			const carried = (value instanceof NamePointerRet)
+				? value.name
+				: (value.targetName ? null : null);
+			const source = carried ?? (value instanceof NamePointerRet ? value.name : value.name);
+			return new RemoteStoredPointerRet(this.glob, this.deviceReg, this.remoteAssembly,
+				this.type,
+				[this.instructions, value.instructions,
+					InstructionBuilder.write(source, this.deviceReg, `"${this.remoteAssembly}"`)],
+				true);
+		}
 		return new RemoteStoredPointerRet(this.glob, this.deviceReg, this.remoteAssembly,
 			this.type,
 			[this.instructions, value.instructions,
@@ -2597,7 +2734,20 @@ export class RemoteStoredPointerRet extends PointerRet {
 				InstructionBuilder.write(`${value.name}_pos`, this.deviceReg, `"${this.remoteAssembly}_pos"`)]);
 	}
 
+	/**
+	 * The variable this pointer reaches.
+	 *
+	 * For the by-name form the name that was read from the other processor
+	 * names a variable OVER THERE, so access goes through the same device
+	 * register -- not through `@this`.
+	 */
 	slot() {
+		if (this.byName) {
+			const bn = nameOf(this.glob.tmp(this.type, 'rptrn'));
+			return new RemoteSlotRet(this.glob, this.deviceReg, bn, this.pointee,
+				[this.instructions,
+					InstructionBuilder.read(bn, this.deviceReg, `"${this.remoteAssembly}"`)]);
+		}
 		return this.get().slot();
 	}
 
@@ -2606,7 +2756,8 @@ export class RemoteStoredPointerRet extends PointerRet {
 	}
 
 	offset(step, backward = false) {
-		return this.get().offset(step, backward);
+		throw new InfrastructureNotImplementedExpection(
+			'pointer arithmetic on a remote stored pointer');
 	}
 }
 
@@ -2801,9 +2952,14 @@ export class NameStructPointerRet extends PointerRet {
 		return new NameStructPointerRet(glob, instructions, this.name, this.type, this.temporary);
 	}
 
-	/** The whole struct, when there is only one candidate. */
+	/**
+	 * The whole struct: `*p`.
+	 *
+	 * The members are not called `p.x` -- `p.x` HOLDS the name of the member,
+	 * so the struct is the group of registers those names point at.
+	 */
 	deref() {
-		return new RegistryStructRet(this.glob, this.instructions, this.name, this.type, true);
+		return new NameStructDerefRet(this.glob, this.instructions, this.name, this.type, true);
 	}
 
 	slot() {
@@ -2823,6 +2979,76 @@ export class NameStructPointerRet extends PointerRet {
 		if (!step || Number(step) === 0) return this;
 		throw new InfrastructureNotImplementedExpection(
 			'pointer arithmetic on a name-based struct pointer');
+	}
+}
+
+/**
+ * `*p` where `p` is a name based struct pointer.
+ *
+ * The struct is not a group of registers with a fixed name -- it is the group
+ * NAMED by `p.x`, `p.y`, ... and those names are chosen at run time. So every
+ * member is reached through its own dynamic name, exactly like `p->m`.
+ *
+ * This is what makes the WHOLE dereference usable (`(*p).x`, `*p = other`);
+ * without it a whole dereference stepped the packet as if it were an address,
+ * which read through a null block.
+ */
+export class NameStructDerefRet extends StructRefRet {
+
+	constructor(glob, instructions, name, type, temporary = false) {
+		super(glob, instructions, name, type, temporary);
+		this.setAttribute('isNameStructDeref', true);
+		this.setAttribute('isRegStruct', true);
+		this.setAttribute('disallowReplacement', true);
+	}
+
+	/** `this.type` is the POINTER type; the struct is what it points at. */
+	get structType() {
+		return (this.type && this.type.pointerTo) ? this.type.pointerTo : this.type;
+	}
+
+	get width() {
+		return componentCountOf(this.structType ?? this.type);
+	}
+
+	/**
+	 * @param {string} memberName
+	 * @param {TypeInfo?} memberType
+	 * @returns {VariableRet}
+	 */
+	member(memberName, memberType = null) {
+		const glob = this.glob;
+		const type = memberType ?? memberTypeOf(glob, this.structType, memberName);
+		const holder = new NamePointerRet(glob, [], `${this.name}.${memberName}`, type, false);
+		const member = new NameSlotRet(glob, holder, type);
+		member.setAttribute('isSymbolic', true);
+		return member;
+	}
+
+	/** The members are the value; there is nothing to read up front. */
+	get() {
+		return this;
+	}
+
+	/**
+	 * `*p = other`: copy member by member, because the two sides are reached
+	 * through names that are only known at run time.
+	 * @param {VariableRet} other
+	 * @returns {NameStructDerefRet}
+	 */
+	set(other) {
+		const glob = this.glob;
+		const source = other.get();
+		const instructions = [this.instructions, source.instructions];
+		const members = (this.structType?.members ?? []);
+		for (const m of members) {
+			const name = m.name ?? m.memberName;
+			const type = m.type ?? m.memberType;
+			const dst = this.member(name, type);
+			const src = (typeof source.member === 'function') ? source.member(name, type) : source;
+			instructions.push(dst.set(src.get()));
+		}
+		return new NameStructDerefRet(glob, instructions, this.name, this.type, this.temporary);
 	}
 }
 
@@ -2989,7 +3215,8 @@ export function symbolRef(glob, symbol) {
 		*/
 		if (symbol.remoteStored === true && (symbol.remoteName ?? symbol.remoteTarget)) {
 			const ret = new RemoteStoredPointerRet(glob, devReg,
-				symbol.remoteName ?? symbol.remoteTarget.getAssemblySymbol(), type);
+				symbol.remoteName ?? symbol.remoteTarget.getAssemblySymbol(), type, [],
+				symbol.remoteStoredByName === true);
 			ret.setAttribute('relevantSymbol', symbol);
 			ret.setAttribute('relevantSymbolRead', symbol);
 			ret.setAttribute('isSymbolic', true);
@@ -3022,6 +3249,20 @@ export function symbolRef(glob, symbol) {
 			ret.setAttribute('relevantSymbol', symbol);
 			ret.setAttribute('relevantSymbolRead', symbol);
 			ret.setAttribute('isSymbolic', true);
+			return ret;
+		}
+		/*
+		`remote struct pt *p`: the target is a struct, so the pointer carries
+		the name of every member (see RemoteStructPointerRet).
+		*/
+		if (type && type.kind === 'pointer' && (type.pointerTo?.kind === 'struct'
+			|| type.pointerTo?.kind === 'union')
+			&& glob.generator?.structNamePointerAllowed?.(type.pointerTo)) {
+			const ret = new RemoteStructPointerRet(glob, devReg, assembly, type);
+			ret.setAttribute('relevantSymbol', symbol);
+			ret.setAttribute('relevantSymbolRead', symbol);
+			ret.setAttribute('isSymbolic', true);
+			ret.setAttribute('disallowReplacement', true);
 			return ret;
 		}
 		const value = (type && type.kind === 'pointer')

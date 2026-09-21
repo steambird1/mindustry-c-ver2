@@ -1837,6 +1837,11 @@ export class SemanticAnalyzer extends ASTVisitor {
 				}
 				varSymbol.isRemote = true;
 				varSymbol.remoteStored = true;
+				/*
+				`int *byname remote q`: the pointer also asks for the NAME form, so
+				it is ONE register over there instead of the block/pos pair.
+				*/
+				varSymbol.remoteStoredByName = this.hasByNameQualifier(declarator);
 			}
 			this.consumeRemoteDirective(declarator, varSymbol, finalType, qualifiers);
 
@@ -1860,8 +1865,16 @@ export class SemanticAnalyzer extends ASTVisitor {
 				if (inner && inner.type === 'Identifier') {
 					const src = this.currentScope.lookup(inner.name) ?? null;
 					const srcType = src?.myType?.() ?? null;
+					/*
+					Only when the struct really stays in registers: a nested struct,
+					one too wide for the threshold, or one compiled without the pragma
+					is degraded to memory instead, and then the pointer needs an
+					ADDRESS -- forcing a name packet here would make `p->m` step a
+					name pointer, which has no address to step.
+					*/
 					if (src?.addressedByName || (src?.isRegister && srcType
-						&& (srcType.kind === 'struct' || srcType.kind === 'union'))) {
+						&& (srcType.kind === 'struct' || srcType.kind === 'union')
+						&& this.allowsStructNamePointer(srcType))) {
 						varSymbol.usesNamePointer = true;
 						varSymbol.forcedNamePointer = true;
 						varSymbol.addressedByName = true;
@@ -2218,6 +2231,28 @@ export class SemanticAnalyzer extends ASTVisitor {
 	}
 
 	/**
+	 * The global variable whose register name is `assembly` (`"g:.u"` -> `u`).
+	 *
+	 * `remote(@this, "g:.u")` names the variable by string. When this program
+	 * declares it too, that declaration has to be found: `remote(...)` is the
+	 * only thing mentioning it, and its initializer is consumed -- so without
+	 * the link the declaration looks unused, is removed, and its elements are
+	 * never initialised (every read of a self remote array returns 0).
+	 *
+	 * @param {string} assembly The register name, as written in the string
+	 * @returns {SymbolEntry?}
+	 */
+	globalByAssembly(assembly) {
+		const wanted = String(assembly ?? '');
+		if (!wanted || !this.globalScope) return null;
+		for (const symbol of this.globalScope.symbols.values()) {
+			if (symbol.kind === 'function' || symbol.kind === 'type') continue;
+			if (symbol.getAssemblySymbol?.() === wanted) return symbol;
+		}
+		return null;
+	}
+
+	/**
 	 * `remote T x = remote(<processor>, <variable>);`
 	 *
 	 * The processor may be any device expression; the variable has to be one
@@ -2277,7 +2312,20 @@ export class SemanticAnalyzer extends ASTVisitor {
 			declarator.initializer = null;
 			return;
 		}
-		const targetSymbol = this.lookupSymbol?.(inner.name) ?? this.currentScope?.lookup?.(inner.name) ?? null;
+		let targetSymbol = this.lookupSymbol?.(inner.name) ?? this.currentScope?.lookup?.(inner.name) ?? null;
+		/*
+		A string names the variable of the OTHER processor, which need not exist
+		here at all -- but it MAY: `remote(@this, "g:.u")` reaches this very
+		program. Resolving the string to the local declaration is what keeps it
+		alive, because `remote(...)` is the only thing that mentions it and the
+		initializer is consumed here. Without this the array is never
+		initialised, so every element reads back as 0.
+		*/
+		if (!targetSymbol && targetNode.type === 'StringLiteral') {
+			// A StringLiteral carries its text in `value` / `raw`, not in `name`.
+			targetSymbol = this.globalByAssembly(
+				String(targetNode.raw ?? targetNode.value ?? '').replace(/^"|"$/g, ''));
+		}
 		/*
 		The variable of the other processor does not have to exist here at all:
 		a string literal names it directly (useful for pointers, which would
@@ -2724,14 +2772,26 @@ export class SemanticAnalyzer extends ASTVisitor {
 					*/
 					const named = (isAggregate && this.allowsStructNamePointer(registerType))
 						|| (!!registerType && registerType.kind === 'pointer');
-					if (!named) {
+					if (named) {
+						if (registerSymbol) {
+							registerSymbol.addressedByName = true;
+							registerSymbol.forcedNamePointer = true;
+						}
+					} else if (!isAggregate) {
+						/*
+						A scalar `register` variable has neither an address nor a name
+						representation, so there is nothing to point at.
+						*/
 						this.addError(`Cannot take address of register variable`, node.location);
 						return;
 					}
-					if (registerSymbol) {
-						registerSymbol.addressedByName = true;
-						registerSymbol.forcedNamePointer = true;
-					}
+					/*
+					An aggregate falls through on purpose: it is too wide for a name
+					packet, or it nests another struct, or the pragma is off.
+					`markVariableAsAddressed` below then degrades it to the in-memory
+					copy of its type -- the same path any struct takes -- instead of
+					refusing a program that is perfectly writable in C.
+					*/
 				}
 				
 				// 标记变量已被取地址

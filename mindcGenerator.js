@@ -20,7 +20,8 @@ import { Instruction, InstructionBuilder, InstructionReferrer, MemoryBlock, Memo
  } from "./mindcGeneratorBase.js";
 import { findRecursiveFunctions } from "./mindcBase.js";
 
-import { ensureMemspHelper, remoteDeviceRegOf, remoteNameRegOf, RemotePointerRet, RemoteArrayRet, RemoteStoredPointerRet, LookupArrayRet, NameStructPointerRet, arrayLengthOfType, componentCountOf, isFlatComponentType, CATEGORY_ALIASES, Globals, VariableRet, ImmediateRet, BasicRet, IntRet, BoolRet, FloatRet, ContentRet,
+import { ensureMemspHelper, remoteDeviceRegOf, remoteNameRegOf, RemotePointerRet, RemoteArrayRet, RemoteStoredPointerRet, LookupArrayRet, NameStructPointerRet, NameStructDerefRet,
+	RemoteStructPointerRet, arrayLengthOfType, componentCountOf, isFlatComponentType, CATEGORY_ALIASES, Globals, VariableRet, ImmediateRet, BasicRet, IntRet, BoolRet, FloatRet, ContentRet,
 	PointerRet, RefPointerRet, MemPointerRet, VolatilePointerRet, MemoryRefRet, StructRefRet,
 	symbolRef, ExportRet, valueClassOf, readThrough, writeThrough, pointerStep,
 	RegistryStructRet, NamePointerRet,
@@ -1759,24 +1760,34 @@ export class CodeGenerator extends ASTVisitor {
 		for (const symbol of scope.recursivelyGetAllSymbols()) {
 			if (symbol.kind !== 'variable') continue;
 			if (symbol.isRemote) continue;			// an import
-			if (symbol.isExtern) {
+			const type = symbol.myType?.() ?? null;
+			const isArray = !!type && type.kind === 'array';
+			/*
+			An `extern` array is exported ELEMENT BY ELEMENT -- the other
+			processor names its elements one by one, so those are the registers
+			that have to exist, not the array's own name (a register array has
+			no register of its own at all).
+			*/
+			if (symbol.isExtern && !isArray) {
 				push(symbol.getAssemblySymbol());
 				continue;
 			}
-			const type = symbol.myType?.() ?? null;
-			if (!type || type.kind !== 'array') continue;
-			if (symbol.arrayInitialValues && symbol.arrayInitialValues.length) continue;
+			if (!isArray) continue;
+			if (!symbol.isExtern && symbol.arrayInitialValues && symbol.arrayInitialValues.length) continue;
 			const style = this.arrayStyleFor?.(symbol) ?? null;
-			/*
-			An `extern` array is exported whatever its layout: the other
-			processor names its elements one by one, and those names have to
-			exist even when this side keeps the array in memory.
-			*/
-			const exported = symbol.isExtern === true;
-			if (!exported && (!style || style.type === 'traditional')) continue;
+			if (!symbol.isExtern && (!style || style.type === 'traditional')) continue;
 			const length = this.arrayLengthOf?.(symbol) ?? arrayLengthOfType(type);
 			const assembly = symbol.getAssemblySymbol();
-			if (style.implement === 'lookup') continue;	// named after contents
+			if (style && style.implement === 'lookup') {
+				/*
+				The elements are not named after the array at all -- they are named
+				after CONTENT constants (`copper`, `lead`, ...), which is exactly
+				what the other processor reads. Those are the names that have to be
+				declared, and the array's own name says nothing about them.
+				*/
+				for (const name of this.lookupNamesOf(length, {}, symbol).names) push(name);
+				continue;
+			}
 			for (let i = 0; i < length; i++) push(`${assembly}_${i}`);
 		}
 		return names;
@@ -1831,6 +1842,20 @@ export class CodeGenerator extends ASTVisitor {
 			result.concat(InstructionBuilder.set(deviceReg, device.instructionReturn));
 			if (remoteName) {
 				result.concat(InstructionBuilder.set(nameReg, `"${remoteName}"`));
+			}
+			/*
+			A pointer to a struct carries the NAME OF EVERY MEMBER, not one name
+			for the whole struct: `p->x` reads `<device> p.x`, and `p.x` has to
+			hold "<target>.x". There is no run time string concatenation, so the
+			full member names have to be built here, at compile time.
+			*/
+			const pointee = symbol.myType?.()?.pointerTo ?? null;
+			if (pointee && ['struct', 'union'].includes(pointee.kind)
+				&& this.structNamePointerAllowed(pointee) && remoteName) {
+				for (const m of (pointee.members ?? [])) {
+					const mname = m.name ?? m.memberName;
+					result.concat(InstructionBuilder.set(`${key}.${mname}`, `"${remoteName}.${mname}"`));
+				}
 			}
 			return result;
 		}
@@ -3034,6 +3059,13 @@ export class CodeGenerator extends ASTVisitor {
 				if (pointer instanceof RemoteStoredPointerRet) {
 					return pointer.deref();
 				}
+				if (pointer instanceof NameStructPointerRet) {
+					// The whole struct, member by member (see NameStructDerefRet)
+					return pointer.deref();
+				}
+				if (pointer instanceof RemoteStructPointerRet) {
+					return pointer.deref();
+				}
 				collector = this.getTempSymbol(node.dataType);
 				if (widthOfType(node.dataType) >= 2) {
 					/*
@@ -3459,6 +3491,20 @@ export class CodeGenerator extends ASTVisitor {
 		if (object instanceof NameStructPointerRet) {
 			return object.member(node.children[1].name, node.dataType);
 		}
+		/*
+		`p->m` on a remote struct pointer: one `read`/`write` of the member name
+		this packet carries, against the other processor.
+		*/
+		if (object instanceof RemoteStructPointerRet) {
+			return object.member(node.children[1].name, node.dataType);
+		}
+		/*
+		`(*p).m`: the whole dereference of a name based struct pointer. Its
+		members are reached through the names the packet carries.
+		*/
+		if (object.getAttribute?.('isNameStructDeref') === true) {
+			return object.member(node.children[1].name, node.dataType);
+		}
 
 		/*
 		A struct that a function returned BY VALUE is not in memory either --
@@ -3622,6 +3668,16 @@ export class CodeGenerator extends ASTVisitor {
 					if (pointer instanceof RemoteStoredPointerRet) {
 						// A pointer stored in the other processor
 						return pointer.slot();
+					}
+					if (pointer instanceof NameStructPointerRet) {
+						/*
+						`*p` on a name based struct pointer: the members are the
+						registers NAMED by p.x, p.y, ... -- not p.x itself.
+						*/
+						return pointer.deref();
+					}
+					if (pointer instanceof RemoteStructPointerRet) {
+						return pointer.deref();
 					}
 					if (!(pointer instanceof PointerRet)) {
 						this.addWarning(`Dereferencing a non-pointer value`, left.location);
@@ -3798,6 +3854,13 @@ export class CodeGenerator extends ASTVisitor {
 		member. `rename` would only retarget `X_block` / `X_pos`, which do not
 		exist here, so every member name is copied on its own.
 		*/
+		if (value instanceof RemoteStructPointerRet) {
+			const members = (slotType?.pointerTo?.members ?? []).map(m => m.name ?? m.memberName);
+			const instructions = [value.instructions,
+				InstructionBuilder.set(`${slotName}__rdev`, value.deviceReg)];
+			for (const m of members) instructions.push(InstructionBuilder.set(`${slotName}.${m}`, `${value.name}.${m}`));
+			return new RemoteStructPointerRet(glob, `${slotName}__rdev`, slotName, slotType, instructions);
+		}
 		if (value instanceof NameStructPointerRet
 			|| value.getAttribute?.('isNameStructPointer') === true) {
 			const members = (slotType?.pointerTo?.members ?? [])
