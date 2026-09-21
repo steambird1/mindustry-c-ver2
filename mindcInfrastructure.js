@@ -1344,11 +1344,20 @@ export class RegistryStructRet extends StructRefRet {
 	address() {
 		/*
 		A registry struct is a group of registers, not a piece of memory, so it
-		has no address -- and a processor cannot even build the name one would
-		need (`read @this <name>` needs a single, fixed name).
+		has no address in the usual sense. But a name-based pointer does not
+		need one: it can carry the NAME of every member, which is exactly what
+		`read @this <name>` consumes. So `&st` is allowed whenever that
+		representation is permitted for this struct.
 		*/
+		const gen = this.glob.generator;
+		if (gen?.structNamePointerAllowed?.(this.type)) {
+			const ret = new NameStructPointerRet(this.glob, this.instructions,
+				`${this.instructionReturn}__ptr`, this.type, true);
+			ret.sourceBase = this.instructionReturn;
+			return ret;
+		}
 		throw new InfrastructureNotImplementedExpection(
-			`cannot take the address of '${this.instructionReturn}': a struct held in registers has no address (declare it 'volatile' or take the address of a member instead)`);
+			`cannot take the address of '${this.instructionReturn}': a struct held in registers has no address (declare it 'volatile' or 'register', or take the address of a member instead)`);
 	}
 }
 
@@ -1558,8 +1567,14 @@ export class NamePointerRet extends PointerRet {
  */
 export function usesNamePointer(symbol, options = {}) {
 	if (!symbol) return false;
-	if (options.pointerOptimize !== true) return false;
+	// `read @this <name>` is what makes it possible at all
 	if ((options.targetVersion ?? 0) < 150) return false;
+	/*
+	`byname(&c)` asks for it explicitly, so it does not need the pragma --
+	only the version. Automatic name pointers still need both.
+	*/
+	if (symbol.forcedNamePointer === true) return true;
+	if (options.pointerOptimize !== true) return false;
 	return symbol.usesNamePointer === true;
 }
 
@@ -1876,10 +1891,17 @@ export class LookupArrayRet extends ArrayRet {
 	 * @param {string[]} names The register names, one per element
 	 * @param {TypeInfo?} type
 	 */
-	constructor(glob, category, names, type) {
+	constructor(glob, category, names, type, deviceReg = null) {
 		super(glob, [], `__lookup_${category}`, type, false, names.length);
 		this.category = category;
 		this.names = names;
+		/*
+		`deviceReg === null` means THIS processor (`read @this <name>`), which
+		is the ordinary case. A remote array passes the other processor here:
+		everything up to the name is the same on both sides, since the lookup
+		table (item / liquid / unit / building) is a property of the game itself.
+		*/
+		this.deviceReg = deviceReg;
 	}
 
 	/** How many elements this category can address. */
@@ -1897,21 +1919,38 @@ export class LookupArrayRet extends ArrayRet {
 		if (operand.constant) {
 			const at = this.names[operand.value];
 			if (at === undefined) throw new InfrastructureNotImplementedExpection('subscript out of range');
-			// The name is known: nothing to compute at all
+			/*
+			The name is known, so nothing has to be computed -- but if the
+			element belongs to ANOTHER processor the name alone is not enough:
+			it has to be read from there. Returning the bare name would read
+			this processor's own register of the same name.
+			*/
+			if (this.deviceReg) {
+				const target = glob.tmp(this.elementTypeInfo);
+				return valueClassOf(glob, this.elementTypeInfo).create(glob,
+					[InstructionBuilder.read(target, this.deviceReg, `"${at}"`)],
+					target, this.elementTypeInfo, true);
+			}
 			return valueClassOf(glob, this.elementTypeInfo).create(glob, [],
 				at, this.elementTypeInfo, false);
 		}
-		return new LookupSlotRet(glob, this, operand, this.elementTypeInfo);
+		return new LookupSlotRet(glob, this, operand, this.elementTypeInfo, this.deviceReg);
 	}
 }
 
 /** One element of a `LookupArrayRet`, addressed at run time. */
 class LookupSlotRet extends VariableRet {
 
-	constructor(glob, array, operand, type) {
+	constructor(glob, array, operand, type, deviceReg = null) {
 		super(glob, operand.instructions, array.name, type, false);
 		this.array = array;
 		this.operand = operand;
+		this.deviceReg = deviceReg ?? null;
+	}
+
+	/** Which processor holds the element: `@this`, or another one. */
+	get device() {
+		return this.deviceReg ?? '@this';
 	}
 
 	/**
@@ -1935,7 +1974,7 @@ class LookupSlotRet extends VariableRet {
 		const target = glob.tmp(this.type);
 		return valueClassOf(glob, this.type).create(glob, [
 			this.instructions, this.resolve(glob, content, nameHolder),
-			InstructionBuilder.read(target, '@this', nameHolder)
+			InstructionBuilder.read(target, this.device, nameHolder)
 		], target, this.type, true);
 	}
 
@@ -1946,7 +1985,7 @@ class LookupSlotRet extends VariableRet {
 		const value = other.get().convertTo(this.type ?? other.type);
 		return valueClassOf(glob, this.type).create(glob, [
 			this.instructions, value.instructions, this.resolve(glob, content, nameHolder),
-			InstructionBuilder.write(value.name, '@this', nameHolder)
+			InstructionBuilder.write(value.name, this.device, nameHolder)
 		], value.name, this.type, false);
 	}
 }
@@ -2271,6 +2310,522 @@ export function ensureMemspHelper(glob) {
 	return key;
 }
 
+/* ------------------------------------------------------------------ *
+ * Remote access -- variables that live in ANOTHER processor
+ * ------------------------------------------------------------------ */
+
+/**
+ * The two registers a remote binding needs: which processor, and which
+ * variable in it.
+ *
+ * @param {string} assembly The symbol's assembly name
+ * @returns {string}
+ */
+export function remoteDeviceRegOf(assembly) {
+	return `${assembly}__rdev`;
+}
+
+/**
+ * @param {string} assembly The symbol's assembly name
+ * @returns {string}
+ */
+export function remoteNameRegOf(assembly) {
+	return `${assembly}__rnm`;
+}
+
+/**
+ * One variable of another processor.
+ *
+ * Everything is done with the ordinary `read` / `write`, only the building
+ * operand is the other processor instead of `@this`:
+ *
+ *      read  tmp <devReg> <nameReg>
+ *      write val <devReg> <nameReg>
+ *
+ * So `remote int rs` and `*p` for a `remote int *p` behave the same way.
+ */
+export class RemoteSlotRet extends VariableRet {
+
+	/**
+	 * @param {Globals} glob
+	 * @param {string} deviceReg Register holding the other processor
+	 * @param {string} nameReg Register holding the variable's name
+	 * @param {TypeInfo?} type
+	 * @param {any} [instructions=[]]
+	 */
+	constructor(glob, deviceReg, nameReg, type = null, instructions = []) {
+		super(glob, instructions, deviceReg, type, false);
+		this.deviceReg = deviceReg;
+		this.nameReg = nameReg;
+		this.setAttribute('isRemoteSlot', true);
+		this.setAttribute('disallowReplacement', true);
+	}
+
+	/** The value read out of it is what the type says. */
+	get width() {
+		return widthOfType(this.type);
+	}
+
+	/** `&rs` -- the binding itself, so that it can be copied around. */
+	address() {
+		return new RemotePointerRet(this.glob, this.deviceReg, this.nameReg,
+			pointerTypeOf(this.glob, this.type), this.instructions);
+	}
+
+	get() {
+		const inner = this.type;
+		if (inner && widthOfType(inner) !== 1 && inner.kind !== 'pointer') {
+			throw new InfrastructureNotImplementedExpection(
+				'a remote variable cannot hold a value of more than one register');
+		}
+		const target = this.glob.tmp(inner);
+		const read = [this.instructions,
+			InstructionBuilder.read(nameOf(target), this.deviceReg, this.nameReg)];
+		if (inner && inner.kind === 'pointer') {
+			return new RemotePointerRet(this.glob, this.deviceReg, this.nameReg, inner, read);
+		}
+		return valueClassOf(this.glob, inner).create(this.glob, read, nameOf(target), inner, true);
+	}
+
+	/**
+	 * @param {VariableRet} other
+	 * @returns {VariableRet}
+	 */
+	set(other) {
+		const value = other.get().convertTo(this.type ?? other.type);
+		return valueClassOf(this.glob, this.type).create(this.glob,
+			[this.instructions, value.instructions,
+				InstructionBuilder.write(value.name, this.deviceReg, this.nameReg)],
+			value.name, this.type, false);
+	}
+}
+
+/**
+ * A pointer to a variable of another processor: TWO registers (device, name).
+ *
+ * This is deliberately always two registers, even when the processor is known
+ * at compile time -- one representation, so that a remote pointer can be
+ * copied, passed around and stored without a second code path.
+ */
+export class RemotePointerRet extends PointerRet {
+
+	/**
+	 * @param {Globals} glob
+	 * @param {string} deviceReg
+	 * @param {string} nameReg
+	 * @param {TypeInfo?} type
+	 * @param {any} [instructions=[]]
+	 */
+	constructor(glob, deviceReg, nameReg, type = null, instructions = []) {
+		super(glob, instructions, deviceReg, type, false);
+		this.deviceReg = deviceReg;
+		this.nameReg = nameReg;
+		this.setAttribute('isRemotePointer', true);
+		this.setAttribute('isPointer', true);
+		this.setAttribute('disallowReplacement', true);
+	}
+
+	/** Device + name. */
+	get width() {
+		return 2;
+	}
+
+	get() {
+		return this;
+	}
+
+	get pointee() {
+		return (this.type && this.type.pointerTo) ? this.type.pointerTo : null;
+	}
+
+	/** The LValue reached through this pointer. */
+	slot() {
+		return new RemoteSlotRet(this.glob, this.deviceReg, this.nameReg, this.pointee, this.instructions);
+	}
+
+	/**
+	 * Copy the binding (device, name) into another remote pointer.
+	 * @param {VariableRet} other
+	 * @returns {RemotePointerRet}
+	 */
+	set(other) {
+		const value = other.get();
+		if (value instanceof RemotePointerRet) {
+			return new RemotePointerRet(this.glob, this.deviceReg, this.nameReg, this.type,
+				[this.instructions, value.instructions,
+					InstructionBuilder.set(this.deviceReg, value.deviceReg),
+					InstructionBuilder.set(this.nameReg, value.nameReg)]);
+		}
+		if (value instanceof NamePointerRet) {
+			/*
+			`remote int *pself = ss;` -- a local name pointer becomes a remote
+			one pointing at THIS processor.
+			*/
+			return new RemotePointerRet(this.glob, this.deviceReg, this.nameReg, this.type,
+				[this.instructions, value.instructions,
+					InstructionBuilder.set(this.deviceReg, '@this'),
+					InstructionBuilder.set(this.nameReg, value.targetName
+						? `"${value.targetName}"` : value.name)]);
+		}
+		throw new InvalidCastException(other, this);
+	}
+
+	/** Not supported: the name is a string, not an address. */
+	offset(step, backward = false) {
+		throw new InfrastructureNotImplementedExpection(
+			'pointer arithmetic on a remote pointer');
+	}
+
+	deref() {
+		return this.slot().get();
+	}
+}
+
+
+/* ------------------------------------------------------------------ *
+ * Remote aggregates -- arrays and stored pointers held by a processor
+ * ------------------------------------------------------------------ */
+
+/**
+ * An array living in ANOTHER processor: every element is a register of that
+ * processor, named `<array>_<index>`, exactly as an `embedded_divided` array
+ * would be here.
+ */
+export class RemoteArrayRet extends VariableRet {
+
+	/**
+	 * @param {Globals} glob
+	 * @param {string} deviceReg Register holding the other processor
+	 * @param {string} targetAssembly Assembly name of the array over there
+	 * @param {TypeInfo} type The array type
+	 * @param {number} length
+	 * @param {any} [instructions=[]]
+	 */
+	constructor(glob, deviceReg, targetAssembly, type, length, instructions = []) {
+		super(glob, instructions, deviceReg, type, false);
+		this.deviceReg = deviceReg;
+		this.targetAssembly = targetAssembly;
+		this.length = length;
+		this.setAttribute('isRemoteArray', true);
+		this.setAttribute('disallowReplacement', true);
+	}
+
+	get width() {
+		return 1;
+	}
+
+	/**
+	 * `ru[i]` -- the element is one register over there, so all that changes
+	 * with the subscript is WHICH NAME is read. A constant subscript is just a
+	 * string; a variable one picks the name with a chain of `select`.
+	 *
+	 * @param {number | VariableRet} index
+	 * @returns {RemoteSlotRet}
+	 */
+	subscript(index) {
+		const glob = this.glob;
+		const inner = (this.type && this.type.pointerTo) ? this.type.pointerTo : null;
+		const holder = glob.tmp(null, 'rname');
+		const nm = nameOf(holder);
+		const instructions = [...this.instructions];
+		if (typeof index === 'number') {
+			instructions.push(InstructionBuilder.set(nm, `"${this.targetAssembly}_${index}"`));
+		} else {
+			const idx = index.get ? index.get() : index;
+			if (idx && idx.instructions) instructions.push(idx.instructions);
+			instructions.push(InstructionBuilder.set(nm, `"${this.targetAssembly}_0"`));
+			for (let i = 1; i < this.length; i++) {
+				instructions.push(InstructionBuilder.select(nm, 'equal',
+					idx.name ?? idx, String(i), `"${this.targetAssembly}_${i}"`, nm));
+			}
+		}
+		return new RemoteSlotRet(glob, this.deviceReg, nm, inner, instructions);
+	}
+}
+
+/**
+ * `int *remote q`: the POINTER itself lives in another processor.
+ *
+ * A pointer over there is two registers (`q_block` / `q_pos`), so it is read
+ * with two `read`s and then used here like any other memory pointer.
+ */
+export class RemoteStoredPointerRet extends PointerRet {
+
+	/**
+	 * @param {Globals} glob
+	 * @param {string} deviceReg
+	 * @param {string} remoteAssembly Assembly name of the pointer over there
+	 * @param {TypeInfo?} type
+	 * @param {any} [instructions=[]]
+	 */
+	constructor(glob, deviceReg, remoteAssembly, type = null, instructions = []) {
+		super(glob, instructions, deviceReg, type, false);
+		this.deviceReg = deviceReg;
+		this.remoteAssembly = remoteAssembly;
+		this.setAttribute('isRemoteStoredPointer', true);
+		this.setAttribute('isPointer', true);
+		this.setAttribute('disallowReplacement', true);
+	}
+
+	get width() {
+		return 2;
+	}
+
+	get pointee() {
+		return (this.type && this.type.pointerTo) ? this.type.pointerTo : null;
+	}
+
+	/** Read `q_block` / `q_pos` out of the other processor. */
+	get() {
+		const glob = this.glob;
+		const base = glob.tmp(this.type, 'rptr');
+		const bn = nameOf(base);
+		return new RefPointerRet(glob,
+			[this.instructions,
+				InstructionBuilder.read(`${bn}_block`, this.deviceReg, `"${this.remoteAssembly}_block"`),
+				InstructionBuilder.read(`${bn}_pos`, this.deviceReg, `"${this.remoteAssembly}_pos"`)],
+			bn, this.type, true);
+	}
+
+	/** Write the pointer into the other processor. */
+	set(other) {
+		const value = other.get();
+		return new RemoteStoredPointerRet(this.glob, this.deviceReg, this.remoteAssembly,
+			this.type,
+			[this.instructions, value.instructions,
+				InstructionBuilder.write(`${value.name}_block`, this.deviceReg, `"${this.remoteAssembly}_block"`),
+				InstructionBuilder.write(`${value.name}_pos`, this.deviceReg, `"${this.remoteAssembly}_pos"`)]);
+	}
+
+	slot() {
+		return this.get().slot();
+	}
+
+	deref() {
+		return this.slot().get();
+	}
+
+	offset(step, backward = false) {
+		return this.get().offset(step, backward);
+	}
+}
+
+/**
+ * How many elements an array type holds in total (all dimensions multiplied).
+ * @param {TypeInfo?} type
+ * @returns {number}
+ */
+export function arrayLengthOfType(type) {
+	if (!type || type.kind !== 'array') return 0;
+	let sizes = type.arraySize ?? [];
+	if (!Array.isArray(sizes)) sizes = [sizes];
+	let total = 1;
+	for (const dim of sizes) {
+		const value = (typeof dim === 'number') ? dim
+			: (dim && typeof dim === 'object' && typeof dim.value === 'number') ? dim.value : 1;
+		total *= value;
+	}
+	return total;
+}
+
+export const CATEGORY_ALIASES = {
+	item: 'item',
+	liquid: 'liquid',
+	unit: 'unit',
+	block: 'building',
+	building: 'building'
+};
+
+
+/**
+ * How many registers a value of this type occupies when every part of it is
+ * named separately -- the "component count".
+ *
+ * This is deliberately NOT `widthOfType`: that one answers 1 for a struct
+ * (it is one value) and 2 for a pointer, whereas here we want to know how
+ * many registers a name-based pointer has to hold.
+ *
+ * @param {any} type
+ * @param {number} depth guards against recursive types
+ * @returns {number}
+ */
+/**
+ * Whether a struct is FLAT: every member is a single register, so a name
+ * based pointer can carry one name per member. A member that is itself a
+ * struct has no single name to carry, so such structs are excluded.
+ *
+ * @param {any} type
+ * @returns {boolean}
+ */
+export function isFlatComponentType(type) {
+	if (!type || !type.isTypeInfo) return true;
+	return type.kind !== 'struct' && type.kind !== 'union';
+}
+
+export function componentCountOf(type, depth = 0) {
+	if (!type || !type.isTypeInfo) return 1;
+	if (depth > 8) return 1;
+	switch (type.kind) {
+		case 'pointer':
+		case 'array':
+			return 2;
+		case 'union': {
+			// Every member overlaps: only the widest one is needed
+			const members = type.members ?? [];
+			let widest = 1;
+			for (const m of members) {
+				widest = Math.max(widest, componentCountOf(m.type ?? m.memberType, depth + 1));
+			}
+			return widest;
+		}
+		case 'struct': {
+			/*
+			Only a struct that is really kept in registers can be named
+			member by member; one living in memory is reached by a plain
+			two-word pointer.
+			*/
+			if (type.isPointerImpl?.()) return 2;
+			const members = type.members ?? [];
+			let total = 0;
+			for (const m of members) {
+				total += componentCountOf(m.type ?? m.memberType, depth + 1);
+			}
+			return Math.max(total, 1);
+		}
+		default:
+			return 1;
+	}
+}
+
+/**
+ * A pointer to a struct that is held in REGISTERS.
+ *
+ * Instead of an address it carries, one per member, the NAME of that member:
+ * `p` occupies `p.a`, `p.b`, ... and each of those holds a string such as
+ * `"g:.st.a"`. `p->a` is then simply `read out @this p.a` -- one instruction,
+ * no memory, and no dependence on how buildings are linked.
+ */
+export class NameStructPointerRet extends PointerRet {
+
+	/**
+	 * @param {Globals} glob
+	 * @param {any} instructions
+	 * @param {string} name Register base name of the pointer itself
+	 * @param {TypeInfo} type The struct type pointed at
+	 * @param {boolean} temporary
+	 */
+	constructor(glob, instructions, name, type, temporary = false) {
+		super(glob, instructions, name, type, temporary);
+		this.setAttribute('isNameStructPointer', true);
+		this.setAttribute('disallowReplacement', true);
+		/*
+		When this value came from `&st`, `sourceBase` is the base name of `st`
+		itself: that is what the member names have to be built from.
+		*/
+		this.sourceBase = null;
+		/* `this.type` is the POINTER type; the struct it points at is the one
+		   whose members give the packet its shape. */
+		this.structType = (type && type.pointerTo) ? type.pointerTo : null;
+	}
+
+	/** One register per member. */
+	get width() {
+		return componentCountOf(this.type);
+	}
+
+	get pointee() {
+		return (this.type && this.type.pointerTo) ? this.type.pointerTo : null;
+	}
+
+	/** The value IS the set of names: nothing to read. */
+	get() {
+		return this;
+	}
+
+	/**
+	 * `p->m`: the register `p.m` holds the name of the member, so reading it
+	 * the usual dynamic-name way gives the member itself.
+	 * @param {string} memberName
+	 * @param {TypeInfo?} memberType
+	 * @returns {VariableRet}
+	 */
+	member(memberName, memberType = null) {
+		const glob = this.glob;
+		const type = memberType ?? memberTypeOf(glob, this.structType ?? this.type, memberName);
+		const holder = new NamePointerRet(glob, [], `${this.name}.${memberName}`, type, false);
+		return new NameSlotRet(glob, holder, type);
+	}
+
+	/**
+	 * `p = &st`: store every member name.
+	 * @param {VariableRet} other
+	 * @returns {NameStructPointerRet}
+	 */
+	set(other) {
+		const glob = this.glob;
+		const value = other.get();
+		const members = (this.structType?.members ?? this.type?.members ?? []).map(m => m.name ?? m.memberName);
+		const instructions = [this.instructions, value.instructions];
+		/*
+		`&st` first: it arrives as a packet too, but a freshly built one whose
+		`sourceBase` says which struct the names come from. Those names are
+		constants and can be written out directly.
+		*/
+		const fromAddress = value.sourceBase ?? null;
+		if (fromAddress) {
+			for (const m of members) {
+				instructions.push(InstructionBuilder.set(`${this.name}.${m}`, `"${fromAddress}.${m}"`));
+			}
+			return new NameStructPointerRet(glob, instructions, this.name, this.type, this.temporary);
+		}
+		if (value instanceof NameStructPointerRet) {
+			/*
+			From another packet: copy each name ACROSS. It must not be rebuilt
+			as a literal -- `q.a` has to hold what `p.a` holds, not the text
+			"p.a".
+			*/
+			for (const m of members) {
+				instructions.push(InstructionBuilder.set(`${this.name}.${m}`, `${value.name}.${m}`));
+			}
+			return new NameStructPointerRet(glob, instructions, this.name, this.type, this.temporary);
+		}
+		/*
+		Fallback: the value still names the struct whose members are to be
+		pointed at.
+		*/
+		const base = value.instructionReturn ?? null;
+		if (!base) throw new InvalidCastException(other, this);
+		for (const m of members) {
+			instructions.push(InstructionBuilder.set(`${this.name}.${m}`, `"${base}.${m}"`));
+		}
+		return new NameStructPointerRet(glob, instructions, this.name, this.type, this.temporary);
+	}
+
+	/** The whole struct, when there is only one candidate. */
+	deref() {
+		return new RegistryStructRet(this.glob, this.instructions, this.name, this.type, true);
+	}
+
+	slot() {
+		return this.deref();
+	}
+
+	address() {
+		return this;
+	}
+
+	offset(step, backward = false) {
+		/*
+		A step of 0 is what `(*p).member` costs: nothing moves, so there is
+		nothing to recompute. Any real stepping is meaningless here -- the
+		value carried is a set of names, not an address.
+		*/
+		if (!step || Number(step) === 0) return this;
+		throw new InfrastructureNotImplementedExpection(
+			'pointer arithmetic on a name-based struct pointer');
+	}
+}
+
 export function selectArrayImplementation(info) {
 	const length = info.length ?? 0;
 	const size = info.size ?? 1;
@@ -2317,6 +2872,15 @@ export function selectArrayImplementation(info) {
 export function normalizeImplementation(text) {
 	if (!text) return null;
 	const name = String(text).trim();
+	/*
+	`embedded_lookup_unit` (and _item / _liquid / _block) name the table
+	outright, instead of letting the compiler guess. That matters across two
+	processors: both sides have to agree on which table the names come from.
+	*/
+	if (name.startsWith('embedded_lookup_')) {
+		const category = CATEGORY_ALIASES[name.slice('embedded_lookup_'.length)];
+		if (category) return { type: 'embedded', implement: 'lookup', reason: 'requested', category };
+	}
 	switch (name) {
 		case 'traditional': return { type: 'traditional', implement: null, reason: 'requested' };
 		case 'embedded': return { type: 'embedded', implement: null, reason: 'requested' };
@@ -2326,6 +2890,7 @@ export function normalizeImplementation(text) {
 		default: return null;
 	}
 }
+
 
 /**
  * Build the array representation described by a style.
@@ -2360,8 +2925,8 @@ export function arrayRetOf(glob, style, options = {}) {
 	// style.type === 'embedded'
 	if (style.implement === 'lookup') {
 		const names = options.names ?? [];
-		const category = options.category ?? 'item';
-		return new LookupArrayRet(glob, category, names, type);
+		const category = style.category ?? options.category ?? 'item';
+		return new LookupArrayRet(glob, category, names, type, options.deviceReg ?? null);
 	}
 	// 'divided', or 'embedded' left unspecified
 	return new DividedArrayRet(glob, options.baseName ?? '__divided', type, length);
@@ -2411,6 +2976,63 @@ export function symbolRef(glob, symbol) {
 	const assembly = symbol.getAssemblySymbol();
 	const type = symbol.myType();
 
+	/*
+	A `remote` variable: the value lives in another processor, so the symbol
+	itself is only a binding (device + name) and reading it emits a `read`.
+	*/
+	if (symbol.isRemote) {
+		const devReg = remoteDeviceRegOf(assembly);
+		const nmReg = remoteNameRegOf(assembly);
+		/*
+		`int *remote q`: the pointer is stored over there, so what is reached
+		by name is the pair `q_block` / `q_pos`.
+		*/
+		if (symbol.remoteStored === true && (symbol.remoteName ?? symbol.remoteTarget)) {
+			const ret = new RemoteStoredPointerRet(glob, devReg,
+				symbol.remoteName ?? symbol.remoteTarget.getAssemblySymbol(), type);
+			ret.setAttribute('relevantSymbol', symbol);
+			ret.setAttribute('relevantSymbolRead', symbol);
+			ret.setAttribute('isSymbolic', true);
+			return ret;
+		}
+		/*
+		A remote ARRAY: the elements are registers of the other processor.
+		*/
+		if (type && type.kind === 'array' && (symbol.remoteName ?? symbol.remoteTarget)) {
+			/*
+			A remote array whose elements are named after a lookup table: the
+			names are the same on both sides (they come from the game), so all
+			that changes is the final `read` / `write`.
+			*/
+			const targetImpl = symbol.requestedArrayImplementation
+				?? symbol.remoteTarget?.requestedArrayImplementation ?? null;
+			if (targetImpl && targetImpl.startsWith('embedded_lookup_')) {
+				const wanted = CATEGORY_ALIASES[targetImpl.slice('embedded_lookup_'.length)] ?? 'item';
+				const names = (glob.semantic?.contentTable?.namesOf?.(
+					wanted === 'building' ? 'block' : wanted) ?? []).map(n => n.replace(/^@/, ''));
+				const ret = new LookupArrayRet(glob, wanted, names, type, devReg);
+				ret.setAttribute('relevantSymbol', symbol);
+				ret.setAttribute('relevantSymbolRead', symbol);
+				ret.setAttribute('isSymbolic', true);
+				return ret;
+			}
+			const ret = new RemoteArrayRet(glob, devReg,
+				symbol.remoteName ?? symbol.remoteTarget.getAssemblySymbol(), type,
+				arrayLengthOfType(type));
+			ret.setAttribute('relevantSymbol', symbol);
+			ret.setAttribute('relevantSymbolRead', symbol);
+			ret.setAttribute('isSymbolic', true);
+			return ret;
+		}
+		const value = (type && type.kind === 'pointer')
+			? new RemotePointerRet(glob, devReg, nmReg, type)
+			: new RemoteSlotRet(glob, devReg, nmReg, type);
+		value.setAttribute('relevantSymbol', symbol);
+		value.setAttribute('relevantSymbolRead', symbol);
+		value.setAttribute('isSymbolic', true);
+		return value;
+	}
+
 	if (symbol.isAutoDevice) {
 		return new DeviceRet(glob, [], assembly, type, false);
 	}
@@ -2431,8 +3053,27 @@ export function symbolRef(glob, symbol) {
 		return reg;
 	}
 
-	// Pointers that store the NAME of what they point at
-	if (symbol.usesNamePointer === true) {
+	/*
+	Pointers that store the NAME of what they point at. `forcedNamePointer`
+	is `byname(&c)`: the same representation, asked for explicitly.
+	*/
+	/*
+	A pointer to a struct may carry the NAME of every member: one register per
+	member instead of a block/offset pair.
+	*/
+	if (type && type.kind === 'pointer' && glob.generator?.structNamePointerAllowed?.(type.pointerTo)
+		&& (symbol.usesNamePointer === true || symbol.forcedNamePointer === true
+			|| symbol.addressedByName === true)) {
+		const ret = new NameStructPointerRet(glob, [], assembly, type, symbol.isVirtualSymbol);
+		ret.setAttribute('isSymbolic', true);
+		ret.setAttribute('relevantSymbol', symbol);
+		ret.setAttribute('relevantSymbolRead', symbol);
+		ret.setAttribute('disallowReplacement', true);
+		ret.setAttribute('isTemporary', symbol.isVirtualSymbol);
+		return ret;
+	}
+
+	if (symbol.usesNamePointer === true || symbol.forcedNamePointer === true) {
 		const ret = new NamePointerRet(glob, [], assembly, type, symbol.isVirtualSymbol, null);
 		ret.setAttribute('isSymbolic', true);
 		ret.setAttribute('relevantSymbol', symbol);

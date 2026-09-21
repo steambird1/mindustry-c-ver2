@@ -697,13 +697,45 @@ export class Parser {
         while (this.matchTokenTypeAt(this.currentTokenIndex, [
             TokenType.CONST, TokenType.VOLATILE,
             TokenType.STATIC, TokenType.EXTERN, TokenType.AUTO, TokenType.REGISTER,
-			TokenType.NEAR
+			TokenType.NEAR, TokenType.BYNAME
         ])) {
 			const qualifierToken = this.consumeToken();
             qualifiers.push(qualifierToken.value);
         }
+		/*
+		`remote` is deliberately NOT a reserved word: `remote(dev, var)` is a
+		pseudo function and has to keep lexing as an identifier. So it is
+		recognised as a qualifier only where one can appear -- in front of a
+		type, never in front of `(`.
+		*/
+		while (this.isRemoteQualifierHere()) {
+			this.consumeToken();
+			qualifiers.push('remote');
+		}
         return qualifiers;
     }
+
+	/**
+	 * Whether the current token starts a `remote <type>` declaration.
+	 *
+	 * @returns {boolean}
+	 */
+	isRemoteQualifierHere() {
+		const token = this.getCurrentToken?.() ?? null;
+		if (!token || token.type !== TokenType.IDENTIFIER || token.value !== 'remote') return false;
+		const next = this.peekToken?.(1) ?? null;
+		if (!next) return false;
+		if (next.type === TokenType.IDENTIFIER) return true;	// a typedef name
+		const typeTokens = [
+			TokenType.INT, TokenType.CHAR, TokenType.FLOAT, TokenType.DOUBLE,
+			TokenType.LONG, TokenType.SHORT, TokenType.SIGNED, TokenType.UNSIGNED,
+			TokenType.VOID, TokenType.BOOL,
+			TokenType.STRUCT, TokenType.UNION, TokenType.ENUM,
+			TokenType.CONST, TokenType.VOLATILE, TokenType.STATIC,
+			TokenType.EXTERN, TokenType.AUTO, TokenType.REGISTER, TokenType.NEAR
+		];
+		return typeTokens.includes(next.type);
+	}
 
 	// ****
 	// THIS FUNCTION HAS A MANUAL CHANGE
@@ -2255,6 +2287,16 @@ export class Parser {
                 this.consumeToken();
                 return ASTBuilder.identifier(token.value).setAttribute('location', token.location);
             }
+			/*
+			`byname` is a reserved word so that `int *byname q` needs no
+			lookahead -- but it is also the pseudo function `byname(&c)`, so in
+			expression position it is handed over as the identifier it looks
+			like. The postfix parser then turns `byname(` into a builtin call.
+			*/
+            case TokenType.BYNAME: {
+                this.consumeToken();
+                return ASTBuilder.identifier('byname').setAttribute('location', token.location);
+            }
             
             case TokenType.NUMBER: {
                 this.consumeToken();
@@ -2316,7 +2358,7 @@ export class Parser {
 			'draw', 'print', 'drawflush', 'printflush', 'getlink', 'ceil', 'floor', 'sqrt', 'rand', 'abs', 'memcpy', 'pow',
 			'control', 'radar', 'sensor', 'set', 'op', 'lookup', 'ubind', 'ulocate', 'ucontrol', 'uradar', 'min', 'max',
 			'wait', 'stop', 'end', 'jump', 'read', 'write', 'asm', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'adiff',
-			'memsp', 'printchar', 'format', 'stricteq', ...(this.extraFunctions.map(func => func.name))
+			'memsp', 'printchar', 'format', 'stricteq', 'byname', ...(this.extraFunctions.map(func => func.name))
 		];
         return builtins.includes(name);
     }

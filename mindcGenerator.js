@@ -20,7 +20,7 @@ import { Instruction, InstructionBuilder, InstructionReferrer, MemoryBlock, Memo
  } from "./mindcGeneratorBase.js";
 import { findRecursiveFunctions } from "./mindcBase.js";
 
-import { ensureMemspHelper, Globals, VariableRet, ImmediateRet, BasicRet, IntRet, BoolRet, FloatRet, ContentRet,
+import { ensureMemspHelper, remoteDeviceRegOf, remoteNameRegOf, RemotePointerRet, RemoteArrayRet, RemoteStoredPointerRet, LookupArrayRet, NameStructPointerRet, arrayLengthOfType, componentCountOf, isFlatComponentType, CATEGORY_ALIASES, Globals, VariableRet, ImmediateRet, BasicRet, IntRet, BoolRet, FloatRet, ContentRet,
 	PointerRet, RefPointerRet, MemPointerRet, VolatilePointerRet, MemoryRefRet, StructRefRet,
 	symbolRef, ExportRet, valueClassOf, readThrough, writeThrough, pointerStep,
 	RegistryStructRet, NamePointerRet,
@@ -241,6 +241,10 @@ export class CodeGenerator extends ASTVisitor {
 				});
 			});
 
+			/*
+			Declarations for the other processor, once, before main runs.
+			*/
+			result.concat(this.emitRemoteDeclarations());
 			if (mainSymbol) {
 				result.concat(this.functionManagement.getFunctionCall('main', new Map(), this.memory, true));
 			} else {
@@ -335,10 +339,46 @@ export class CodeGenerator extends ASTVisitor {
 	 * off unless `#pragma optimize(pointer)` asks for them.
 	 * @returns {boolean}
 	 */
-	namePointerAllowed() {
+	/**
+	 * Whether a pointer to this struct may carry member NAMES rather than an
+	 * address. Enabled by `#pragma optimize(struct_pointer[, n])`; `n` limits
+	 * how many registers the packet may take.
+	 *
+	 * @param {TypeInfo?} type The struct type
+	 * @returns {boolean}
+	 */
+	structNamePointerAllowed(type = null) {
+		if (!type || !type.isTypeInfo) return false;
+		const version = (this.semantic.targetVersion ?? this.compiler?.config?.getAttribute('targetVersion') ?? 0);
+		if (version < 150) return false;
+		const config = this.compiler?.extraConfig?.getAttribute('optimizeOption') ?? {};
+		if (config.doStructPointerOptimize !== true) return false;
+		/*
+		Only a FLAT struct can be carried this way: a member that is itself a
+		struct has no single register name to store.
+		*/
+		if (!(type.members ?? []).every(m => isFlatComponentType(m.type ?? m.memberType))) return false;
+		const count = componentCountOf(type);
+		/*
+		No number given: 4 registers when a memory block exists (so a big
+		struct still has somewhere to go), unbounded when none does.
+		*/
+		const given = config.structPointerThreshold;
+		const limit = (typeof given === 'number') ? given
+			: ((this.memory?.memoryBlocks?.length ?? 0) > 0 ? 4 : Infinity);
+		return count <= limit;
+	}
+
+	namePointerAllowed(symbol = null) {
+		const version = (this.semantic.targetVersion ?? this.compiler?.config?.getAttribute('targetVersion') ?? 0);
+		/*
+		`byname(&c)` is an explicit request, so it only needs the version.
+		Automatic name pointers are opt-in.
+		*/
+		if (symbol && symbol.forcedNamePointer === true) return version >= 150;
 		const config = this.compiler?.extraConfig?.getAttribute('optimizeOption') ?? {};
 		if (config.doPointerOptimize !== true) return false;
-		return (this.semantic.targetVersion ?? this.compiler?.config?.getAttribute('targetVersion') ?? 0) >= 150;
+		return version >= 150;
 	}
 
 	/**
@@ -375,7 +415,22 @@ export class CodeGenerator extends ASTVisitor {
 		where it is. (Not in a recursive function: the register is gone by the
 		time the nested call returns.)
 		*/
-		const addressedByName = symbol.namePointersOnly === true && this.namePointerAllowed();
+		let addressedByName = ((symbol.namePointersOnly === true || symbol.forcedNamePointer === true)
+			&& this.namePointerAllowed(symbol));
+		/*
+		A `register` struct reached through a name packet: the pointer holds
+		member names, so the struct itself never needs an address. If the
+		packet is not allowed here (too wide for the threshold, or no
+		`struct_pointer`), fall back to the ordinary memory representation
+		rather than leaving a struct in registers that has no address.
+		*/
+		if (symbol.addressedByName === true) {
+			if (isStructLike && !this.structNamePointerAllowed(type)) {
+				symbol.addressedByName = false;
+			} else {
+				addressedByName = true;
+			}
+		}
 		/*
 		`&x` used as a builtin OUTPUT parameter: the machine instruction takes
 		the name of the register, so x needs no memory -- at any version, with or
@@ -831,6 +886,14 @@ export class CodeGenerator extends ASTVisitor {
 
 	writeSymbol(symbol, source) {
 		const target = symbolRef(this.glob, symbol);
+		/*
+		A name-based struct pointer: what has to be stored is the SET OF NAMES,
+		which only the pointer value itself can produce. Hand it over as a
+		value, not as a bare register name.
+		*/
+		if (target instanceof NameStructPointerRet && !(source instanceof VariableRet)) {
+			return target.set(new ImmediateRet(this.glob, String(source), symbol.myType()));
+		}
 		if (target instanceof NamePointerRet && !(source instanceof VariableRet)) {
 			/*
 			The value of a name pointer is the NAME of something, i.e. a single
@@ -1666,6 +1729,132 @@ export class CodeGenerator extends ASTVisitor {
 	 * 
 	 * @param {VariableDeclarationNode} node 
 	 */
+	/**
+	 * Names that the OTHER processor may ask for, but that nothing in this
+	 * program ever writes -- so no instruction of ours would ever declare them.
+	 *
+	 * In mlog a name only becomes a variable once some instruction uses it, and
+	 * `read` / `write` on a processor refuse names that were never declared.
+	 * These are therefore declared explicitly:
+	 *
+	 *   - `extern` variables (they are this program's exports);
+	 *   - the elements of an array that was given no initial values, when the
+	 *     array lives in registers (a memory array is written by its own
+	 *     initialisation, or is genuinely uninitialised anyway).
+	 *
+	 * `remote` variables are skipped: they are imports, not exports.
+	 *
+	 * @returns {string[]}
+	 */
+	collectRemoteExportedNames() {
+		const names = [];
+		const seen = new Set();
+		const push = name => {
+			if (!name || seen.has(name)) return;
+			seen.add(name);
+			names.push(name);
+		};
+		const scope = this.semantic?.globalScope ?? null;
+		if (!scope) return names;
+		for (const symbol of scope.recursivelyGetAllSymbols()) {
+			if (symbol.kind !== 'variable') continue;
+			if (symbol.isRemote) continue;			// an import
+			if (symbol.isExtern) {
+				push(symbol.getAssemblySymbol());
+				continue;
+			}
+			const type = symbol.myType?.() ?? null;
+			if (!type || type.kind !== 'array') continue;
+			if (symbol.arrayInitialValues && symbol.arrayInitialValues.length) continue;
+			const style = this.arrayStyleFor?.(symbol) ?? null;
+			/*
+			An `extern` array is exported whatever its layout: the other
+			processor names its elements one by one, and those names have to
+			exist even when this side keeps the array in memory.
+			*/
+			const exported = symbol.isExtern === true;
+			if (!exported && (!style || style.type === 'traditional')) continue;
+			const length = this.arrayLengthOf?.(symbol) ?? arrayLengthOfType(type);
+			const assembly = symbol.getAssemblySymbol();
+			if (style.implement === 'lookup') continue;	// named after contents
+			for (let i = 0; i < length; i++) push(`${assembly}_${i}`);
+		}
+		return names;
+	}
+
+	/**
+	 * Declare the exported names with `draw triangle` (six at a time) and throw
+	 * the drawing away with `drawflush null`.
+	 *
+	 * @returns {Instruction}
+	 */
+	emitRemoteDeclarations() {
+		const result = new Instruction();
+		const names = this.collectRemoteExportedNames();
+		if (names.length === 0) return result;
+		const skip = InstructionBuilder.jump('{decl_end}', 'equal', '__remdeclared', '1');
+		result.concat(skip);
+		for (let i = 0; i < names.length; i += 6) {
+			result.concat(InstructionBuilder.drawTriangle(names.slice(i, i + 6)));
+		}
+		result.concat(InstructionBuilder.set('__remdeclared', '1'));
+		result.concat(new InstructionReferrer(skip, 'decl_end'));
+		result.concat(InstructionBuilder.drawflush('null'));
+		return result;
+	}
+
+	/**
+	 * Emit `X__rdev = <processor>` and `X__rnm = "<name>"`, the two registers
+	 * that every access to a `remote` variable goes through.
+	 *
+	 * @param {SymbolEntry} symbol
+	 * @returns {Instruction}
+	 */
+	emitRemoteBinding(symbol, node = null) {
+		const result = new Instruction();
+		const key = symbol.getAssemblySymbol();
+		const already = this._remoteBindings ?? (this._remoteBindings = new Set());
+		if (already.has(key)) return result;
+		already.add(key);
+		const deviceReg = remoteDeviceRegOf(key);
+		const nameReg = remoteNameRegOf(key);
+		const remoteName = symbol.remoteName
+			?? (symbol.remoteTarget ? symbol.remoteTarget.getAssemblySymbol() : null);
+		/*
+		`remote int *p = &rs;` and `remote int rs2 = remote(p, c);` may have no
+		device of their own: then the binding is copied from the other side
+		later, and all that is needed here is that the registers exist.
+		*/
+		if (symbol.remoteDevice) {
+			const device = this.visitAndRead(symbol.remoteDevice);
+			result.concat(device);
+			result.concat(InstructionBuilder.set(deviceReg, device.instructionReturn));
+			if (remoteName) {
+				result.concat(InstructionBuilder.set(nameReg, `"${remoteName}"`));
+			}
+			return result;
+		}
+		/*
+		No processor of its own: the binding is copied from something else.
+		  `remote int *p2 = &rs;`    -- another remote binding
+		  `remote int *pself = ss;`  -- a name pointer, which means THIS processor
+		*/
+		if (node && node.initializer) {
+			const value = this.visitAndRead(node.initializer);
+			if (value instanceof RemotePointerRet) {
+				result.concat(value.instructions);
+				result.concat(InstructionBuilder.set(deviceReg, value.deviceReg));
+				result.concat(InstructionBuilder.set(nameReg, value.nameReg));
+			} else if (value instanceof NamePointerRet) {
+				result.concat(value.instructions);
+				result.concat(InstructionBuilder.set(deviceReg, '@this'));
+				result.concat(InstructionBuilder.set(nameReg, value.targetName
+					? `"${value.targetName}"` : value.name));
+			}
+		}
+		return result;
+	}
+
 	visitVariableDeclaration(node) {
 		let instruction = new Instruction();
 		node.declarators.forEach(stmt => {
@@ -1793,6 +1982,14 @@ export class CodeGenerator extends ASTVisitor {
 		if (symbol.isAutoDevice) {
 			return new Instruction();
 		}
+		/*
+		A `remote` variable is only a binding: which processor, and which
+		variable in it. Nothing is stored locally, so no memory is needed -- the
+		two registers below are all there is.
+		*/
+		if (symbol.isRemote) {
+			return this.emitRemoteBinding(symbol, node);
+		}
 		let finalize = new Instruction();
 		/*
 		The address assignment is emitted once per symbol: some paths reach this
@@ -1882,15 +2079,32 @@ export class CodeGenerator extends ASTVisitor {
 				case the value has to be copied explicitly.
 				*/
 				const noCodeToRename = !(evaluation.instructions && evaluation.instructions.length > 0);
-				if (symbol.accessThroughPointer || noCodeToRename
+				/*
+				`&st` yields no instructions at all: the names are constants.
+				Renaming inside nothing leaves the pointer uninitialised, so the
+				value has to be written explicitly -- `p.x = "st.x"` and so on.
+				*/
+				const isNamePacket = evaluation instanceof NameStructPointerRet
+					|| evaluation.getAttribute?.('isNameStructPointer') === true;
+				if (symbol.accessThroughPointer || noCodeToRename || isNamePacket
 					|| evaluation.getAttribute('disallowReplacement')) {
 					finalize.concat(evaluation);
-					if (node.initializer.dataType && (
+					/*
+					`&st` is handed over as a set of names, not as a struct
+					value to copy member by member -- that would need memory.
+					*/
+					if (!isNamePacket && node.initializer.dataType && (
 						node.initializer.dataType.kind === 'struct' || node.initializer.dataType.kind === 'union' || evaluation.getAttribute('isStructRet')
 					)) {
 						finalize.concat(this.copyStruct(symbol.getAssemblySymbol(), evaluation.instructionReturn ?? 'null', symbol.myType(), node.initializer.dataType));
 					} else {
-						finalize.concat(this.writeSymbol(symbol, evaluation.instructionReturn ?? 'null'));
+						/*
+						Hand the pointer VALUE itself over when it carries names:
+						the bare register name would lose which struct the names
+						were built from.
+						*/
+						finalize.concat(this.writeSymbol(symbol,
+							isNamePacket ? evaluation : (evaluation.instructionReturn ?? 'null')));
 					}
 				} else {
 					finalize.concat(evaluation.replace_variable(symbol.getAssemblySymbol(), evaluation.instructionReturn));
@@ -2813,6 +3027,13 @@ export class CodeGenerator extends ASTVisitor {
 					// The pointer holds a NAME: `read @this <name>`
 					return pointer.fetch(this.getTempSymbol(node.dataType));
 				}
+				if (pointer instanceof RemotePointerRet) {
+					// The pointer holds (processor, name): `read <dev> <name>`
+					return pointer.deref();
+				}
+				if (pointer instanceof RemoteStoredPointerRet) {
+					return pointer.deref();
+				}
 				collector = this.getTempSymbol(node.dataType);
 				if (widthOfType(node.dataType) >= 2) {
 					/*
@@ -2960,7 +3181,7 @@ export class CodeGenerator extends ASTVisitor {
 	 * @param {number} length
 	 * @returns {{category: string, names: string[]}}
 	 */
-	lookupNamesOf(length) {
+	lookupNamesOf(length, options = {}, symbol = null) {
 		/*
 		`lookup <category> out i` then `sensor out2 <content> @name`: the names
 		come from the content table, in id order, so index i really is content i.
@@ -2976,6 +3197,15 @@ export class CodeGenerator extends ASTVisitor {
 			if (slice.some(name => table.idOf(category, name) === null)) return null;
 			return slice;
 		};
+		const forced = options.forced ?? symbol?.requestedArrayImplementation ?? null;
+		if (forced && forced.startsWith('embedded_lookup_')) {
+			const suffix = forced.slice('embedded_lookup_'.length);
+			const wanted = CATEGORY_ALIASES[suffix];
+			if (wanted) {
+				const names = usable(wanted === 'building' ? 'block' : wanted);
+				if (names) return { category: wanted, names: strip(names) };
+			}
+		}
 		for (const category of ['item', 'liquid', 'unit', 'block']) {
 			const names = usable(category);
 			if (names) return { category: category === 'block' ? 'building' : category, names: strip(names) };
@@ -3087,11 +3317,19 @@ export class CodeGenerator extends ASTVisitor {
 		const style = this.arrayStyleFor(symbol);
 		const type = symbol.myType();
 		const length = this.arrayLengthOf(symbol);
+		/*
+		A remote array is not stored here: its elements are registers of the
+		other processor, so the array view has to name that processor. Only the
+		last `read` / `write` changes -- the lookup table itself (item, liquid,
+		unit, building) is a property of the game, so both sides share it.
+		*/
+		const deviceReg = symbol.isRemote
+			? remoteDeviceRegOf(symbol.getAssemblySymbol()) : null;
 		const ret = arrayRetOf(glob, style, {
-			pointer, type, length,
+			pointer, type, length, deviceReg,
 			baseName: symbol.getAssemblySymbol(),
 			category: symbol.lookupCategory ?? 'item',
-			names: this.lookupNamesOf(length).names,
+			names: this.lookupNamesOf(length, {}, symbol).names,
 			values: symbol.arrayInitialValues ?? new Array(length).fill(0)
 		});
 		/*
@@ -3186,8 +3424,39 @@ export class CodeGenerator extends ASTVisitor {
 		let objectRoot = node.children[0];	// Altered if a total offset is known
 		const object = this.getLValue(objectRoot);
 
+		/*
+		A remote array: every element is a register of the other processor, so
+		the subscript only decides WHICH NAME is read over there.
+		*/
+		if (object instanceof RemoteArrayRet) {
+			const indexNode = node.children[1];
+			if (indexNode.type === 'NumericLiteral' && Number.isInteger(Number(indexNode.value))) {
+				return object.subscript(Number(indexNode.value));
+			}
+			return object.subscript(this.visitAndRead(indexNode));
+		}
+		/*
+		A remote array named after a lookup table: `lookup` + `sensor @name`
+		produce the element name (identical on both sides), so the subscript
+		picks the name and only the final `read` / `write` is remote.
+		*/
+		if (object instanceof LookupArrayRet && object.deviceReg) {
+			const indexNode = node.children[1];
+			if (indexNode.type === 'NumericLiteral' && Number.isInteger(Number(indexNode.value))) {
+				return object.element(Number(indexNode.value));
+			}
+			return object.element(this.visitAndRead(indexNode));
+		}
+
 		// Registry struct: every member is a variable of its own, named `X.member`
 		if (object instanceof RegistryStructRet) {
+			return object.member(node.children[1].name, node.dataType);
+		}
+		/*
+		A name-based struct pointer: `p.m` already holds the NAME of the member,
+		so `p->m` is one `read @this p.m` and needs no address at all.
+		*/
+		if (object instanceof NameStructPointerRet) {
 			return object.member(node.children[1].name, node.dataType);
 		}
 
@@ -3344,6 +3613,14 @@ export class CodeGenerator extends ASTVisitor {
 					const pointer = ExportRet(glob, this.visitAndRead(left.argument), left.argument.dataType);
 					if (pointer instanceof NamePointerRet) {
 						// The pointer holds a NAME, so `*p` is `read/write @this <name>`
+						return pointer.slot();
+					}
+					if (pointer instanceof RemotePointerRet) {
+						// (processor, name): `*p` is `read/write <dev> <name>`
+						return pointer.slot();
+					}
+					if (pointer instanceof RemoteStoredPointerRet) {
+						// A pointer stored in the other processor
 						return pointer.slot();
 					}
 					if (!(pointer instanceof PointerRet)) {
@@ -3516,6 +3793,21 @@ export class CodeGenerator extends ASTVisitor {
 		// its own, so that evaluating the *next* argument (which may call a function,
 		// possibly this very one) cannot clobber it.
 		const value = argument.get().materialize();
+		/*
+		A name based struct pointer: what travels is the SET OF NAMES, one per
+		member. `rename` would only retarget `X_block` / `X_pos`, which do not
+		exist here, so every member name is copied on its own.
+		*/
+		if (value instanceof NameStructPointerRet
+			|| value.getAttribute?.('isNameStructPointer') === true) {
+			const members = (slotType?.pointerTo?.members ?? [])
+				.map(m => m.name ?? m.memberName);
+			const instructions = [value.instructions];
+			for (const m of members) {
+				instructions.push(InstructionBuilder.set(`${slotName}.${m}`, `${value.name}.${m}`));
+			}
+			return new NameStructPointerRet(glob, instructions, slotName, slotType, false);
+		}
 		if (value instanceof ImmediateRet) {
 			// A constant cannot be renamed: write it out instead.
 			if (value.width >= 2) {
@@ -4052,6 +4344,17 @@ export class CodeGenerator extends ASTVisitor {
 				which is the whole point of having it.
 				*/
 				return packer('read', ast.arguments, this.semantic.getTypeInfo('null_t'), 2);
+			},
+			byname: ast => {
+				/*
+				`byname(&c)` -- the same thing as `&c` under
+				`#pragma optimize(pointer)`, but asked for here.
+				*/
+				const inner = ast.arguments?.[0];
+				if (!inner || inner.type !== 'UnaryExpression' || inner.operator !== '&') {
+					throw new InternalGenerationFailure('byname() needs the address of a variable', ast);
+				}
+				return this.processLValGetter(inner.argument, true);
 			},
 			stricteq: ast => {
 				/*

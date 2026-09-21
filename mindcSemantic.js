@@ -158,6 +158,7 @@ export class SymbolEntry {
 		this.isRegister = false; // 标记是否为register变量
 		this.isStatic = (this.myType() instanceof TypeInfo) ? this.myType().isStatic() : false;
 		this.isExtern = (this.myType() instanceof TypeInfo) ? this.myType().isExtern() : false;
+		this.isRemote = (this.myType() instanceof TypeInfo) ? this.myType().isRemote() : false;
 		// Note: this is also available for functions:
 		// (for functions, once 'true', it can't be inlined !)
         this.isAddressed = false; // 标记是否被取地址
@@ -521,6 +522,16 @@ export class TypeInfo {
     isVolatile() {
         return this.qualifiers.includes('volatile');
     }
+
+	/**
+	 * Whether the value lives in ANOTHER processor: every access becomes a
+	 * `read` / `write` on the device named by the pointer.
+	 *
+	 * @returns {boolean}
+	 */
+	isRemote() {
+		return (this.qualifiers ?? []).includes('remote');
+	}
 
 	isExtern() {
 		return this.qualifiers.includes('extern');
@@ -1152,6 +1163,8 @@ export class SemanticAnalyzer extends ASTVisitor {
 			{ name: 'rand', returnType: 'float', parameters: ['float']},
 			{ name: 'memcpy', returnType: 'void', parameters: ['void*', 'void*', 'unsigned']},
 			{ name: 'memsp', returnType: 'void*', parameters: ['device', 'int']},
+			{ name: 'byname', returnType: 'void*', parameters: [], hasVarArgs: true, special: 'byname' },
+			{ name: 'remote', returnType: 'void*', parameters: [], hasVarArgs: true, special: 'remote' },
 			...(this.extraConfig.getAttribute('extraFunctions') ?? [])
 		];
 
@@ -1419,7 +1432,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 		let result = null;
 
 		// Get qualifiers from typeNameRaw string:
-		const checkQualifiers = ['const', 'volatile', 'near', 'extern', 'auto', 'static'];
+		const checkQualifiers = ['const', 'volatile', 'near', 'extern', 'auto', 'static', 'register', 'remote'];
 		let existQualifiers = [], relevantPointers = [];
 		const splitResult = typeName.split(' ').map((value, index) => {
 			let result = 0, noPtr = '';
@@ -1586,6 +1599,14 @@ export class SemanticAnalyzer extends ASTVisitor {
 			if (gotType.isNear()) {
 				paramSymbol.isNearPointer = true;
 			}
+			/*
+			`void f(struct pt *byname q)` -- the parameter itself carries the
+			member NAMES, so it must not be treated as a block/offset pair.
+			*/
+			if (this.hasByNameQualifier(param)) {
+				paramSymbol.usesNamePointer = true;
+				paramSymbol.forcedNamePointer = true;
+			}
             this.currentScope.addSymbol(paramSymbol);
         });
 
@@ -1673,6 +1694,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 			but there is no harm in accepting an inner one too when the nesting
 			makes it obvious.
 			*/
+			this.deduceRemoteArrayDimensions(declarator);
 			this.deduceArrayDimensions(declarator);
             if (declarator.arrayDimensions && declarator.arrayDimensions.length > 0) {
                 let arrayType = finalType;
@@ -1797,6 +1819,55 @@ export class SemanticAnalyzer extends ASTVisitor {
 			here -- the rest of the compiler only ever sees the contents.
 			*/
 			this.consumeArrayDirective(declarator, varSymbol);
+			/*
+			`int *remote p` -- a pointer that ITSELF lives in another processor.
+			Reaching it would mean reading two registers out of the other
+			processor, which is not implemented; the check below is where the
+			support would go.
+			*/
+			/*
+			`int *remote p`: the pointer itself lives in the other processor.
+			Reaching it means reading the pair `p_block` / `p_pos` from there.
+			*/
+			if (this.isRemotePointerDeclarator(declarator)) {
+				if (!this.supportsRemotePointer()) {
+					this.addError(`A pointer that is itself remote ('int *remote') is not supported yet`,
+						declarator.location);
+					return;
+				}
+				varSymbol.isRemote = true;
+				varSymbol.remoteStored = true;
+			}
+			this.consumeRemoteDirective(declarator, varSymbol, finalType, qualifiers);
+
+			/*
+			`int *s = byname(&c);` -- the pointer itself has to hold a NAME,
+			and that has to be decided before anything asks for its storage.
+			*/
+			if (declarator.initializer && this.containsByName(declarator.initializer)
+				&& finalType.kind === 'pointer') {
+				varSymbol.usesNamePointer = true;
+				varSymbol.forcedNamePointer = true;
+			}
+			/*
+			`struct pt *p = &st;` where `st` is a `register` struct: the pointer
+			has to carry member names, since a register value has no address.
+			*/
+			if (finalType.kind === 'pointer' && declarator.initializer
+				&& declarator.initializer.type === 'UnaryExpression'
+				&& declarator.initializer.operator === '&') {
+				const inner = declarator.initializer.argument;
+				if (inner && inner.type === 'Identifier') {
+					const src = this.currentScope.lookup(inner.name) ?? null;
+					const srcType = src?.myType?.() ?? null;
+					if (src?.addressedByName || (src?.isRegister && srcType
+						&& (srcType.kind === 'struct' || srcType.kind === 'union'))) {
+						varSymbol.usesNamePointer = true;
+						varSymbol.forcedNamePointer = true;
+						varSymbol.addressedByName = true;
+					}
+				}
+			}
 
             // 检查初始化表达式
             if (declarator.initializer) {
@@ -1940,7 +2011,9 @@ export class SemanticAnalyzer extends ASTVisitor {
 			return;
 		}
 		const requested = String(first.raw).replace(/^"|"$/g, '');
-		const known = ['traditional', 'embedded', 'embedded_divided', 'embedded_lookup', 'encoded'];
+		const known = ['traditional', 'embedded', 'embedded_divided', 'encoded',
+			'embedded_lookup', 'embedded_lookup_item', 'embedded_lookup_liquid',
+			'embedded_lookup_unit', 'embedded_lookup_block'];
 		if (!known.includes(requested)) {
 			this.addError(`Unknown array implementation '${requested}' (expected one of ${known.join(', ')})`,
 				initializer.location);
@@ -1959,6 +2032,374 @@ export class SemanticAnalyzer extends ASTVisitor {
 			this.recordArrayInitialValues(symbol, contents, requested === 'encoded',
 				initializer.location);
 		}
+	}
+
+	/**
+	 * `remote int ru[] = remote(processor1, u);` -- the size comes from the
+	 * array on the other side, which has to be known before the type is built.
+	 *
+	 * @param {any} declarator
+	 * @returns {void}
+	 */
+	deduceRemoteArrayDimensions(declarator) {
+		const dims = declarator.arrayDimensions;
+		if (!Array.isArray(dims) || dims.length === 0) return;
+		if (dims[dims.length - 1]) return;		// already written out
+		const call = declarator.initializer;
+		if (!call) return;
+		const called = (call.type === 'BuiltinCall') ? call.functionName
+			: (call.callee ? (call.callee.name ?? call.callee.value) : null);
+		if (called !== 'remote') return;
+		const targetNode = (call.arguments ?? [])[1];
+		if (!targetNode || (targetNode.type !== 'Identifier' && targetNode.type !== 'StringLiteral')) return;
+		const target = this.lookupSymbol?.(targetNode.name)
+			?? this.currentScope?.lookup?.(targetNode.name) ?? null;
+		const type = target?.myType?.() ?? null;
+		if (!type || type.kind !== 'array') return;
+		const total = this.totalArraySizeOf(type);
+		if (!total) return;
+		const node = { type: 'NumericLiteral', value: String(total), raw: String(total) };
+		dims[dims.length - 1] = node;
+	}
+
+	/**
+	 * @param {TypeInfo} type
+	 * @returns {number}
+	 */
+	totalArraySizeOf(type) {
+		let sizes = type.arraySize ?? [];
+		if (!Array.isArray(sizes)) sizes = [sizes];
+		let total = 1;
+		for (const dim of sizes) {
+			const value = (typeof dim === 'number') ? dim
+				: (dim && typeof dim === 'object' && typeof dim.value === 'number') ? dim.value : 1;
+			total *= value;
+		}
+		return total;
+	}
+
+	/**
+	 * Whether the `remote` qualifier was written after a `*`, which makes the
+	 * POINTER remote rather than what it points at.
+	 *
+	 * @param {any} declarator
+	 * @returns {boolean}
+	 */
+	isRemotePointerDeclarator(declarator) {
+		const levels = declarator?.pointerQualifiers ?? [];
+		return levels.some(list => (list ?? []).includes('remote'));
+	}
+
+	/**
+	 * RESERVED: whether a `remote` ARRAY is supported. Reaching one means
+	 * naming `u_0`, `u_1`, ... in the other processor, and picking the name at
+	 * run time when the subscript is not constant.
+	 *
+	 * @returns {boolean}
+	 */
+	supportsRemoteArray() {
+		return true;
+	}
+
+	/**
+	 * RESERVED: whether `int *remote` (a pointer stored in another processor)
+	 * is supported. Kept as a single place to switch on when the two register
+	 * read / write it needs is implemented.
+	 *
+	 * @returns {boolean}
+	 */
+	/**
+	 * Whether a pointer may carry the NAMES of a struct's members.
+	 * Enabled by `#pragma optimize(struct_pointer[, n])` on v150 or newer.
+	 * @returns {boolean}
+	 */
+	supportsStructNamePointer() {
+		if ((this.targetVersion ?? 0) < 150) return false;
+		const cfg = this.compiler?.extraConfig?.getAttribute?.('optimizeOption') ?? null;
+		return cfg ? cfg.doStructPointerOptimize === true : false;
+	}
+
+	/**
+	 * How many registers a name based pointer to this type would need: one per
+	 * scalar member. Kept here (rather than in the infrastructure) because the
+	 * decision has to be made while analysing, before any value class exists.
+	 * @param {TypeInfo?} type
+	 * @returns {number}
+	 */
+	structPacketWidth(type, depth = 0) {
+		if (!type || !type.isTypeInfo || depth > 8) return 1;
+		if ((type.members ?? []).some(m => {
+			const mt = m.type ?? m.memberType;
+			return mt && mt.isTypeInfo && (mt.kind === 'struct' || mt.kind === 'union');
+		})) return Infinity;
+		if (type.kind === 'pointer' || type.kind === 'array') return 2;
+		if (type.kind !== 'struct' && type.kind !== 'union') return 1;
+		if (type.isPointerImpl?.()) return 2;
+		const members = type.members ?? [];
+		if (members.length === 0) return 1;
+		const widths = members.map(m => this.structPacketWidth(m.type ?? m.memberType, depth + 1));
+		return type.kind === 'union' ? Math.max(...widths) : widths.reduce((a, b) => a + b, 0);
+	}
+
+	/**
+	 * Whether `&st` may be taken for a struct kept in registers: the pragma
+	 * must be on and the packet must fit the threshold.
+	 * @param {TypeInfo?} type
+	 * @returns {boolean}
+	 */
+	allowsStructNamePointer(type) {
+		if (!this.supportsStructNamePointer()) return false;
+		/*
+		A member that is itself a struct has no single register name, so such a
+		struct can never be carried this way -- whatever the threshold says.
+		*/
+		const nested = (type?.members ?? []).some(m => {
+			const mt = m.type ?? m.memberType;
+			return !!mt && mt.isTypeInfo && (mt.kind === 'struct' || mt.kind === 'union');
+		});
+		if (nested) return false;
+		const cfg = this.compiler?.extraConfig?.getAttribute?.('optimizeOption') ?? {};
+		const limit = (typeof cfg.structPointerThreshold === 'number')
+			? cfg.structPointerThreshold : Infinity;
+		return this.structPacketWidth(type) <= limit;
+	}
+
+	supportsRemotePointer() {
+		return true;
+	}
+
+	/**
+	 * Whether a declarator (or a parameter) asks for the "holds a name"
+	 * representation by writing `byname` as a POINTER qualifier:
+	 *   struct pt *byname q
+	 * `byname` is a reserved word, so this is a plain token test.
+	 *
+	 * @param {any} node
+	 * @returns {boolean}
+	 */
+	hasByNameQualifier(node) {
+		/*
+		Either place may carry it: the declarator when the pointer belongs to
+		the declared name, or the type specifier when it was parsed there.
+		(`??` cannot be used: an empty array is not null.)
+		*/
+		const levels = [
+			...(node?.pointerQualifiers ?? []),
+			...(node?.type?.pointerQualifiers ?? [])
+		];
+		return levels.some(list => (list ?? []).includes('byname'));
+	}
+
+	/**
+	 * Whether an expression contains a `byname(&x)` call.
+	 *
+	 * @param {ASTNode?} node
+	 * @returns {boolean}
+	 */
+	containsByName(node) {
+		const seen = new Set();
+		const walk = n => {
+			if (!n || typeof n !== 'object' || seen.has(n)) return false;
+			seen.add(n);
+			if (n.functionName === 'byname'
+				|| (n.callee && (n.callee.name ?? n.callee.value) === 'byname')) return true;
+			for (const key of Object.keys(n)) {
+				if (key === 'parent') continue;
+				const child = n[key];
+				if (Array.isArray(child)) {
+					for (const item of child) if (walk(item)) return true;
+				} else if (child && typeof child === 'object') {
+					if (walk(child)) return true;
+				}
+			}
+			return false;
+		};
+		return walk(node);
+	}
+
+	/**
+	 * `remote T x = remote(<processor>, <variable>);`
+	 *
+	 * The processor may be any device expression; the variable has to be one
+	 * that the OTHER processor really has a register for, so it must be a
+	 * global (a local's register name depends on optimisations that differ
+	 * between two programs).
+	 *
+	 * The initializer is consumed: what is left is the binding, which the code
+	 * generator turns into two `set`s (device, name).
+	 *
+	 * @param {any} declarator
+	 * @param {SymbolEntry} symbol
+	 * @param {TypeInfo} finalType
+	 * @returns {void}
+	 */
+	consumeRemoteDirective(declarator, symbol, finalType, qualifiers = []) {
+		const initializer = declarator.initializer;
+		if (!initializer) return;
+		const called = (initializer.type === 'BuiltinCall')
+			? initializer.functionName
+			: (initializer.callee ? (initializer.callee.name ?? initializer.callee.value) : null);
+		if (called !== 'remote') return;
+		const args = initializer.arguments ?? [];
+		const location = initializer.location;
+		/*
+		`remote int *p`: the qualifier belongs to what is pointed at, and the
+		pointer type built for the declarator does not carry it -- so look at
+		the declaration's own qualifier list as well.
+		*/
+		if (!finalType.isRemote() && !qualifiers.includes('remote') && !symbol.remoteStored) {
+			this.addError(`remote() needs the declaration to be qualified 'remote', as in 'remote int x = remote(...)'`,
+				location);
+			declarator.initializer = null;
+			return;
+		}
+		if (args.length < 2 || args.length > 3) {
+			this.addError(`remote() takes the processor and the variable, and optionally `
+				+ `the layout both sides use (such as "embedded_lookup_item")`, location);
+			declarator.initializer = null;
+			return;
+		}
+		/*
+		The layout may be given here too: when the variable is named by a string
+		there is no local declaration to read it from, and the two processors
+		have to agree on it explicitly anyway.
+		*/
+		const layoutNode = args.length >= 3 ? args[2] : null;
+		const layout = (layoutNode && layoutNode.type === 'StringLiteral')
+			? String(layoutNode.raw ?? layoutNode.value).replace(/^"|"$/g, '') : null;
+		const deviceNode = args[0];
+		const targetNode = args[1];
+		// `&s` gives a pointer, a plain `s` binds the variable itself
+		let inner = targetNode;
+		if (inner.type === 'UnaryExpression' && inner.operator === '&') inner = inner.argument;
+		if (!inner || (inner.type !== 'Identifier' && inner.type !== 'StringLiteral')) {
+			this.addError(`The variable of remote() must be a name (or its address &name)`, location);
+			declarator.initializer = null;
+			return;
+		}
+		const targetSymbol = this.lookupSymbol?.(inner.name) ?? this.currentScope?.lookup?.(inner.name) ?? null;
+		/*
+		The variable of the other processor does not have to exist here at all:
+		a string literal names it directly (useful for pointers, which would
+		otherwise have to be declared locally only to be named).
+		*/
+		if (!targetSymbol && targetNode.type !== 'UnaryExpression'
+			&& targetNode.type === 'StringLiteral') {
+			symbol.remoteDevice = deviceNode;
+			symbol.remoteName = String(targetNode.raw ?? targetNode.value).replace(/^"|"$/g, '');
+			symbol.isRemote = true;
+			if (layout) symbol.requestedArrayImplementation = layout;
+			declarator.initializer = null;
+			return;
+		}
+		if (!targetSymbol) {
+			this.addError(`'${inner.name}' is not declared, so it cannot be reached remotely`, location);
+			declarator.initializer = null;
+			return;
+		}
+		if (!targetSymbol.isGlobal) {
+			this.addWarning(`'${inner.name}' is not global: another processor may name this register differently, `
+				+ `so remote access to it is not reliable`, location);
+		}
+		if (targetSymbol.isRemote) {
+			this.addError(`'${inner.name}' is itself remote: remote() cannot chain through two processors`, location);
+			declarator.initializer = null;
+			return;
+		}
+		/*
+		An array is reached element by element, and each element is a register
+		of the other processor -- which needs the subscript to be known and a
+		representation this compiler does not build yet. Reserved below.
+		*/
+		if (targetSymbol.myType?.()?.kind === 'array') {
+			if (!this.supportsRemoteArray()) {
+				this.addError(`A remote array is not supported yet`, location);
+				declarator.initializer = null;
+				return;
+			}
+			if (!targetSymbol.isGlobal) {
+				this.addWarning(`A remote array has to be global on both sides`, location);
+			}
+			/*
+			Reaching an array means naming its elements one by one, so they have
+			to BE registers. `encoded` (the whole array as one string) has none,
+			and `lookup` names them after contents instead of after the array.
+			*/
+			const requested = targetSymbol.requestedArrayImplementation ?? null;
+			if (requested === null) {
+				targetSymbol.requestedArrayImplementation = 'embedded_divided';
+			} else if (requested === 'encoded' || requested === 'traditional') {
+				this.addError(`A remote array has to keep its elements in registers: `
+					+ `'${targetSymbol.name}' is declared '${requested}'`, location);
+			} else if (requested === 'embedded_lookup') {
+				/*
+				Allowed, but only with the table named: two processors that
+				guess may well guess differently.
+				*/
+				this.addError(`A remote array using a lookup table must name it: `
+					+ `use array("embedded_lookup_item", ...) (or _liquid, _unit, _block) `
+					+ `instead of array("embedded_lookup", ...)`, location);
+			}
+			/*
+			`remote(...)` is the only thing that mentions the array, and the
+			initializer is consumed here -- so nothing would be left to keep it
+			alive and its elements would never be initialised.
+			*/
+			targetSymbol.isRemoteTarget = true;
+		}
+		targetSymbol.isRemoteTarget = true;
+		declarator.initializer = null;
+		symbol.remoteDevice = deviceNode;
+		symbol.remoteTarget = targetSymbol;
+		symbol.remoteName = targetSymbol.getAssemblySymbol();
+		if (layout) symbol.requestedArrayImplementation = layout;
+		symbol.remoteTakeAddress = targetNode.type === 'UnaryExpression';
+		symbol.isRemote = true;
+	}
+
+	/**
+	 * `int *s = byname(&c);`
+	 *
+	 * The same representation as an automatic name pointer, but asked for
+	 * explicitly -- so it does not need `#pragma optimize(pointer)`. (It still
+	 * needs the version that can `read` from `@this`.)
+	 *
+	 * @param {any} node The call
+	 * @returns {boolean} whether it was a byname() call
+	 */
+	consumeByNameCall(node) {
+		const args = node.arguments ?? [];
+		if (args.length !== 1) {
+			this.addError(`byname() requires exactly 1 argument: the address of a variable`, node.location);
+			return true;
+		}
+		const inner = args[0];
+		if (inner.type !== 'UnaryExpression' || inner.operator !== '&'
+			|| !inner.argument || inner.argument.type !== 'Identifier') {
+			this.addError(`byname() needs the address of a variable, as in byname(&c)`, node.location);
+			return true;
+		}
+		const symbol = this.lookupSymbol?.(inner.argument.name)
+			?? this.currentScope?.lookup?.(inner.argument.name) ?? null;
+		if (!symbol) {
+			this.addError(`'${inner.argument.name}' is not declared`, node.location);
+			return true;
+		}
+		if (!symbol.isGlobal) {
+			this.addWarning(`byname(&${inner.argument.name}) points at a local: its register name may change`,
+				node.location);
+		}
+		/*
+		Remember it: the optimizer's name pointer analysis is what keeps such a
+		variable out of memory, and it normally refuses without the pragma.
+		*/
+		symbol.forcedNamePointer = true;
+		if (!this.forcedNamePointers) this.forcedNamePointers = new Set();
+		this.forcedNamePointers.add(symbol.getAssemblySymbol());
+		node.setAttribute('bynameTarget', symbol.getAssemblySymbol());
+		node.setAttribute('bynameSymbol', symbol);
+		node.dataType = this.getTypeInfo('void*');
+		return true;
 	}
 
 	/**
@@ -2264,10 +2705,33 @@ export class SemanticAnalyzer extends ASTVisitor {
 					return;
 				}
 				
-				// 检查是否为register变量
+				/*
+				Taking the address of a `register` variable used to be forbidden
+				outright. It is fine when the pointer can carry NAMES instead of
+				an address -- that is precisely the representation a register
+				value demands. A struct qualifies; a scalar only does when name
+				pointers are on at all.
+				*/
 				if (this.isRegisterVariable(node.argument)) {
-					this.addError(`Cannot take address of register variable`, node.location);
-					return;
+					const registerSymbol = (node.argument.type === 'Identifier')
+						? (this.currentScope.lookup(node.argument.name) ?? null) : null;
+					const registerType = registerSymbol?.myType?.() ?? argType;
+					const isAggregate = !!registerType && registerType.isTypeInfo
+						&& (registerType.kind === 'struct' || registerType.kind === 'union');
+					/*
+					A struct can only be reached by NAME when that representation
+					is enabled; otherwise it still has to go into memory.
+					*/
+					const named = (isAggregate && this.allowsStructNamePointer(registerType))
+						|| (!!registerType && registerType.kind === 'pointer');
+					if (!named) {
+						this.addError(`Cannot take address of register variable`, node.location);
+						return;
+					}
+					if (registerSymbol) {
+						registerSymbol.addressedByName = true;
+						registerSymbol.forcedNamePointer = true;
+					}
 				}
 				
 				// 标记变量已被取地址
@@ -2437,7 +2901,14 @@ export class SemanticAnalyzer extends ASTVisitor {
 				`TypeInfo.requireMemoryImplementation`).
 				*/
 				const symbolType = symbol.myType?.() ?? null;
-				if (symbolType && ['struct', 'union'].includes(symbolType.kind)) {
+				/*
+				With a name-based pointer to a struct, taking the address no
+				longer forces the struct into memory: the pointer carries the
+				NAME of every member instead of an address.
+				*/
+				if (symbol.addressedByName === true) {
+					/* keep it in registers */
+				} else if (symbolType && ['struct', 'union'].includes(symbolType.kind)) {
 					/*
 					Give this variable the in-memory COPY of its type. Only this
 					variable changes; other instances of the same struct are left
@@ -2459,8 +2930,12 @@ export class SemanticAnalyzer extends ASTVisitor {
 				}
 			}
 			
-			// 被取地址的变量不能放在寄存器中
-			if (symbol.isRegister) {
+			/*
+			Being addressed normally forces a variable out of registers -- but
+			not when the pointer is going to carry names instead of an address,
+			which is exactly how a register resident value is reached.
+			*/
+			if (symbol.isRegister && !symbol.addressedByName) {
 				this.addWarning(`Register variable '${node.name}' has its address taken, will be stored in memory`, node.location);
 				symbol.isRegister = false; // 强制取消register优化
 			}
@@ -2896,6 +3371,12 @@ export class SemanticAnalyzer extends ASTVisitor {
 	}
 
     visitFunctionCall(node) {
+		if (node.callee && node.callee.type === 'Identifier' && node.callee.name === 'byname') {
+			// Keep it a call: the generator turns it into the address.
+			this.visit(node.arguments?.[0] ?? null);
+			this.consumeByNameCall(node);
+			return;
+		}
 		if (this.foldCompileTimeFunction(node)) return;
         this.visit(node.callee);
 
@@ -2978,6 +3459,13 @@ export class SemanticAnalyzer extends ASTVisitor {
 		const funcSymbol = this.currentScope.lookup(node.functionName);
 		if (!funcSymbol || funcSymbol.kind !== 'function') {
 			this.addError(`Unknown builtin function '${node.functionName}'`, node.location);
+			return;
+		}
+
+		// `byname(&c)`: handled here, because the parser makes it a builtin call
+		if (node.functionName === 'byname') {
+			node.arguments.forEach(arg => this.visit(arg));
+			this.consumeByNameCall(node);
 			return;
 		}
 

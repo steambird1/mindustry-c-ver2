@@ -408,6 +408,23 @@ export class Compiler {
 								// pointer arithmetic on the affected pointers.
 								optimizerConfig.doPointerOptimize = true;
 								break;
+							case "struct_pointer":
+								/*
+								A pointer to a struct may carry the NAME of every
+								member instead of an address.
+								  #pragma optimize(struct_pointer)      -- any size
+								  #pragma optimize(struct_pointer, 4)   -- up to 4
+									 registers; larger structs stay in memory
+								With no number the threshold is 4 when memory is
+								available and unbounded when it is not (then there
+								is nowhere else to put them anyway).
+								*/
+								optimizerConfig.doStructPointerOptimize = true;
+								if (config.length >= 2) {
+									const parsed = Number(String(config[1]).trim());
+									if (Number.isFinite(parsed)) optimizerConfig.structPointerThreshold = parsed;
+								}
+								break;
 						}
 					} else if (info.startsWith("noinline")) {
 						/*

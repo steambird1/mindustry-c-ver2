@@ -104,13 +104,28 @@ export function parseProgram(text) {
 let nextDeviceId = 1;
 
 export function makeDevice(type, name, cells = 0) {
-	return {
+	const dev = {
 		kind: 'device',
 		type,
 		name,
 		id: nextDeviceId++,
 		cells: new Array(Math.max(cells, 0)).fill(0)
 	};
+	/*
+	Another processor has variables of its own: that is exactly what makes
+	`read x processor1 "name"` different from reading this one.
+	*/
+	if (String(type).includes('processor')) dev.vars = new Map();
+	return dev;
+}
+
+/**
+ * Whether a value is a processor building (this one, or another one).
+ * @param {any} device
+ * @returns {boolean}
+ */
+function isProcessor(device) {
+	return !!device && (device.kind === 'processor' || (device.vars instanceof Map));
 }
 
 /**
@@ -133,7 +148,13 @@ export class Processor {
 	 */
 	constructor(instructions, options = {}) {
 		this.instructions = instructions;
-		this.regs = new Map();
+		/*
+		`options.self`: a processor building whose `vars` ARE this program's
+		registers. That is what makes two programs able to see each other: the
+		second one reads and writes the very same map.
+		*/
+		this.self = options.self ?? null;
+		this.regs = this.self?.vars ?? new Map();
 		this.links = options.links ?? [];
 		this.namedDevices = options.devices ?? {};
 		this.maxSteps = options.maxSteps ?? 2_000_000;
@@ -173,7 +194,7 @@ export class Processor {
 		if (raw.startsWith('@')) {
 			switch (raw) {
 				case '@counter': return this.counterValue();
-				case '@this': return { kind: 'processor' };
+				case '@this': return this.self ?? { kind: 'processor' };
 				case '@links': return this.links.length;
 				case '@ipt': return 10;
 				case '@pi': return Math.PI;
@@ -305,7 +326,7 @@ export class Processor {
 				const target = this.nameOfToken(args[0]);
 				const device = a(1);
 				const index = args[2];
-				if (device && device.kind === 'processor') {
+				if (device && isProcessor(device) && device.kind === 'processor') {
 					/*
 					`read r @this <name>` : a DYNAMICALLY named register. The
 					operand names another register whose VALUE is the name to
@@ -313,6 +334,13 @@ export class Processor {
 					*/
 					const key = String(this.readOperand(index));
 					this.writeRegister(target, this.regs.has(key) ? this.regs.get(key) : 0);
+				} else if (device && isProcessor(device)) {
+					/*
+					Reading a variable of ANOTHER processor: this is what
+					`remote` compiles to.
+					*/
+					const key = String(this.readOperand(index));
+					this.writeRegister(target, device.vars.has(key) ? device.vars.get(key) : 0);
 				} else if (typeof device === 'string') {
 					/*
 					`read r "hello" i` -- reading one character of a string. This
@@ -333,6 +361,10 @@ export class Processor {
 				const index = args[2];
 				if (device && device.kind === 'processor') {
 					this.writeRegister(index.string ?? this.readOperand(index), value);
+				} else if (device && isProcessor(device)) {
+					// Writing a variable of ANOTHER processor
+					const key = String(index.string ?? this.readOperand(index));
+					device.vars.set(key, value);
 				} else {
 					device.cells[this.cell(device, a(2))] = value;
 				}
@@ -376,7 +408,24 @@ export class Processor {
 				this.buffer = '';
 				next(); return;
 			}
-			case 'draw':
+			case 'draw': {
+				/*
+				Besides drawing, this is used to DECLARE variables: in mlog a
+				name only becomes a variable once an instruction uses it, and
+				`read` / `write` on a processor refuse names never declared.
+				So every plain name among the operands is touched here.
+				*/
+				for (const arg of args) {
+					const raw = arg.string !== undefined ? null : arg.raw;
+					if (!raw || raw === 'null') continue;
+					if (/^[A-Za-z_]/.test(raw) && this.regs.has(raw) === false
+						&& !raw.startsWith('@') && !/^-?\d/.test(raw)) {
+						this.regs.set(raw, 0);
+					}
+				}
+				this.draws.push(this.instructions[this.pc].raw);
+				next(); return;
+			}
 			case 'drawflush': {
 				this.draws.push(ins.text);
 				next(); return;

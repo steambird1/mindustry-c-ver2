@@ -1789,7 +1789,8 @@ export class Optimizer extends ASTVisitor {
 			const localConstants = this.localConstants.get(scopePath);
 			const variableUses = this.variableUses.get(scopePath);
 			
-			const canOptimizeThis = !(symbol.isVolatile || symbol.isStatic || symbol.isExtern);
+			const canOptimizeThis = !(symbol.isVolatile || symbol.isStatic || symbol.isExtern
+				|| symbol.isRemoteTarget);
             symbol.variableReferrer.rejecting = !canOptimizeThis;
 
             // 初始化使用统计
@@ -4448,7 +4449,11 @@ export class Optimizer extends ASTVisitor {
 		if (!symbol) return false;
 		const type = symbol.myType?.() ?? null;
 		if (!type || type.kind !== 'array') return false;
-		if (symbol.isVolatile || symbol.isExtern) return false;
+		/*
+		A remote target is written by the OTHER processor, which this program
+		cannot see -- so its elements are never known constants.
+		*/
+		if (symbol.isVolatile || symbol.isExtern || symbol.isRemoteTarget) return false;
 		if (symbol.isAddressed) return false;
 		return true;
 	}
@@ -4518,7 +4523,20 @@ export class Optimizer extends ASTVisitor {
 		}
 		const varState = this.variableUses.get(symbol.scope.getPath()).get(varName);
 		const varOk = varState && (varState.reads == 0 && varState.canOptimize);
-		return  (!symbol.isVolatile) && (!symbol.isExtern) && (!symbol.isStatic) && (!symbol.isAddressed) && varOk;
+		/*
+		A remote target is only mentioned by `remote(...)`, which is consumed in
+		the semantic pass -- so it looks unused here, while the other processor
+		does read it.
+		*/
+		/*
+		A name-based struct pointer looks unused: the members are reached as
+		`p.m` registers, so nothing ever reads `p` itself. Removing the
+		declaration would drop the instructions that STORE those names, leaving
+		every member pointing at an undefined register.
+		*/
+		if (symbol.addressedByName === true) return false;
+		return  (!symbol.isVolatile) && (!symbol.isExtern) && (!symbol.isStatic)
+			&& (!symbol.isAddressed) && (!symbol.isRemoteTarget) && varOk;
 	}
 
 	/**

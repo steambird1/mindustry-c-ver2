@@ -562,6 +562,21 @@ export class InstructionBuilder {
 			referrer: []
 		});
 	}
+	/**
+	 * `draw triangle`, used only to DECLARE variables: in mlog a name becomes a
+	 * variable by being used, and this one takes six operands at a time.
+	 *
+	 * @param {string[]} names Up to six variable names
+	 * @returns {SingleInstruction}
+	 */
+	static drawTriangle(names) {
+		const six = [];
+		for (let i = 0; i < 6; i++) six.push(names[i] ?? '0');
+		return new SingleInstruction({
+			content: `draw triangle ${six.join(' ')}`,
+			referrer: []
+		});
+	}
 	static drawflush(target) {
 		return new SingleInstruction({
 			content: `drawflush ${target}`,
