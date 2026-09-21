@@ -1,5 +1,6 @@
 // Example 5:
 // Control units to carry particular object (with timeout detector)
+#pragma optimize(array)
 
 auto device switch1;    // Whether enabling this controller
 auto device switch2;    // Whether using "balanced mode"
@@ -7,10 +8,10 @@ auto device switch3;    // Turned on - move away; Turned off - move in
 auto device vault1;
 auto device message1;   // Information display
 
-const int *allow_units = {(int)(@poly)};
-const int allow_units_size = 1;
-const int *deploy_objects = {(int)(@thorium), (int)(@graphite)};
-const int deploy_objects_size = 2;
+const int allow_units[] = {(int)(@poly)};
+const int allow_units_size = lenof(allow_units);
+const int deploy_objects[] = {(int)(@thorium), (int)(@graphite)};
+const int deploy_objects_size = lenof(deploy_objects);
 
 const device vault_device = vault1; // You may replace it by sth else
 const int default_carry = 50;
@@ -136,10 +137,10 @@ void main() {
     }
     beginning = (float)@time;
     ulocate("building", "core", false,
-        (volatile int*)coreX,
-        (volatile int*)coreY,
-        (volatile int*)core_found,
-        (volatile device*)core_device);
+        &coreX,
+        &coreY,
+        &core_found,
+        &core_device);
     while ((int)sensor(@unit, @totalItems) > 0) {
         moving_to(coreX, coreY);
         output("Prepare to drop items for further delivery...");

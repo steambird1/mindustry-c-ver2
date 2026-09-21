@@ -1,6 +1,7 @@
 // Example 8: Start RTG generator group in accordance with current
 // This will use getlink() to control as many RTG generators as possible
 // so there's no need to use pseudo list
+#pragma optimize(array)
 
 auto device node1;
 auto device display1;
@@ -14,8 +15,8 @@ const int screenX = 80;
 const int screenY = 80;
 const int singleOperationClosure = 4;
 
-near int displayState[20];  // 0 - no display, 1 - red, 2 - yellow, 4 - green, 8 - flashing
-near int displayBuffer[20]; // 1 - flashing black
+int displayState[20];  // 0 - no display, 1 - red, 2 - yellow, 4 - green, 8 - flashing
+int displayBuffer[20]; // 1 - flashing black
 
 int currentDuration = 0, currentControlState = 0, targetControlState = 0;
 int drawX = 0, drawY = 0;
@@ -61,22 +62,22 @@ void main() {
         for (i = 0; ; i++) {
             const device building = getlink(i);
             if (building == null) break;
-            if ((volatile content_t)sensor(building, @type) == target) {
+            if ((content_t)sensor(building, @type) == target) {
                 const int curPower = getPower();
                 if (currentControlState == 1 || curPower < 0) {
                     control("enabled", building, true);
-                } else if (((volatile bool)sensor(building, @enabled)) && curPower > closureThreshold && curClosure < singleOperationClosure) {
+                } else if (((bool)sensor(building, @enabled)) && curPower > closureThreshold && curClosure < singleOperationClosure) {
                     control("enabled", building, false);
                     curClosure++;
                 }
                 // Report its status (red: not enabled (red flashing: too hot and stopped!); yellow: no output; green: outputting)
                 int state = 0;
-                if ((volatile bool)sensor(building, @dead) || ((volatile long)sensor(building, @heat) > 0)) {
+                if ((bool)sensor(building, @dead) || ((long)sensor(building, @heat) > 0)) {
                     control("enabled", building, false);
                     state = 9;
-                } else if (!((volatile bool)sensor(building, @enabled))) {
+                } else if (!((bool)sensor(building, @enabled))) {
                     state = 1;
-                } else if ((volatile float)sensor(building, @efficiency) < 0.5) {
+                } else if ((float)sensor(building, @efficiency) < 0.5) {
                     state = 2;
                 } else {
                     state = 4;
@@ -90,10 +91,10 @@ void main() {
         draw("clear", 0, 0, 0);
         for (i = 0; i < total; i++) {
             const int state = displayState[i];
-            if ((volatile bool)(state & 8)) {
+            if ((bool)(state & 8)) {
                 const int buf = displayBuffer[i];
                 displayBuffer[i] = buf ^ 1;
-                if ((volatile bool)buf) {
+                if ((bool)buf) {
                     continue;
                 }
             }

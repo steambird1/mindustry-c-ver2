@@ -2316,7 +2316,7 @@ export class Parser {
 			'draw', 'print', 'drawflush', 'printflush', 'getlink', 'ceil', 'floor', 'sqrt', 'rand', 'abs', 'memcpy', 'pow',
 			'control', 'radar', 'sensor', 'set', 'op', 'lookup', 'ubind', 'ulocate', 'ucontrol', 'uradar', 'min', 'max',
 			'wait', 'stop', 'end', 'jump', 'read', 'write', 'asm', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'adiff',
-			'memsp', 'printchar', 'format', ...(this.extraFunctions.map(func => func.name))
+			'memsp', 'printchar', 'format', 'stricteq', ...(this.extraFunctions.map(func => func.name))
 		];
         return builtins.includes(name);
     }

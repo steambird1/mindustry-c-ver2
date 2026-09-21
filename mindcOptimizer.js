@@ -1684,10 +1684,35 @@ export class Optimizer extends ASTVisitor {
 		
 		if (analyzedBody) {
 			if (!this.functionInfo.get(funcName).isAddressed) {
-				if (funcInfo.returnCount.counter > 1) {
+				/*
+				Counting through `info.returnCount` MISSES the returns that sit
+				inside a nested block (`if`, `while`): those are analysed with a
+				child `info`, and the child's registry never merges back. A
+				function whose only *counted* return is the one at the end then
+				looks inlinable -- and inlining it drops the earlier exits,
+				which is exactly what cannot be reproduced without a goto.
+
+				So count them by looking at the body itself.
+				*/
+				const returns = [];
+				const seenReturns = new Set();
+				const collectReturns = node => {
+					if (!node || typeof node !== 'object' || seenReturns.has(node)) return;
+					seenReturns.add(node);
+					if (node.type === 'ReturnStatement') { returns.push(node); return; }
+					for (const key of Object.keys(node)) {
+						if (key === 'parent') continue;	// back edge
+						const child = node[key];
+						if (Array.isArray(child)) child.forEach(collectReturns);
+						else if (child && typeof child === 'object' && child.type) collectReturns(child);
+					}
+				};
+				collectReturns(funcNode.body);
+				if (returns.length > 1) {
 					this.functionInfo.get(funcName).canInline = false;
-				} else if (funcInfo.returnCount.counter == 1) {
-					this.functionInfo.get(funcName).canInline = funcNode.body.statements[funcNode.body.statements.length - 1].type === 'ReturnStatement';
+				} else if (returns.length === 1) {
+					const last = funcNode.body.statements[funcNode.body.statements.length - 1];
+					this.functionInfo.get(funcName).canInline = returns[0] === last;
 				} else {
 					this.functionInfo.get(funcName).canInline = true;
 				}
@@ -1867,7 +1892,18 @@ export class Optimizer extends ASTVisitor {
 		if (node.name.length && node.name[0] === '@') {
 			return;
 		}
-        const scopePath = this.currentScope.lookupScopeOf(node.name).getPath();
+        /*
+        A name the scope chain cannot resolve is not ours to complain about:
+        semantic analysis reports undeclared identifiers, and by this point a
+        block may already have been rewritten (an empty inlined function, a
+        folded-away `if`), which can leave a reference whose scope is gone.
+        Crashing here only produced an internal error with no message at all.
+        */
+        const owningScope = this.currentScope.lookupScopeOf(node.name);
+        if (!owningScope) {
+            return;
+        }
+        const scopePath = owningScope.getPath();
         const variableUses = this.variableUses.get(scopePath);
         
         // 记录变量读取
@@ -5307,12 +5343,19 @@ export class Optimizer extends ASTVisitor {
 			newBody = compound;
 		}
 
-		const whileNode = new WhileStatementNode(forNode.test ?? null, newBody);
+		/*
+		`for (;;)` has no test at all, which is an INFINITE loop. The `while`
+		it becomes must say so explicitly: a missing test is not the same as
+		`true` to the code generator, which asks for the condition's type and
+		crashes on a null node.
+		*/
+		const whileTest = forNode.test ?? ASTBuilder.numericLiteral(true);
+		const whileNode = new WhileStatementNode(whileTest, newBody);
 		whileNode.parent = holder;
 		// A statement's scope is the one holding it (the `for` had the same)
 		whileNode.scope = outerScope;
 		if (newBody) newBody.parent = whileNode;
-		if (forNode.test) forNode.test.parent = whileNode;
+		whileTest.parent = whileNode;
 
 		let replacement = whileNode;
 		if (forNode.init) {

@@ -20,7 +20,7 @@ import { Instruction, InstructionBuilder, InstructionReferrer, MemoryBlock, Memo
  } from "./mindcGeneratorBase.js";
 import { findRecursiveFunctions } from "./mindcBase.js";
 
-import { Globals, VariableRet, ImmediateRet, BasicRet, IntRet, BoolRet, FloatRet, ContentRet,
+import { ensureMemspHelper, Globals, VariableRet, ImmediateRet, BasicRet, IntRet, BoolRet, FloatRet, ContentRet,
 	PointerRet, RefPointerRet, MemPointerRet, VolatilePointerRet, MemoryRefRet, StructRefRet,
 	symbolRef, ExportRet, valueClassOf, readThrough, writeThrough, pointerStep,
 	RegistryStructRet, NamePointerRet,
@@ -196,6 +196,18 @@ export class CodeGenerator extends ASTVisitor {
 				result.concat(buildings.outputLinkInitializer());
 				result.concat(this.memory.outputLinkInitializer());	
 			}
+			/*
+			`memsp` needs the link INDEX of a building. For one that is named
+			directly (`auto device cell2;`) that number never changes, so find
+			it here, together with the memory blocks, instead of on every call.
+			*/
+			this._memspDevices = this.collectMemspDevices(ast);
+			// DBG
+						this._memspDevices.forEach(name => {
+				const symbol = this.semantic.globalScope?.lookup?.(name) ?? null;
+				if (!symbol || !symbol.isAutoDevice) return;
+				result.concat(this.outputDeviceLinkScan(symbol));
+			});
 			if (!noMemory && !this.compiler.config.getAttribute('noPointerFunction')) {
 				// Only the stack frame walker gets the capacity check; ordinary pointer
 			// stepping keeps the old behaviour.
@@ -2161,6 +2173,77 @@ export class CodeGenerator extends ASTVisitor {
 	}
 
 	/**
+	 * Find the link index of one `auto device` and keep it in a register, so
+	 * that `memsp(cell2, pos)` needs no search at run time.
+	 *
+	 * @param {SymbolEntry} symbol
+	 * @returns {Instruction}
+	 */
+	outputDeviceLinkScan(symbol) {
+		const result = new Instruction();
+		const loop = InstructionBuilder.jump('{devloop}', 'lessThan', '__devscan', '@links');
+		const found = InstructionBuilder.jump('{devfound}', 'notEqual', '__devhit', 'false');
+		const name = symbol.getAssemblySymbol();
+		result.concat(InstructionBuilder.set('__devscan', 0));
+		result.concat(new InstructionReferrer(loop, 'devloop'));
+		result.concat(InstructionBuilder.getlink('__devcur', '__devscan'));
+		result.concat(InstructionBuilder.op('strictEqual', '__devhit', '__devcur', name));
+		result.concat(found);
+		result.concat(InstructionBuilder.op('add', '__devscan', '__devscan', 1));
+		result.concat(loop);
+		result.concat(new InstructionReferrer(found, 'devfound'));
+		result.concat(InstructionBuilder.set(`${name}__linkid`, '__devscan'));
+		return result;
+	}
+
+	/**
+	 * Which `auto device` names are handed to `memsp` as a plain name.
+	 *
+	 * Their link index can be found ONCE while the memory blocks are being
+	 * bound at the start of the program, instead of on every single call.
+	 *
+	 * @param {ASTNode} node
+	 * @returns {Set<string>}
+	 */
+	collectMemspDevices(node) {
+		const found = new Set();
+		const seen = new Set();
+		const walk = n => {
+			if (!n || typeof n !== 'object' || seen.has(n)) return;
+			seen.add(n);
+			if (['FunctionCall', 'BuiltinCall'].includes(n.type) && n.functionName === 'memsp'
+				&& n.arguments && n.arguments[0]
+				&& n.arguments[0].type === 'Identifier') {
+				found.add(n.arguments[0].name);
+			}
+			for (const key of Object.keys(n)) {
+				if (key === 'parent') continue;	// back edge
+				const child = n[key];
+				if (Array.isArray(child)) child.forEach(walk);
+				else if (child && typeof child === 'object' && child.type) walk(child);
+			}
+		};
+		walk(node);
+		return found;
+	}
+
+	/**
+	 * The register holding the link index of an `auto device`, or null when the
+	 * building is not known at compile time (a parameter, a `getlink` result...).
+	 *
+	 * @param {ASTNode} node
+	 * @returns {string | null}
+	 */
+	staticDeviceLinkId(node) {
+		if (!node || node.type !== 'Identifier') return null;
+		if (!(this._memspDevices instanceof Set)) return null;
+		if (!this._memspDevices.has(node.name)) return null;
+		const symbol = this.currentScope?.lookup?.(node.name) ?? null;
+		if (!symbol || !symbol.isAutoDevice) return null;
+		return `${symbol.getAssemblySymbol()}__linkid`;
+	}
+
+	/**
 	 * 
 	 * @param {ASTNode} node 
 	 * @param {string | null} [contentTypeGiven=null]
@@ -3108,6 +3191,31 @@ export class CodeGenerator extends ASTVisitor {
 			return object.member(node.children[1].name, node.dataType);
 		}
 
+		/*
+		A struct that a function returned BY VALUE is not in memory either --
+		its members are registers named `X.member`, exactly like a registry
+		struct. Stepping a pointer (what the code below does) would read
+		through a null address, because `getLValue` has no storage to point at
+		for a call.
+		*/
+		const objectType = objectRoot.dataType ?? null;
+		const isStructLike = !!objectType
+			&& (objectType.kind === 'struct' || objectType.kind === 'union');
+		/*
+		Only for a CALL: `getLValue` has no storage to hand out for one and
+		falls back to `null` (an ImmediateRet). Any other expression keeps the
+		behaviour it had, including structs that really are in memory.
+		*/
+		const hasNoStorage = objectRoot.type === 'FunctionCall';
+		if (isStructLike && hasNoStorage) {
+			const value = ExportRet(glob, this.visitAndRead(objectRoot), objectType);
+			if (!(value instanceof PointerRet)) {
+				const holder = new RegistryStructRet(glob, value.instructions,
+					value.instructionReturn, objectType, value.temporary);
+				return holder.member(node.children[1].name, node.dataType);
+			}
+		}
+
 		/* From here on the object lives in memory and we need its address. */
 		const isNearPointerHere = object.isNear === true;
 		let knownTotalOffset = null;
@@ -3574,6 +3682,14 @@ export class CodeGenerator extends ASTVisitor {
 	}
 
 	/**
+	 * Normalise a list of instructions that is about to be handed to a value
+	 * class: drop empty slots and flatten a nested array, so that printing the
+	 * program never meets an element without `referrer`.
+	 *
+	 * @param {any} list
+	 * @returns {any[]}
+	 */
+	/**
 	 * 
 	 * @param {ASTNode} node Node for member expression
 	 */
@@ -3930,7 +4046,20 @@ export class CodeGenerator extends ASTVisitor {
 				return opProcesser(`rand`, ast.arguments);
 			},
 			read: ast => {
+				/*
+				`read r <building> i` fetches one cell of an arbitrary memory
+				building -- including one that is NOT linked to this processor,
+				which is the whole point of having it.
+				*/
 				return packer('read', ast.arguments, this.semantic.getTypeInfo('null_t'), 2);
+			},
+			stricteq: ast => {
+				/*
+				`op strictEqual` is the only comparison that also compares the
+				TYPE, so it is what `null` has to be told apart from `0` with.
+				It accepts operands of any type.
+				*/
+				return packer('op strictEqual', ast.arguments, this.semantic.getTypeInfo('bool'), 2);
 			},
 			write: ast => {
 				return packer('write', ast.arguments, null, 3);
@@ -3957,11 +4086,26 @@ export class CodeGenerator extends ASTVisitor {
 				let result = new Instruction();
 				const returner = this.getTempVariable();
 				const returningSymbol = this.getTempSymbol(this.semantic.getTypeInfo('void*'));
-				const blockRef = this.visitAndRead(ast.arguments[0]);
+				/*
+				A pointer is `X_block` / `X_pos` and `_block` must be a NUMBER,
+				because pointers end up in memory (and memory only holds
+				numbers). The building itself is an object, so it has to be
+				turned into its link index first.
+				*/
+				const direct = this.staticDeviceLinkId(ast.arguments[0]);
+				if (direct) {
+					result.concat(InstructionBuilder.set(`${returner}_block`, direct));
+				} else {
+					const blockRef = this.visitAndRead(ast.arguments[0]);
+					result.concat(blockRef);
+					const helper = ensureMemspHelper(this.glob);
+					result.concat(this.functionManagement.getFunctionCall(helper,
+						new Map([['__memsp_dev', blockRef.instructionReturn]]), this.memory));
+					result.concat(InstructionBuilder.set(`${returner}_block`, '__memsp_ret'));
+				}
+				// After the call, so that the helper cannot clobber it
 				const posRef = this.visitAndRead(ast.arguments[1]);
-				result.concat(blockRef);
 				result.concat(posRef);
-				result.concat(InstructionBuilder.set(`${returner}_block`, blockRef.instructionReturn));
 				result.concat(InstructionBuilder.set(`${returner}_pos`, posRef.instructionReturn));
 				result.concat(this.writeSymbol(returningSymbol, returner));
 				result.instructionReturn = returningSymbol.getAssemblySymbol();

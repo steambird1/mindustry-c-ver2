@@ -1,0 +1,12 @@
+import fs from 'fs';
+import { Compiler } from '../extroot/mindc.js';
+import { AttributeClass } from '../extroot/mindcBase.js';
+import { MemoryBlock } from '../extroot/mindcGeneratorBase.js';
+const load = async p => (await import(p)).extension;
+const exts = [await load('../extroot/include/archon.js'), await load('../extroot/include/sharelist.js')];
+const cfg = new AttributeClass(); cfg.setAttribute('targetVersion', 154.3);
+const log = console.log; console.log = () => {};
+const blocks = process.argv[3] ? [{ name: process.argv[3], size: Number(process.argv[4] ?? 64) }] : [];
+const r = await new Compiler(fs.readFileSync(process.argv[2], 'utf8'), blocks.map(b => new MemoryBlock(b.name, b.size)), cfg, exts).compile();
+console.log = log;
+String(r.code ?? '').split('\n').filter(l => l.trim()).forEach((l, i) => console.log(String(i).padStart(3), l));

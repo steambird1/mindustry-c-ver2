@@ -2227,6 +2227,50 @@ export function ensureArrayAccessHelper(glob, array, kind) {
 	return key;
 }
 
+/**
+ * Build (once) a helper that turns a BUILDING into the NUMBER a pointer needs.
+ *
+ * A pointer is `X_block` / `X_pos`, and `_block` has to be a number: pointers
+ * are stored in memory (that is how the block chain works) and memory only
+ * holds numbers. `memsp` however is handed a building, so the link index has
+ * to be looked up at run time -- by walking the links and comparing with
+ * `strictEqual`, which is the only comparison that also looks at the type and
+ * therefore tells `null` apart from `0`.
+ *
+ *     set __memsp_dev <building>
+ *     op add __stackpos @counter 1
+ *     set @counter ___memsp
+ *
+ * @param {Globals} glob
+ * @returns {string} the function name
+ */
+export function ensureMemspHelper(glob) {
+	const reg = glob?.funcReg;
+	if (!reg) return null;
+	const key = '__memsp';
+	if (reg.functionCollection.has(key)) return key;
+	const body = new Instruction();
+	const loop = InstructionBuilder.jump('{loop}', 'lessThan', '__memsp_i', '@links');
+	const found = InstructionBuilder.jump('{found}', 'notEqual', '__memsp_hit', 'false');
+	body.concat(InstructionBuilder.set('__memsp_i', 0));
+	body.concat(new InstructionReferrer(loop, 'loop'));
+	body.concat(InstructionBuilder.getlink('__memsp_cur', '__memsp_i'));
+	body.concat(InstructionBuilder.op('strictEqual', '__memsp_hit', '__memsp_cur', '__memsp_dev'));
+	body.concat(found);
+	body.concat(InstructionBuilder.op('add', '__memsp_i', '__memsp_i', 1));
+	body.concat(loop);
+	body.concat(new InstructionReferrer(found, 'found'));
+	/*
+	Whatever happens we land here: when the building was found `__memsp_i` is
+	its index, and when it was not `__memsp_i` has run past the last link, so
+	`__memsp_ret` is out of range -- the same thing `getlink` returns for a
+	missing building.
+	*/
+	body.concat(InstructionBuilder.set('__memsp_ret', '__memsp_i'));
+	reg.addFunction(key, body, null, [], true, false, true);
+	return key;
+}
+
 export function selectArrayImplementation(info) {
 	const length = info.length ?? 0;
 	const size = info.size ?? 1;

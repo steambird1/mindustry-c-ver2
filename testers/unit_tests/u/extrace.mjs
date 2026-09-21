@@ -1,0 +1,15 @@
+import fs from 'fs';
+import { Compiler } from '../extroot/mindc.js';
+import { AttributeClass } from '../extroot/mindcBase.js';
+import { MemoryBlock } from '../extroot/mindcGeneratorBase.js';
+import { runProgram, defaultLinks } from '../sim.mjs';
+const load = async p => (await import(p)).extension;
+const exts = [await load('../extroot/include/archon.js'), await load('../extroot/include/sharelist.js')];
+const cfg = new AttributeClass(); cfg.setAttribute('targetVersion', 154.3);
+const log = console.log; console.log = () => {};
+const r = await new Compiler(fs.readFileSync(process.argv[2], 'utf8'), [], cfg, exts).compile();
+console.log = log;
+const proc = runProgram(String(r.code), { links: defaultLinks([]) });
+console.log('output:', proc.output());
+console.log('trap', proc.trap ?? 'none');
+console.log(proc.recent(24).join('\n'));

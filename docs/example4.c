@@ -1,3 +1,4 @@
+#pragma optimize(array)
 
 auto device display1;
 

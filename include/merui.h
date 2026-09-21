@@ -23,11 +23,7 @@ device get_core(bool combat) {
             ubind((unit_t)i);
             if ((bool)sensor(@unit, @controlled)) continue;
             if (!((bool)sensor(@unit, @dead))) {
-                ulocate("building", "core", combat,
-                (volatile int*)coreX,
-                (volatile int*)coreY,
-                (volatile int*)coreFound,
-                (volatile device*)coreDevice);
+                ulocate("building", "core", combat, &coreX, &coreY, &coreFound, &coreDevice);
                 if (coreFound) {
                     ucontrol("unbind");
                     return coreDevice;
@@ -75,7 +71,7 @@ mOpRet_t unit_bind(content_t type, bool rebind) {
 
 mOpRet_t go_to(float x, float y, float radius) {
     bool is_within;
-    ucontrol("within", x, y, radius, (volatile bool*)is_within);
+    ucontrol("within", x, y, radius, &is_within);
     if (is_within) return (mOpRet_t)({true, OP_GOTO});
     ucontrol("pathfind", x, y);
     return (mOpRet_t)({false, OP_GOTO, ERR_IN_PROGRESS});
@@ -97,11 +93,7 @@ mOpRet_t mining(content_t category) {
     int oreX, oreY;
     bool oreFound;
     device oreDevice;
-    ulocate("ore", category, 
-        (volatile int*)oreX, 
-        (volatile int*)oreY, 
-        (volatile bool*)oreFound,
-        (volatile device*)oreDevice);
+    ulocate("ore", category, &oreX, &oreY, &oreFound, &oreDevice);
     if (!oreFound) return (mOpRet_t)({false, OP_MINE, ERR_MINE_NOT_FOUND});
     exit_or_succ_as(go_to(oreX, oreY, 3));
     ucontrol("mine", oreX, oreY);

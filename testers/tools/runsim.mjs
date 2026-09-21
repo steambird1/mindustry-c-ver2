@@ -33,13 +33,51 @@ export async function simulate(pathOrSource, memoryBlocks, extraAttributes = {})
 	const devices = {};
 	const deviceNames = [...source.matchAll(/auto\s+device\s+([A-Za-z_][A-Za-z0-9_]*)\s*;/g)].map(m => m[1]);
 	if (deviceNames.length === 0) deviceNames.push('message1');
-	deviceNames.forEach(name => { devices[name] = makeDevice('@message', name); });
+	/*
+	A test may say what its buildings are:
+	    // DEVICES: cell2_id=memory, vault1=container
+	    // SENSOR: vault1 @copper 1234
+	so that `memsp` / `read` / `write` have a real memory to work on and
+	`sensor` answers with a known value.
+	*/
+	const askedKinds = new Map();
+	for (const m of source.matchAll(/\/\/\s*DEVICES:\s*([^\n]*)/g)) {
+		for (const part of m[1].split(',')) {
+			const [nm, kind] = part.split('=').map(x => x.trim());
+			if (nm) askedKinds.set(nm, kind ?? 'memory');
+		}
+	}
+	const sensors = new Map();
+	for (const m of source.matchAll(/\/\/\s*SENSOR:\s*([A-Za-z_][\w]*)\s+(@\w+)\s+(-?\d+(?:\.\d+)?)/g)) {
+		sensors.set(`${m[1]} ${m[2]}`, Number(m[3]));
+	}
+	deviceNames.forEach(name => {
+		const kind = askedKinds.get(name) ?? 'message';
+		if (kind === 'memory') devices[name] = makeDevice('@memory-cell', name, 64);
+		else if (kind === 'container') devices[name] = makeDevice('@container', name);
+		else devices[name] = makeDevice('@message', name);
+	});
 	// Extra devices used by the program (displays etc.)
 	for (const m of source.matchAll(/\b(printflush|drawflush)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)/g)) {
 		if (!devices[m[2]]) devices[m[2]] = makeDevice('@message', m[2]);
 	}
 
 	const links = defaultLinks(blocks);
+	/*
+	Some tests need a building that is really LINKED (that is what `memsp`
+	searches through), not merely named.
+	    // LINKS: cell2_id=memory
+	*/
+	for (const m of source.matchAll(/\/\/\s*LINKS:\s*([^\n]*)/g)) {
+		for (const part of m[1].split(',')) {
+			const [nm, kind] = part.split('=').map(x => x.trim());
+			if (!nm) continue;
+			const dev = kind === 'container' ? makeDevice('@container', nm)
+				: makeDevice('@memory-cell', nm, 64);
+			links.push(dev);
+			devices[nm] = dev;
+		}
+	}
 	/*
 	A small default world: `ulocate` finds a core at (11, 22) and
 	`ucontrol "within"` succeeds, so output parameters can be checked. A test
@@ -49,6 +87,12 @@ export async function simulate(pathOrSource, memoryBlocks, extraAttributes = {})
 	devices.core1 = core;
 	const proc = runProgram(String(result.code ?? ''), {
 		links, devices, maxSteps: 5_000_000,
+		sensorProvider: sensors.size
+			? (dev, what) => {
+				const key = `${dev?.name ?? dev} ${what}`;
+				return sensors.has(key) ? sensors.get(key) : undefined;
+			}
+			: null,
 		ulocateProvider: () => [11, 22, 1, core],
 		ucontrolProvider: () => true
 	});

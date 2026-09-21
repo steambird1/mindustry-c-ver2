@@ -1127,7 +1127,8 @@ export class SemanticAnalyzer extends ASTVisitor {
 			{ name: 'stop', returnType: 'void', parameters: [] },
 			{ name: 'end', returnType: 'void', parameters: [] },
 			{ name: 'jump', returnType: 'void', parameters: [], hasVarArgs: true, special: 'jump' }, // 特殊处理
-			{ name: 'read', returnType: 'void', parameters: [], special: 'read'}, // 特殊处理
+			{ name: 'read', returnType: 'null_t', parameters: [], special: 'read'}, // 特殊处理
+			{ name: 'stricteq', returnType: 'bool', parameters: [], hasVarArgs: true, special: 'stricteq' }, // 严格相等
 			{ name: 'write', returnType: 'void', parameters: [], special: 'write'}, // 特殊处理
 			{ name: 'ubind', returnType: 'void', parameters: ['content_t']},
 			{ name: 'ucontrol', returnType: 'void', parameters: [], hasVarArgs: true},
@@ -3006,12 +3007,24 @@ export class SemanticAnalyzer extends ASTVisitor {
 			case 'read':
 				if (node.arguments.length !== 2) {
 					this.addError(`'${node.functionName}' requires exactly 2 arguments`, node.location);
+				} else if (!node.arguments[0].dataType
+					|| !['device', 'null_t'].includes(String(node.arguments[0].dataType.name))) {
+					this.addError(`The building of '${node.functionName}' should be a device`, node.location);
 				}
 				break;
 				
 			case 'write':
 				if (node.arguments.length !== 3) {
 					this.addError(`'${node.functionName}' requires exactly 3 arguments`, node.location);
+				} else if (!node.arguments[1].dataType
+					|| !['device', 'null_t'].includes(String(node.arguments[1].dataType.name))) {
+					this.addError(`The building of '${node.functionName}' should be a device`, node.location);
+				}
+				break;
+
+			case 'stricteq':
+				if (node.arguments.length !== 2) {
+					this.addError(`'${node.functionName}' requires exactly 2 arguments`, node.location);
 				}
 				break;
 				
