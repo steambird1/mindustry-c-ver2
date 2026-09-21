@@ -340,6 +340,12 @@ export class Optimizer extends ASTVisitor {
 			this.optimizeConfig = this.compiler.extraConfig.getAttribute('optimizeOption') ?? {};
 		}
         
+		/*
+		Every `for` becomes a `while` before anything looks at the program, so
+		that there is only one kind of loop to reason about.
+		*/
+		this.convertForLoopsToWhile();
+
         // 多轮优化
         let iteration = 0;
         const maxIterations = 10;
@@ -371,6 +377,8 @@ export class Optimizer extends ASTVisitor {
 
     optimizationPass() {
 		this.arrayState.clear();
+		// A fresh simulation budget for this round
+		this.grossSimulationBudget = null;
 
         // 1. 收集全局信息（函数调用图等）
 		this.visitedFunction = new Set();
@@ -1296,12 +1304,8 @@ export class Optimizer extends ASTVisitor {
 			this.analyzeVariableDeclaration(node, info);
 		}
 		if (node.children) {
-			node.children.forEach(child => this.analyzeNode(child, {
-				parentInfo: info,
-				disposeReturn: (node.type === 'ExpressionStatement' 
-					&& child != node.children[node.children.length - 1]
-				)
-			}));
+			this.analyzeStatementList(node, node.children, info,
+				node.type === 'ExpressionStatement');
 		}
 		if (info && info.parentInfo) {
 			for (const att of inheritances) {
@@ -1312,6 +1316,36 @@ export class Optimizer extends ASTVisitor {
 
     // =============== 具体分析函数 ===============
 	
+	/**
+	 * Analyse a list of child nodes.
+	 *
+	 * The list is snapshotted first: analysing a statement can REMOVE it (a
+	 * folded `if`, a dead assignment) and `replaceNode` splices the array we
+	 * are iterating. Iterating the live array then skips the statement that
+	 * moved into the removed one's place -- which is how the `while (true)` in
+	 * `main` of example7a went unanalysed, leaving the call graph empty and
+	 * every other function looking unused.
+	 *
+	 * @param {ASTNode} owner
+	 * @param {ASTNode[]} list
+	 * @param {any} info
+	 * @param {boolean} [disposeReturnAllButLast]
+	 */
+	analyzeStatementList(owner, list, info, disposeReturnAllButLast = false) {
+		if (!list) return;
+		const snapshot = [...list];
+		const last = snapshot[snapshot.length - 1];
+		for (const child of snapshot) {
+			if (!child) continue;
+			// Gone in the meantime (removed, or replaced by something else)
+			if (!list.includes(child)) continue;
+			this.analyzeNode(child, {
+				parentInfo: info,
+				disposeReturn: disposeReturnAllButLast && child !== last
+			});
+		}
+	}
+
 	// These functions are manually implemented as I have reached maximum conversation length of Deepseek:
 	
 	// ! Manually added scope entrance !
@@ -1322,10 +1356,7 @@ export class Optimizer extends ASTVisitor {
 			this.enterScope(node.scope);
 		}
 		if (node.statements) {
-			node.statements.forEach(child => this.analyzeNode(child, {
-				parentInfo: info,
-				disposeReturn: true
-			}));
+			this.analyzeStatementList(node, node.statements, info);
 		}
 		if (enteredScope) {
 			this.exitScope();
@@ -2126,16 +2157,24 @@ export class Optimizer extends ASTVisitor {
 						foundNode = func;
 					}
 				});
+				/*
+				`foundNode` is null when the name is not one of this program's
+				functions -- a builtin that the parser left as a plain call, or
+				a function that has already been taken out of the AST.
+				Registering `scope: foundNode.scope` then threw much later, in a
+				completely unrelated place. Keep the entry (so the call is
+				counted) but make it plainly unusable.
+				*/
 				this.functionInfo.set(funcName, {
 					calls: valid ? 1 : 0,
 					hasSideEffects: false,
 					isAddressed: false,
 					isDefinition: false,
-					canInline: true,
+					canInline: false,
 					writtenVarsUnknown: true,
 					writtenVars: [],
 					node: foundNode,
-					scope: foundNode.scope
+					scope: foundNode ? foundNode.scope : null
 				});	// Other information given as undefined
 				funinfo = this.functionInfo.get(funcName);
 			}
@@ -2146,16 +2185,19 @@ export class Optimizer extends ASTVisitor {
 			}
 
 			// [TODO: Consider recursive functions ...?]
-			this.analyzeNode(funinfo.node, {
-				actualCalling: Boolean(info.actualCalling && (shouldRun || info.optimizingLoop)),
-				fromCallNodeAnalysis: true,
-				parentInfo: info
-			});
+			if (funinfo.node) {
+				this.analyzeNode(funinfo.node, {
+					actualCalling: Boolean(info.actualCalling && (shouldRun || info.optimizingLoop)),
+					fromCallNodeAnalysis: true,
+					parentInfo: info
+				});
+			}
 
 			const funcSymbol = this.currentScope.lookup(funcName);
-			funcSymbol.type.parameters.forEach(param => {
+			const parameters = funcSymbol?.type?.parameters ?? null;
+			(parameters ?? []).forEach(param => {
 				const resolvedType = this.semantic.getTypeInfo(param.type);
-				const resolvedSymbol = funinfo.scope.lookupCurrent(param.name);
+				const resolvedSymbol = funinfo.scope?.lookupCurrent(param.name);
 				if (resolvedType.kind === 'array') {
 					arrCallMapper.push(resolvedSymbol.getAssemblySymbol());
 				} else {
@@ -2336,7 +2378,16 @@ export class Optimizer extends ASTVisitor {
 			if ((!node.getAttribute('bodyHasSideEffects')) && (!node.getAttribute('conditionHasSideEffects'))
 				&& (!node.getAttribute('infiniteLoop'))) {
 				if (!info || !info.isLoop) {
-					if (this.analyzeWhileLoopForOptimization(node, info)) {
+					/*
+					An "endless" loop is worth a try too: `while (true) { ...;
+					if (done) break; }` does end, it just does not say where. The
+					simulation finds the `break`. Nothing observable happens here
+					(the body was checked to be free of side effects), so a loop
+					that never reaches its `break` may simply be dropped.
+					*/
+					const tried = this.analyzeWhileLoopForOptimization(node, info)
+						|| this.analyzeEndlessLoopForOptimization(node, info);
+					if (tried) {
 						if ((!info || !info.optimizingLoop) && this.optimizeDeterministicWhileLoop(node)) {
 							this.modified = true;
 							optimized = true;
@@ -2399,7 +2450,7 @@ export class Optimizer extends ASTVisitor {
 				constValue = this.evaluateConstantExpression(whileNode.test.left);
 			}
 			
-			if (loopVarName && constValue !== undefined) {
+			if (loopVarName) {
 				// 检查循环体中是否对循环变量有简单修改
 				const updateInfo = this.findLoopVariableUpdateInBody(whileNode.body, loopVarName);
 				
@@ -2413,40 +2464,37 @@ export class Optimizer extends ASTVisitor {
 						// Successful to make registrations
 						whileNode.setAttribute('loopVarName', loopVarName);
 						const conditionInfo = { comparisonOp, constValue };
-						// 尝试计算循环次数
-						const iterationCount = this.calculateLoopIterations(
-							initValue,
-							conditionInfo,
-							updateInfo
-						);
-						
+						/*
+						The bound need not be a compile-time constant. When it
+						is not, the loop is still simulated -- the simulation
+						stops by itself when the condition becomes false.
+						*/
+						const iterationCount = (constValue === undefined) ? null
+							: this.calculateLoopIterations(initValue, conditionInfo, updateInfo);
+						const MAX_OPTIMIZE_ITERATIONS = 250; // 最大优化循环次数
+
 						if (iterationCount !== null && iterationCount >= 0) {
 							whileNode.setAttribute('iterationCount', iterationCount);
-							const MAX_OPTIMIZE_ITERATIONS = 250; // 最大优化循环次数
 							if (iterationCount === 0) {
 								whileNode.setAttribute('neverExecuted', true);
 								return true;
 							} else if (iterationCount <= MAX_OPTIMIZE_ITERATIONS) {
-								// 可以优化
-								whileNode.setAttribute('iteration', {
-									node: whileNode,
-									type: 'while',
-									varName: loopVarName,
-									varInit: initValue,
-									condition: conditionInfo,
-									update: updateInfo,
-									count: iterationCount,
-									info: info
-								});
-								whileNode.setAttribute('canOptimize', true);
-								if (info && info.noRunning) return true;
-								if (!this.simulateLoop(whileNode, loopVarName, initValue, conditionInfo, updateInfo, iterationCount, info)) {
-									whileNode.setAttribute('optimized', false);
-									return false;
-								}
-								whileNode.setAttribute('optimized', true);
+								return this.runWhileSimulation(whileNode, loopVarName, initValue,
+									conditionInfo, updateInfo, iterationCount, info);
+							}
+						} else if (constValue === undefined) {
+							/*
+							Unknown bound (`while (i < f())`, or a bound that is
+							only known while simulating). Give the simulation a
+							budget and let the condition decide when it ends.
+							*/
+							const nowFalse = this.evaluateConstantExpression(whileNode.test);
+							if (nowFalse === 0) {
+								whileNode.setAttribute('neverExecuted', true);
 								return true;
 							}
+							return this.runWhileSimulation(whileNode, loopVarName, initValue,
+								conditionInfo, updateInfo, MAX_OPTIMIZE_ITERATIONS, info);
 						}
 					}
 				}
@@ -3077,6 +3125,16 @@ export class Optimizer extends ASTVisitor {
 		const configuredMaxSimulation = 300;
 		const configuredMaxGrossSimulation = 50000;
 		// End
+		/*
+		`configuredMaxGrossSimulation` bounds how many rounds are simulated in
+		total over one optimization round. Without it, a program with several
+		(or nested) loops of 300 rounds each spends a long time simulating. When
+		the budget is gone the simulation reports that it did not finish and the
+		loop is left alone.
+		*/
+		if (this.grossSimulationBudget === undefined || this.grossSimulationBudget === null) {
+			this.grossSimulationBudget = configuredMaxGrossSimulation;
+		}
 		
 		const loopVarSymbol = this.currentScope.lookup(loopVarName);
 		const scopePath = this.currentScope.lookupScopeOf(loopVarName).getPath();
@@ -3127,7 +3185,11 @@ export class Optimizer extends ASTVisitor {
 		// 如果有循环体，尝试分析它
 		if (loopNode.body && iterationCount > 0) {
 			// 对于简单循环，我们可以模拟少量迭代来传播常量
-			const maxSimulatedIterations = Math.min(iterationCount, configuredMaxSimulation);
+			let maxSimulatedIterations = Number.isFinite(iterationCount)
+				? Math.min(iterationCount, configuredMaxSimulation)
+				: configuredMaxSimulation;
+			maxSimulatedIterations = Math.max(0,
+				Math.min(maxSimulatedIterations, this.grossSimulationBudget ?? 0));
 			let i = 0;
 			let broken = false, continuing = false;
 			for (i = 0; i < maxSimulatedIterations; i++) {
@@ -3182,13 +3244,27 @@ export class Optimizer extends ASTVisitor {
 				}
 			}
 			
+			/*
+			Did the simulation actually reach the end of the loop? Only then may
+			its results be used. `broken` (a `break` we ran into) and a condition
+			that has become false both count as reaching the end; running out of
+			iterations does not.
+			*/
+			let completed = broken;
 			if ((!broken) && loopNode.test) {
 				const testEval = this.evaluateConstantExpression(loopNode.test);
 				if (testEval != 0) {
 					// Still can be evaluated!!!
 					loopNode.setAttribute('maybeHasSideEffects', true);
+				} else {
+					completed = true;
 				}
+			} else if (!broken && !loopNode.test) {
+				// `while (true)`: never ends by itself
+				completed = false;
 			}
+			this.grossSimulationBudget = (this.grossSimulationBudget ?? 0) - i;
+			loopNode.setAttribute('simulationComplete', completed);
 			
 			// 设置循环后的变量值
 			// const finalValue = initValue + (iterationCount * updateInfo.step);
@@ -3661,6 +3737,16 @@ export class Optimizer extends ASTVisitor {
 			const varName = varInfo.varName;
 
 			const varSymbol = varInfo.symbol ?? this.currentScope.lookup(varName);
+			/*
+			A variable the outside world can also reach must not be pinned to a
+			value: it may be changed by another processor (`extern`), it has to
+			be stored in memory (`volatile`), it keeps its value between calls
+			(`static`), or somebody took its address.
+			*/
+			if (varSymbol && (varSymbol.isVolatile || varSymbol.isExtern
+				|| varSymbol.isStatic || varSymbol.isAddressed)) {
+				return false;
+			}
 			const scopePath = (varInfo.scope ?? this.currentScope.lookupScopeOf(varName)).getPath();
 			const localConstants = this.localConstants.get(scopePath);
 			const variableUses = this.variableUses.get(scopePath);
@@ -3669,10 +3755,13 @@ export class Optimizer extends ASTVisitor {
 				// 变量没有确定的最终值，不能完全优化
 				return false;
 			}
-			if (scopePath == loopNode.scope.getPath()) {
-				// Inside variables are ignored
-				varFinalValues.set(varName, finalValue);
-			}
+			/*
+			Emit the assignment for EVERY variable the loop writes, not only for
+			those declared in the loop's own scope. Skipping the others used to
+			drop writes to outer/global variables silently: `while (i < 10) {
+			sid++; i++; }` was replaced by nothing at all, leaving `sid` at 0.
+			*/
+			varFinalValues.set(varName, finalValue);
 			
 			// 检查变量的使用情况
 			const usage = variableUses.get(varName);
@@ -4867,6 +4956,12 @@ export class Optimizer extends ASTVisitor {
 	// ! Has manual changes !
     removeUnusedFunctions() {
         const usedFunctions = new Set(['main']);
+        /*
+        Nothing recorded a single call: the bodies have not been looked at yet.
+        Going on would delete every function but main and leave the call sites
+        dangling, so wait for a round that knows something.
+        */
+        if (this.functionCallGraph.size === 0) return;
         
         // 从main函数开始标记使用的函数
         const markUsed = (funcName) => {
@@ -5007,6 +5102,242 @@ export class Optimizer extends ASTVisitor {
 	 */
 	isLoopControlCall(callNode) {
 		return this.loopControlCallSites().has(callNode);
+	}
+
+	/**
+	 * `while (true) { ... }` -- a loop without a condition that names a
+	 * variable. There is nothing to compute an iteration count from, so the
+	 * body is simply simulated until it either hits a `break` or runs out of
+	 * budget.
+	 *
+	 * Only attempted when the body is free of side effects, which the caller
+	 * has already checked.
+	 *
+	 * @param {ASTNode} whileNode
+	 * @param {any} info
+	 * @returns {boolean}
+	 */
+	analyzeEndlessLoopForOptimization(whileNode, info) {
+		const test = whileNode.test;
+		// Only for a condition that is plainly true (or absent)
+		if (test) {
+			/*
+			`true` may arrive as a keyword-like identifier, as `1`, or as
+			something the constant folder already knows.
+			*/
+			const plainlyTrue = (test.type === 'Identifier' && test.name === 'true')
+				|| (test.type === 'NumericLiteral' && test.value !== 0 && test.value !== null);
+			const value = this.evaluateConstantExpression(test);
+			const foldedTrue = (value !== undefined && value !== null && value !== 0 && value !== false);
+			if (!plainlyTrue && !foldedTrue) return false;
+		}
+		const modifiedVars = this.collectModifiedVariablesInLoop(whileNode);
+		// Pick any variable the body writes and whose value is known: it stands
+		// in for the (missing) loop variable.
+		let loopVarName = null, initValue = undefined;
+		for (const varInfo of modifiedVars) {
+			if (varInfo === 'unrecognized') return false;
+			const scopePath = (varInfo.scope ?? this.currentScope.lookupScopeOf(varInfo.varName)).getPath();
+			const value = this.localConstants.get(scopePath)?.get(varInfo.varName);
+			if (value !== undefined) {
+				loopVarName = varInfo.varName;
+				initValue = value;
+				break;
+			}
+		}
+		if (!loopVarName) return false;
+
+		const MAX_OPTIMIZE_ITERATIONS = 250;
+		return this.runWhileSimulation(whileNode, loopVarName, initValue,
+			{ comparisonOp: null, constValue: undefined },
+			{ type: 'none', step: 0 }, MAX_OPTIMIZE_ITERATIONS, info);
+	}
+
+	/**
+	 * Simulate a `while` loop and decide whether the result may be used.
+	 *
+	 * A `while` loop is flexible enough that a simulation which did NOT reach
+	 * the end tells us nothing: the remaining rounds are exactly the ones we
+	 * could not run. So when the simulation runs out of budget without the
+	 * condition turning false, nothing is kept -- the loop is left as it was
+	 * and the constants planted by the simulation are rolled back.
+	 *
+	 * @returns {boolean}
+	 */
+	runWhileSimulation(whileNode, loopVarName, initValue, conditionInfo, updateInfo,
+		iterationCount, info) {
+		whileNode.setAttribute('iterationCount', iterationCount);
+		whileNode.setAttribute('iteration', {
+			node: whileNode,
+			type: 'while',
+			varName: loopVarName,
+			varInit: initValue,
+			condition: conditionInfo,
+			update: updateInfo,
+			count: iterationCount,
+			info: info
+		});
+		whileNode.setAttribute('canOptimize', true);
+		if (info && info.noRunning) return true;
+		if (!this.simulateLoop(whileNode, loopVarName, initValue, conditionInfo, updateInfo,
+			iterationCount, info)) {
+			whileNode.setAttribute('optimized', false);
+			return false;
+		}
+		if (whileNode.getAttribute('simulationComplete') === false) {
+			// Ran out of budget: keep the loop, forget the imagined values
+			whileNode.setAttribute('optimized', false);
+			whileNode.setAttribute('canOptimize', false);
+			this.restoreLoopConstants(whileNode);
+			return false;
+		}
+		whileNode.setAttribute('optimized', true);
+		return true;
+	}
+
+	/**
+	 * Rewrite every `for` loop into the `while` loop it means:
+	 *
+	 *     for (init; test; update) body
+	 *   -->
+	 *     init; while (test) { body; update; }
+	 *
+	 * Done once, before any analysis, so that the whole optimizer, the loop
+	 * simulator and the generator only ever see one kind of loop. It also gets
+	 * rid of the separate `for` code paths (whose `update` sits outside the
+	 * body and is therefore easy to forget when the loop is replaced).
+	 *
+	 * A body containing `continue` is left alone: in a `for`, `continue` jumps
+	 * to `update`, in a `while` it jumps to the test -- and there is no `goto`
+	 * to repair that with.
+	 */
+	convertForLoopsToWhile() {
+		if (this._forLoopsConverted) return;
+		this._forLoopsConverted = true;
+		let converted = 0;
+
+		const containsContinue = (node, stopAt) => {
+			let found = false;
+			const walk = n => {
+				if (!n || typeof n !== 'object' || found) return;
+				if (Array.isArray(n)) { n.forEach(walk); return; }
+				if (n.type === 'ContinueStatement') { found = true; return; }
+				// A nested loop keeps its own `continue`
+				if (n !== node && ['WhileStatement', 'ForStatement', 'DoWhileStatement'].includes(n.type)) return;
+				for (const key of ['children', 'statements', 'body', 'consequent', 'alternate',
+					'test', 'update', 'init', 'expression', 'argument', 'left', 'right']) {
+					const c = n[key];
+					if (Array.isArray(c)) c.forEach(walk);
+					else if (c && typeof c === 'object') walk(c);
+				}
+			};
+			walk(node);
+			return found;
+		};
+
+		const scopeOf = node => node?.scope ?? node?.parent?.scope ?? this.globalScope;
+
+		const walkStatements = node => {
+			if (!node || typeof node !== 'object') return;
+			if (Array.isArray(node)) { node.forEach(walkStatements); return; }
+
+			// Depth first, so nested `for` loops are converted from the inside out
+			for (const key of ['statements', 'body', 'consequent', 'alternate', 'functions']) {
+				const c = node[key];
+				if (Array.isArray(c)) c.forEach(walkStatements);
+				else if (c && typeof c === 'object') walkStatements(c);
+			}
+
+			if (!Array.isArray(node.statements)) return;
+			for (let i = 0; i < node.statements.length; i++) {
+				const stmt = node.statements[i];
+				if (!stmt || stmt.type !== 'ForStatement') continue;
+				if (containsContinue(stmt.body ?? stmt)) {
+					this.addWarning(`Left a 'for' loop alone because its body uses 'continue'`);
+					continue;
+				}
+				this.replaceForWithWhile(node, i, stmt, scopeOf);
+				converted++;
+			}
+		};
+
+		walkStatements(this.ast);
+		// New scopes were introduced: make sure they get their constant tables
+		if (converted > 0) this.modified = true;
+	}
+
+	/**
+	 * Replace `statements[index]` (a ForStatement) with the equivalent
+	 * `while` form.
+	 *
+	 * @param {ASTNode} holder the compound statement holding the loop
+	 * @param {number} index
+	 * @param {ASTNode} forNode
+	 * @param {(node: ASTNode) => Scope} scopeOf
+	 */
+	replaceForWithWhile(holder, index, forNode, scopeOf) {
+		const outerScope = scopeOf(forNode);
+		const update = forNode.update;
+		const body = forNode.body;
+
+		// `body; update;` -- keep the body's own compound when there is one, so
+		// that its scope (and any symbols in it) survive untouched.
+		let newBody = body;
+		if (body && body.type === 'CompoundStatement') {
+			if (update) {
+				const updStmt = new ASTNode('ExpressionStatement');
+				updStmt.addChild(update);
+				update.parent = updStmt;
+				updStmt.parent = body;
+				body.statements.push(updStmt);
+			}
+		} else {
+			const compound = ASTBuilder.compoundStatement();
+			if (body) { compound.statements.push(body); body.parent = compound; }
+			if (update) {
+				const updStmt = new ASTNode('ExpressionStatement');
+				updStmt.addChild(update);
+				update.parent = updStmt;
+				updStmt.parent = compound;
+				compound.statements.push(updStmt);
+			}
+			const bodyScope = new Scope(outerScope, 'l', compound, 'forbody');
+			compound.scope = bodyScope;
+			outerScope.children.push(bodyScope);
+			newBody = compound;
+		}
+
+		const whileNode = new WhileStatementNode(forNode.test ?? null, newBody);
+		whileNode.parent = holder;
+		// A statement's scope is the one holding it (the `for` had the same)
+		whileNode.scope = outerScope;
+		if (newBody) newBody.parent = whileNode;
+		if (forNode.test) forNode.test.parent = whileNode;
+
+		let replacement = whileNode;
+		if (forNode.init) {
+			const compound = ASTBuilder.compoundStatement();
+			const initStmt = forNode.init.type === 'ExpressionStatement'
+				? forNode.init
+				: (() => {
+					const st = new ASTNode('ExpressionStatement');
+					st.addChild(forNode.init);
+					forNode.init.parent = st;
+					return st;
+				})();
+			initStmt.parent = compound;
+			compound.statements.push(initStmt);
+			whileNode.parent = compound;
+			compound.statements.push(whileNode);
+			const scope = new Scope(outerScope, 'l', compound, 'forinit');
+			compound.scope = scope;
+			outerScope.children.push(scope);
+			compound.parent = holder;
+			replacement = compound;
+		}
+
+		holder.statements[index] = replacement;
+		this.modified = true;
 	}
 
 	/**

@@ -3,6 +3,7 @@
 // Automatically gather specified units around the player.
 // Note: this is actually a group control (although what it does is randomly)
 // choose a number of members each time
+#pragma optimize(array)
 
 auto device message1;
 //auto device message2;
@@ -10,8 +11,8 @@ auto device switch1;
 
 const float gatherRadius = 5.0;
 // Type of units to bind
-const unit_t* bindings = {@flare};
-const int* bindLimit = {3};
+const unit_t bindings[1] = {@flare};
+const int bindLimit[1] = {3};
 const int bindingsCount = 1;    // Maximum 10
 
 const int serial = ((int)@thisX) * 1000 + ((int)@thisY);

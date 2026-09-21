@@ -1,0 +1,11 @@
+/* EXPECT: 10 */
+/* The loop writes a GLOBAL variable; the write must survive the optimization. */
+auto device message1;
+int sid = 0;
+void foo() { sid++; }
+void main() {
+    int i = 0;
+    while (i < 10) { foo(); i++; }
+    print(sid);
+    printflush(message1); stop();
+}
