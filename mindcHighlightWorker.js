@@ -59,7 +59,11 @@ self.onmessage = async event => {
 
 	try {
 		const source = code ?? '';
-		const lexer = new Lexer(source, {}, true);
+		/*
+		第 5 个参数 allowIncludeFetch = false：高亮只做词法扫描，
+		绝不能让 `#include` 去发请求 —— 否则每敲几个字符就重新拉一遍被引用的文件。
+		*/
+		const lexer = new Lexer(source, {}, true, {}, false);
 		const result = await lexer.tokenize();
 		if (id !== latestId) return;            // 已有更新的请求，本次作废
 

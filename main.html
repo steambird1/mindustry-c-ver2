@@ -102,6 +102,25 @@
             font-size: 14px;
             line-height: 1.4;
             background-color: transparent;
+            /*
+            着色层（.code-highlight，DOM 中在后 = 绘制在上）已经画出了全部文字，
+            textarea 自己的文字必须透明，否则两层文字叠在一起。
+            对普通字形两层正好重合、看不出来；但注释是斜体，斜着的绿色字形盖不住
+            下面正体的黑色字形，于是"绿斜体 + 黑正体"同时可见（即报告的叠加）。
+            */
+            color: transparent;
+            -webkit-text-fill-color: transparent; /* Safari */
+            caret-color: #333;                     /* 光标仍然可见 */
+        }
+
+        /* 正在输入、着色还没跟上时：临时显示 textarea 自身的文字并隐藏着色层，
+           这样刚敲进去的字符立刻可见，不会等防抖；两层永不同时出现。 */
+        .code-container.pending .code-editor {
+            color: #333;
+            -webkit-text-fill-color: #333;
+        }
+        .code-container.pending .code-highlight {
+            visibility: hidden;
         }
         
         .code-highlight {
@@ -121,19 +140,22 @@
             background-color: transparent;
         }
         
-        /* 语法高亮颜色 */
+        /* 语法高亮颜色
+           注：着色层现在是唯一可见的文字层，因此配色要能在白底上看清；
+               原先沿用的 VS Code 深色主题色（#d4d4d4 / #b5cea8 / #ce9178 / #9cdcfe）
+               在白底上几乎看不见，这里统一换成深色版本，色相互相可辨。 */
         .keyword { color: #569cd6; font-weight: bold; }
-        .identifier { color: #d4d4d4; }
-        .number { color: #b5cea8; }
-        .string { color: #ce9178; }
-        .operator { color: #d4d4d4; }
-        .punctuator { color: #d4d4d4; }
+        .identifier { color: #333; }
+        .number { color: #116329; }
+        .string { color: #a31515; }
+        .operator { color: #333; }
+        .punctuator { color: #333; }
         /* 注释：绿色 + 斜体 */
         .comment { color: #6a9955; font-style: italic; }
         /* 预处理指令（#pragma / #define ...）：青色 + 加粗，与上面所有色相都不同 */
         .directive { color: #0b7a8c; font-weight: 600; }
-        .special { color: #c586c0; }
-        .predefined { color: #9cdcfe; }
+        .special { color: #8250df; }
+        .predefined { color: #8a5a00; }
         
         .output-container {
             height: 300px;
@@ -430,6 +452,8 @@ void main() {
                             <li>语法高亮与编译都在后台线程（Web Worker）中执行，编译期间仍可继续编辑；编译中再点按钮即可取消。</li>
                             <li>需与 <code>mindcHighlightWorker.js</code>、<code>mindcCompileWorker.js</code> 放在同一目录（需通过 HTTP 服务访问，直接双击打开 file:// 会降级为主线程）。</li>
                             <li>大文件按行分组着色：仅对当前可见区域生成标签，其余以纯文本输出，因此十几万字符的源码也能正常上色，且与编辑器行列严格对齐。</li>
+                            <li>注释为绿色斜体、预处理指令（<code>#pragma</code> 等）为青色加粗；着色过程中编辑器文字由着色层单独提供，不会与黑色正文叠加。</li>
+                            <li><code>#include</code> 只在点击"编译"时真正抓取，且同一文件只取一次（含失败结果）；输入时的语法高亮不会发起任何网络请求。</li>
                         </ol>
                     </div>
                 </div>
@@ -522,6 +546,18 @@ void main() {
             // 行号只在行数变化时才重建
             let lastLineCount = -1;
 
+            /*
+            "待着色"状态：内容变了但着色层还没更新。
+            期间显示 textarea 自身的文字（黑色）并隐藏着色层，两层永不同时出现，
+            既避免了叠加，也保证刚敲下的字符立刻可见。
+            */
+            const codeContainer = document.querySelector('.code-container');
+            function markPending() { codeContainer.classList.add('pending'); }
+            function markFresh(code) {
+                if (code !== undefined && code !== codeInput.value) return;  // 又变了，继续等
+                codeContainer.classList.remove('pending');
+            }
+
             // 上一次渲染出来的高亮 HTML：内容没变就不必再动 DOM
             let lastHighlightHTML = '';
 
@@ -579,10 +615,12 @@ void main() {
             /* ------------------------------------------------------------------------------ */
             
             // 初始化行号显示
+            markPending();          // 首次着色完成前，先显示编辑器自身文字，避免空白
             updateLineNumbers();
             
             // 监听代码输入变化
             codeInput.addEventListener('input', function() {
+                markPending();            // 先让刚输入的字符立刻可见（未经着色）
                 updateLineNumbers();
                 scheduleHighlight();   // 防抖：不再每次按键都全量重算高亮
             });
@@ -606,6 +644,7 @@ void main() {
                     if (!range) return;
                     if (range.first === lastRange.first && range.last === lastRange.last) return;
                     renderHighlight(lastRenderCode, lastRenderTokens);
+                    markFresh(lastRenderCode);
                 });
             }
             
@@ -630,7 +669,9 @@ void main() {
                 lastLineCount = -1;
                 updateLineNumbers();
                 if (highlightTimer) { clearTimeout(highlightTimer); highlightTimer = null; }
-                applySyntaxHighlighting();
+                lastHighlightHTML = '';
+                codeHighlight.innerHTML = '';
+                markFresh('');          // 两边都空，无需着色层
             });
             
             // 复制输出按钮
@@ -675,6 +716,7 @@ void main() {
                         lastHighlightHTML = '';
                         codeHighlight.innerHTML = '';
                     }
+                    markFresh(code);
                     return;
                 }
 
@@ -685,6 +727,7 @@ void main() {
                 whenIdle(() => {
                     if (codeInput.value !== code) return;   // 内容又变了，等下一次
                     renderHighlight(code, tokens);
+                    markFresh(code);                        // 着色层已是最新，可以显示它了
                 });
             }
 
@@ -744,7 +787,8 @@ void main() {
 
                 // 主线程降级路径：结构与 Worker 保持一致（注释/指令也一并扫描）
                 try {
-                    const lexer = new Lexer(code, {}, true);
+                    // 第 5 个参数 false = 不抓取 #include 的文件（高亮不需要，也绝不该发请求）
+                    const lexer = new Lexer(code, {}, true, {}, false);
                     const result = await lexer.tokenize();
                     if (mySeq !== highlightSeq) return null;
                     const list = result.tokens;
@@ -776,6 +820,7 @@ void main() {
                     if (mySeq === highlightSeq) {
                         lastHighlightHTML = escapeHtml(code);
                         codeHighlight.innerHTML = lastHighlightHTML;
+                        markFresh(code);   // 纯文本也是"最新"的，可以显示着色层
                     }
                     return null;
                 }
@@ -1238,6 +1283,7 @@ void main() {
                 const exampleCode = ``; // leave it blank now
                 
                 codeInput.value = exampleCode;
+                markPending();
                 lastLineCount = -1;
                 updateLineNumbers();
                 await applySyntaxHighlighting();
