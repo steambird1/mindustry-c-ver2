@@ -1,3 +1,4 @@
+/* EXPECT: 0 0 0 */
 auto device message1;
 auto device cell1;
 void main() {

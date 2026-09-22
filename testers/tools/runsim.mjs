@@ -6,10 +6,31 @@
  */
 
 import fs from 'fs';
+import path from 'path';
 import { Compiler } from './src/mindc.js';
 import { AttributeClass } from './src/mindcBase.js';
 import { MemoryBlock, } from './src/mindcGeneratorBase.js';
-import { runProgram, makeDevice, defaultLinks } from './sim.mjs';
+import { runProgram, runProcessors, makeDevice, defaultLinks } from './sim.mjs';
+
+/*
+`#include "merui.h"` is fetched with `fetch('/include/merui.h')` -- that path
+is the web server's, and there is no server here. Answering it from the
+project's own `include/` directory is what makes the header tests runnable
+from Node at all.
+*/
+const INCLUDE_ROOT = path.resolve(import.meta.dirname ?? '.', 'include');
+const nodeFetch = globalThis.fetch;
+globalThis.fetch = async (url, options) => {
+	const text = String(url ?? '');
+	if (text.startsWith('/include/')) {
+		const file = path.join(INCLUDE_ROOT, text.slice('/include/'.length));
+		if (fs.existsSync(file)) {
+			return new Response(fs.readFileSync(file, 'utf8'), { status: 200 });
+		}
+		return new Response('', { status: 404 });
+	}
+	return nodeFetch ? nodeFetch(url, options) : Promise.reject(new Error(`fetch is not available (${text})`));
+};
 
 export async function compileAndRun(source, memoryBlocks = [{ name: 'bank1', size: 64 }, { name: 'bank2', size: 64 }], extraAttributes = {}) {
 	const config = new AttributeClass();
@@ -51,18 +72,89 @@ export async function simulate(pathOrSource, memoryBlocks, extraAttributes = {})
 	for (const m of source.matchAll(/\/\/\s*SENSOR:\s*([A-Za-z_][\w]*)\s+(@\w+)\s+(-?\d+(?:\.\d+)?)/g)) {
 		sensors.set(`${m[1]} ${m[2]}`, Number(m[3]));
 	}
+	/*
+	`int *remote` and friends need a SECOND program: the peer that owns the
+	variables being reached. A test declares one with
+	    // PEER: processor1                 (uses <this file>.peer.c)
+	    // PEER: processor1=other.c, p2=third.c
+	Peers are compiled with the same memory blocks and run FIRST, so that the
+	main program finds registers that already exist -- `int *remote` reads
+	`q_block` / `q_pos` straight out of the peer.
+	*/
+	const peerSources = [];
+	if (typeof pathOrSource === 'string' && /\.c$/.test(pathOrSource)) {
+		const dir = path.dirname(pathOrSource);
+		const base = path.basename(pathOrSource, '.c');
+		for (const m of source.matchAll(/\/\/\s*PEER:\s*([^\n]*)/g)) {
+			for (const part of m[1].split(',')) {
+				const spec = part.trim();
+				if (!spec) continue;
+				const [nm, file] = spec.split('=').map(x => x.trim());
+				if (!nm) continue;
+				const target = path.join(dir, file || `${base}.peer.c`);
+				if (!fs.existsSync(target)) {
+					return { success: false, errors: [`peer program '${target}' not found`], output: '', warnings: [] };
+				}
+				const { result: pr } = await compileAndRun(fs.readFileSync(target, 'utf8'), blocks, extraAttributes);
+				if (!pr.success) {
+					return {
+						success: false,
+						errors: (pr.errors ?? []).map(e => `peer ${nm}: ${e.message ?? String(e)}`),
+						output: '', warnings: []
+					};
+				}
+				peerSources.push({ name: nm, deviceName: nm, code: String(pr.code ?? '') });
+			}
+		}
+	}
+	const links = defaultLinks(blocks);
+	/*
+	What a name really is decides whether the program can even run: `read` /
+	`write` / `memsp` need a building with memory cells, `remote` needs
+	ANOTHER PROCESSOR (one that owns variables of its own), and `printflush`
+	needs a message board. Guessing wrong turns a correct program into a
+	"memory index out of range" trap, so the kind is derived from how the name
+	is used in the source:
+
+	    `// DEVICES: name=kind`   > being one of the linked memory blocks
+	    > being flushed to        > looking like a processor
+	    > used by read/write/memsp > a message board (the default)
+	*/
+	const flushed = new Set([...source.matchAll(/\b(?:printflush|drawflush)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)/g)].map(m => m[1]));
+	const inMemory = new Set([...source.matchAll(/\b(?:read|write|memsp)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*[,)]/g)].map(m => m[1]));
+	const looksLikeProcessor = name => /^(?:proc|processor|micro)/i.test(name) || /processor/i.test(name);
+	const makeFor = (name, kind) => {
+		if (kind === 'memory') return makeDevice('@memory-cell', name, 64);
+		if (kind === 'container') return makeDevice('@container', name);
+		if (kind === 'processor') return makeDevice('@processor', name);
+		return makeDevice('@message', name);
+	};
 	deviceNames.forEach(name => {
-		const kind = askedKinds.get(name) ?? 'message';
-		if (kind === 'memory') devices[name] = makeDevice('@memory-cell', name, 64);
-		else if (kind === 'container') devices[name] = makeDevice('@container', name);
-		else devices[name] = makeDevice('@message', name);
+		const linked = links.find(l => l.name === name && l.cells.length > 0);
+		const kind = askedKinds.get(name)
+			?? (linked ? 'memory' : null)
+			?? (flushed.has(name) ? 'message' : null)
+			?? (looksLikeProcessor(name) ? 'processor' : null)
+			?? 'memory';
+		// A linked memory block must stay THE SAME object as the link.
+		devices[name] = (kind === 'memory' && linked) ? linked : makeFor(name, kind);
 	});
 	// Extra devices used by the program (displays etc.)
 	for (const m of source.matchAll(/\b(printflush|drawflush)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)/g)) {
 		if (!devices[m[2]]) devices[m[2]] = makeDevice('@message', m[2]);
 	}
+	/*
+	A building is only reachable because it is LINKED: that is how `getlink`
+	hands it out and how `memsp` finds it. So every named building joins the
+	link list (after the memory blocks the compiler was given, so their indices
+	stay where programs expect them), unless the test already linked it.
+	*/
+	for (const [name, dev] of Object.entries(devices)) {
+		if (dev.kind === 'processor' || dev.vars instanceof Map) continue;	// a peer processor is not wired here
+		if (links.some(l => l === dev || l.name === name)) continue;
+		links.push(dev);
+	}
 
-	const links = defaultLinks(blocks);
 	/*
 	Some tests need a building that is really LINKED (that is what `memsp`
 	searches through), not merely named.
@@ -85,8 +177,7 @@ export async function simulate(pathOrSource, memoryBlocks, extraAttributes = {})
 	*/
 	const core = makeDevice('@core', 'core1');
 	devices.core1 = core;
-	const proc = runProgram(String(result.code ?? ''), {
-		links, devices, maxSteps: 5_000_000,
+	const worldOptions = {
 		sensorProvider: sensors.size
 			? (dev, what) => {
 				const key = `${dev?.name ?? dev} ${what}`;
@@ -95,6 +186,28 @@ export async function simulate(pathOrSource, memoryBlocks, extraAttributes = {})
 			: null,
 		ulocateProvider: () => [11, 22, 1, core],
 		ucontrolProvider: () => true
+	};
+	if (peerSources.length) {
+		const sources = peerSources.map(p => ({ name: p.name, deviceName: p.deviceName, code: p.code }));
+		sources.push({ name: '__main__', code: String(result.code ?? '') });
+		const world = runProcessors(sources, {
+			memoryBlocks: blocks, devices, maxSteps: 5_000_000, ...worldOptions
+		});
+		return {
+			success: true,
+			errors: [],
+			warnings: (result.warnings ?? []).map(w => w.message ?? String(w)),
+			output: world.output,
+			outputs: world.outputs,
+			trap: world.trap,
+			steps: world.steps,
+			lines: (String(result.code ?? '').split('\n')).filter(l => l.trim()).length,
+			code: String(result.code ?? '')
+		};
+	}
+	const proc = runProgram(String(result.code ?? ''), {
+		links, devices, maxSteps: 5_000_000,
+		...worldOptions
 	});
 	return {
 		success: true,

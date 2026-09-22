@@ -13,8 +13,6 @@
  * 2: Token algorithm
 */
 
-#ifndef NO_FILTER_ALGO
-
 // Remote version
 inline void rpeinit(int me, remote bool flag[2], remote int *turn) {
 	flag[0] = false;
@@ -68,4 +66,3 @@ inline void rpemunlock(int me, int total, remote int level[]) {
 	level[me] = 0;
 }
 
-#endif

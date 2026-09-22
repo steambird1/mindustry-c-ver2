@@ -403,6 +403,12 @@ export function arithmetic(glob, op, left, right, type = null) {
 	// pointer (+|-) integer  ->  move the pointer
 	if ((left instanceof PointerRet) && !(right instanceof PointerRet) && isAddLike) {
 		const base = left.get();				// read the pointer out (once!)
+		if (base instanceof NamePointerRet || base instanceof NameStructPointerRet
+			|| base instanceof RemotePointerRet) {
+			throw new InfrastructureNotImplementedExpection(
+				'pointer arithmetic on a pointer that holds a name: it names a register, '
+				+ 'so it has no address that could be moved');
+		}
 		const step = right.materialize();	// own temporary symbol: safe against calls
 		const target = glob.tmp(resultType, 'pointer');
 		return new RefPointerRet(glob, [
@@ -1926,10 +1932,13 @@ export class LookupArrayRet extends ArrayRet {
 			this processor's own register of the same name.
 			*/
 			if (this.deviceReg) {
-				const target = glob.tmp(this.elementTypeInfo);
-				return valueClassOf(glob, this.elementTypeInfo).create(glob,
-					[InstructionBuilder.read(target, this.deviceReg, `"${at}"`)],
-					target, this.elementTypeInfo, true);
+				/*
+				It has to be a SLOT, not the value read out of it: `ru[2] = 7`
+				has to WRITE over there. Returning a read result here made the
+				write land in a temporary and vanish.
+				*/
+				return new RemoteSlotRet(glob, this.deviceReg, `"${at}"`,
+					this.elementTypeInfo);
 			}
 			return valueClassOf(glob, this.elementTypeInfo).create(glob, [],
 				at, this.elementTypeInfo, false);
@@ -2491,6 +2500,136 @@ export class RemotePointerRet extends PointerRet {
  * processor, named `<array>_<index>`, exactly as an `embedded_divided` array
  * would be here.
  */
+/**
+ * One element of a `NameArrayRet`, reached through the name its register
+ * holds.
+ */
+class NameArraySlotRet extends VariableRet {
+
+	/**
+	 * @param {Globals} glob
+	 * @param {NameArrayRet} array
+	 * @param {{instructions: any[], name: string, constant: boolean, value: number?}} operand
+	 */
+	constructor(glob, array, operand) {
+		super(glob, operand.instructions, array.name, array.elementTypeInfo, false);
+		this.array = array;
+		this.operand = operand;
+	}
+
+	/**
+	 * A constant subscript names the register that holds the element's NAME
+	 * outright, so the access is a single `read <device> <that register>`.
+	 */
+	get() {
+		const glob = this.glob;
+		const target = glob.tmp(this.type);
+		const tn = nameOf(target);
+		if (this.operand.constant) {
+			const i = this.operand.value;
+			if (i < 0 || i >= this.array.length) {
+				throw new InfrastructureNotImplementedExpection('subscript out of range');
+			}
+			return valueClassOf(glob, this.type).create(glob,
+				[this.instructions,
+					InstructionBuilder.read(tn, this.array.device, this.array.elementName(i))],
+				tn, this.type, true);
+		}
+		const chosen = glob.tmp(null, 'nmarr');
+		const cn = nameOf(chosen);
+		const parts = [this.instructions,
+			InstructionBuilder.set(cn, this.array.elementName(0))];
+		for (let i = 1; i < this.array.length; i++) {
+			parts.push(InstructionBuilder.selectx(cn, `equal ${this.operand.name} ${i}`,
+				this.array.elementName(i), cn));
+		}
+		parts.push(InstructionBuilder.read(tn, this.array.device, cn));
+		return valueClassOf(glob, this.type).create(glob, parts, tn, this.type, true);
+	}
+
+	/**
+	 * Writing goes THROUGH the name: `write <value> <device> <name register>`.
+	 * That is what makes the write land in the caller's array instead of in a
+	 * copy -- a non-memory array is passed by reference, like every array in C.
+	 */
+	set(other) {
+		const glob = this.glob;
+		const value = other.get().convertTo(this.type ?? other.type);
+		if (this.operand.constant) {
+			const i = this.operand.value;
+			if (i < 0 || i >= this.array.length) {
+				throw new InfrastructureNotImplementedExpection('subscript out of range');
+			}
+			return valueClassOf(glob, this.type).create(glob,
+				[this.instructions, value.instructions,
+					InstructionBuilder.write(value.name, this.array.device, this.array.elementName(i))],
+				value.name, this.type, false);
+		}
+		const chosen = glob.tmp(null, 'nmarr');
+		const cn = nameOf(chosen);
+		const parts = [this.instructions, value.instructions,
+			InstructionBuilder.set(cn, this.array.elementName(0))];
+		for (let i = 1; i < this.array.length; i++) {
+			parts.push(InstructionBuilder.selectx(cn, `equal ${this.operand.name} ${i}`,
+				this.array.elementName(i), cn));
+		}
+		parts.push(InstructionBuilder.write(value.name, this.array.device, cn));
+		return valueClassOf(glob, this.type).create(glob, parts, value.name, this.type, false);
+	}
+}
+
+/**
+ * An array reached through the NAMES of its elements.
+ *
+ * This is how an array is handed to a FUNCTION. A non-memory array has no
+ * address, so a pointer cannot be handed over -- but its elements do have
+ * names, and a name is an ordinary value that fits in a register. So the
+ * parameter becomes one register per element, each holding the NAME of the
+ * caller's element:
+ *
+ *     set g:.f:test.s_0 "g:.r_0"      <- at the call site
+ *     write 1 @this g:.f:test.s_0     <- inside the function
+ *
+ * Going through the name is what makes this pass BY REFERENCE: the write
+ * really does change the caller's array. Copying the values in instead would
+ * make `s[1] = 1` write into the parameter's own registers and lose it.
+ *
+ * `deviceReg` is null for a local array (accessed with `read/write @this`) and
+ * the processor register for a `remote` array, whose elements live in another
+ * processor.
+ */
+export class NameArrayRet extends ArrayRet {
+
+	/**
+	 * @param {Globals} glob
+	 * @param {string} baseName Element `i`'s name lives in `baseName_i`
+	 * @param {TypeInfo?} type
+	 * @param {number} length
+	 * @param {string?} [deviceReg] Register holding the other processor
+	 * @param {any} [instructions=[]]
+	 */
+	constructor(glob, baseName, type, length, deviceReg = null, instructions = []) {
+		super(glob, instructions, baseName, type, false, length);
+		this.deviceReg = deviceReg;
+		this.setAttribute('isNameArray', true);
+		this.setAttribute('disallowReplacement', true);
+	}
+
+	/** Where element `i`'s NAME is stored. */
+	elementName(index) {
+		return `${this.name}_${index}`;
+	}
+
+	/** `@this`, or the register holding the other processor. */
+	get device() {
+		return this.deviceReg ?? '@this';
+	}
+
+	element(index) {
+		return new NameArraySlotRet(this.glob, this, operandOf(this.glob, index));
+	}
+}
+
 export class RemoteArrayRet extends VariableRet {
 
 	/**
@@ -2540,6 +2679,11 @@ export class RemoteArrayRet extends VariableRet {
 			}
 		}
 		return new RemoteSlotRet(glob, this.deviceReg, nm, inner, instructions);
+	}
+
+	/** `element(i)` is the same access as `subscript(i)`; both are `ru[i]`. */
+	element(index) {
+		return this.subscript(index);
 	}
 }
 
@@ -3052,6 +3196,228 @@ export class NameStructDerefRet extends StructRefRet {
 	}
 }
 
+/* ------------------------------------------------------------------ *
+ * Array handles -- how an array travels as a VALUE
+ * ------------------------------------------------------------------ */
+
+/**
+ * The register that holds the entry point of a helper.
+ *
+ * `FunctionRegisterer` emits `op add _<name> @counter 1` at the head of every
+ * function, so the address of `<name>` lives in `_<name>`.
+ *
+ * @param {string} key
+ * @returns {string}
+ */
+function helperAddressOf(key) {
+	return `_${key}`;
+}
+
+/**
+ * How one element of an array is reached, in the shape a helper needs.
+ *
+ * @param {ArrayRet} array
+ * @returns {{length: number, device: string, names: string[], dynamic: boolean}?}
+ *          null when this array has no such description (so no handle exists)
+ */
+function handleShapeOf(array) {
+	if (!array) return null;
+	const device = array.deviceReg ?? '@this';
+	// A remote array: its elements are registers of the other processor
+	if (array instanceof RemoteArrayRet) {
+		const names = [];
+		for (let i = 0; i < array.length; i++) names.push(`${array.targetAssembly}_${i}`);
+		return { length: array.length, device, names, dynamic: false };
+	}
+	if (array instanceof LookupArrayRet) {
+		return { length: array.length, device, names: array.names ?? [], dynamic: false };
+	}
+	if (array instanceof NameArrayRet) {
+		/*
+		`s_i` does not hold the element -- it holds the NAME of the element, so
+		every access is one more level of indirection.
+		*/
+		const names = [];
+		for (let i = 0; i < array.length; i++) names.push(array.elementName(i));
+		return { length: array.length, device, names, dynamic: true };
+	}
+	if (typeof array.elementName === 'function') {
+		const names = [];
+		for (let i = 0; i < array.length; i++) names.push(array.elementName(i));
+		return { length: array.length, device: '@this', names, dynamic: false };
+	}
+	return null;
+}
+
+/**
+ * Build (once) the get / set helpers of an array and return their entry
+ * points.
+ *
+ * Why this exists: an array that is not laid out in memory has NO ADDRESS, so
+ * a pointer cannot be made of it -- and that is exactly what is needed when
+ * the array is handed to a function, or to a function pointer (which is passed
+ * through fixed `__param_N` slots and therefore cannot know anything about the
+ * call site). A handle is two words that DO travel as a value:
+ *
+ *     set s_get ___arrget_NAME
+ *     set s_set ___arrset_NAME
+ *
+ * After that, `s[i]` inside the function is
+ *
+ *     set __arridx i
+ *     op add __stackpos @counter 1
+ *     set @counter s_get          ; result in __arrret
+ *     set __stackpos __internal_stackpos
+ *
+ * The helper is built for the CALLER's array, so the write really lands in the
+ * caller's array -- the array stays passed by reference, as in C.
+ *
+ * @param {Globals} glob
+ * @param {ArrayRet} array
+ * @returns {{instructions: any[], get: string?, set: string?}?}
+ *          null when this array cannot be described by a handle at all
+ */
+export function ensureArrayHandle(glob, array) {
+	const shape = handleShapeOf(array);
+	if (!shape || shape.length <= 0) return null;
+	const reg = glob?.funcReg;
+	if (!reg) return null;
+	const keyOf = kind => `__arr${kind}_${String(array.name).replace(/[^A-Za-z0-9_]/g, '_')}`;
+	const build = kind => {
+		const key = keyOf(kind);
+		if (reg.functionCollection.has(key)) {
+			/*
+			Taking the address does not count as a call, and a helper nobody
+			"calls" would be dropped as dead code -- so count it by hand.
+			*/
+			reg.functionCollection.get(key).calls++;
+			return key;
+		}
+		const body = new Instruction();
+		if (kind === 'get') {
+			if (shape.dynamic) {
+				body.concat(InstructionBuilder.read('__arrret', shape.device, shape.names[0]));
+				for (let i = 1; i < shape.length; i++) {
+					const got = nameOf(glob.tmp(null, 'arrd'));
+					body.concat(InstructionBuilder.read(got, shape.device, shape.names[i]));
+					body.concat(InstructionBuilder.selectx('__arrret',
+						`equal __arridx ${i}`, got, '__arrret'));
+				}
+			} else {
+				body.concat(InstructionBuilder.set('__arrret', shape.names[0]));
+				for (let i = 1; i < shape.length; i++) {
+					body.concat(InstructionBuilder.selectx('__arrret',
+						`equal __arridx ${i}`, shape.names[i], '__arrret'));
+				}
+			}
+		} else {
+			/*
+			`select` picks a VALUE, not a target, so the NAME is selected first
+			and then written through -- the same trick a name pointer uses.
+			*/
+			const literal = i => (shape.dynamic ? shape.names[i] : `"${shape.names[i]}"`);
+			body.concat(InstructionBuilder.set('__arrsel', literal(0)));
+			for (let i = 1; i < shape.length; i++) {
+				body.concat(InstructionBuilder.selectx('__arrsel',
+					`equal __arridx ${i}`, literal(i), '__arrsel'));
+			}
+			body.concat(InstructionBuilder.write('__arrval', shape.device, '__arrsel'));
+		}
+		reg.addFunction(key, body, null, [], true, false, true);
+		reg.functionCollection.get(key).calls++;
+		return key;
+	};
+	return {
+		instructions: array.instructions ?? [],
+		get: helperAddressOf(build('get')),
+		set: helperAddressOf(build('set'))
+	};
+}
+
+/**
+ * An array reached through a HANDLE: two registers holding the entry points of
+ * its get / set helpers.
+ *
+ * @see ensureArrayHandle
+ */
+export class ArrayHandleRet extends ArrayRet {
+
+	/**
+	 * @param {Globals} glob
+	 * @param {string} baseName Element access uses `<baseName>_get` / `_set`
+	 * @param {TypeInfo?} type
+	 * @param {number} length
+	 * @param {any} [instructions=[]]
+	 */
+	constructor(glob, baseName, type, length, instructions = []) {
+		super(glob, instructions, baseName, type, false, length);
+		this.setAttribute('isArrayHandle', true);
+		this.setAttribute('disallowReplacement', true);
+	}
+
+	get width() {
+		return 2;
+	}
+
+	/** The address of the get helper. */
+	get getReg() {
+		return `${this.name}_get`;
+	}
+
+	/** The address of the set helper. */
+	get setReg() {
+		return `${this.name}_set`;
+	}
+
+	/**
+	 * @param {VariableRet|number|string} index
+	 * @returns {VariableRet}
+	 */
+	element(index) {
+		return new ArrayHandleSlotRet(this.glob, this, operandOf(this.glob, index));
+	}
+}
+
+/** One element of an `ArrayHandleRet`: a call to the handle's helper. */
+class ArrayHandleSlotRet extends VariableRet {
+
+	/**
+	 * @param {Globals} glob
+	 * @param {ArrayHandleRet} array
+	 * @param {{instructions: any[], name: string, constant: boolean, value: number?}} operand
+	 */
+	constructor(glob, array, operand) {
+		super(glob, operand.instructions, array.name, array.elementTypeInfo, false);
+		this.array = array;
+		this.operand = operand;
+	}
+
+	get() {
+		const glob = this.glob;
+		const target = glob.tmp(this.type);
+		const tn = nameOf(target);
+		/*
+		An INDIRECT call: the target is a register holding a line number, not a
+		name known at compile time. That is the whole point of a handle -- the
+		function does not know which array it was handed.
+		*/
+		const call = glob.funcReg.getRawFunctionCall(this.array.getReg,
+			new Map([['__arridx', this.operand.name]]), false, null);
+		return valueClassOf(glob, this.type).create(glob,
+			[this.instructions, call, InstructionBuilder.set(tn, '__arrret')],
+			tn, this.type, true);
+	}
+
+	set(other) {
+		const glob = this.glob;
+		const value = other.get().convertTo(this.type ?? other.type);
+		const call = glob.funcReg.getRawFunctionCall(this.array.setReg,
+			new Map([['__arridx', this.operand.name], ['__arrval', value.name]]), false, null);
+		return valueClassOf(glob, this.type).create(glob,
+			[this.instructions, value.instructions, call], value.name, this.type, false);
+	}
+}
+
 export function selectArrayImplementation(info) {
 	const length = info.length ?? 0;
 	const size = info.size ?? 1;
@@ -3235,8 +3601,17 @@ export function symbolRef(glob, symbol) {
 				?? symbol.remoteTarget?.requestedArrayImplementation ?? null;
 			if (targetImpl && targetImpl.startsWith('embedded_lookup_')) {
 				const wanted = CATEGORY_ALIASES[targetImpl.slice('embedded_lookup_'.length)] ?? 'item';
-				const names = (glob.semantic?.contentTable?.namesOf?.(
+				/*
+				Only the first `length` names belong to this array: the rest
+				would make it look longer than it is. (The elements are named
+				after CONTENTS -- `copper`, `lead`, ... -- which are bare names,
+				not `g:.` variables, so no declaration of ours has to exist on
+				the other side for them.)
+				*/
+				const all = (glob.semantic?.contentTable?.namesOf?.(
 					wanted === 'building' ? 'block' : wanted) ?? []).map(n => n.replace(/^@/, ''));
+				const length = arrayLengthOfType(type);
+				const names = (length > 0 && length < all.length) ? all.slice(0, length) : all;
 				const ret = new LookupArrayRet(glob, wanted, names, type, devReg);
 				ret.setAttribute('relevantSymbol', symbol);
 				ret.setAttribute('relevantSymbolRead', symbol);

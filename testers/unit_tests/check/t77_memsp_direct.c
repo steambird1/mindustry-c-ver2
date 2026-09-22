@@ -1,6 +1,9 @@
 /* EXPECT: 1234 */
 /* `auto device cell2_id` is a building of its own, so its link index is found
    once at start-up. */
+// LINKS: cell2_id=memory
+// DEVICES: vault1=container
+// SENSOR: vault1 @copper 1234
 auto device message1;
 auto device bank1;
 auto device cell2_id;

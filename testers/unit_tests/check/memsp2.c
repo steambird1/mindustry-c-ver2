@@ -1,3 +1,4 @@
+/* EXPECT: 555 */
 auto device message1;
 auto device bank1;
 

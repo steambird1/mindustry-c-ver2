@@ -4469,6 +4469,11 @@ export class Optimizer extends ASTVisitor {
 		*/
 		if (symbol.isVolatile || symbol.isExtern || symbol.isRemoteTarget) return false;
 		if (symbol.isAddressed) return false;
+		/*
+		Passed to a function: the callee may write into it at any time, so its
+		contents are not known constants any more.
+		*/
+		if (symbol.arrayEscapes === true) return false;
 		return true;
 	}
 
@@ -6639,12 +6644,65 @@ export class Optimizer extends ASTVisitor {
 	 * @param {any} context 
 	 * @returns {boolean} Whether the inlining is successful
 	 */
+	/**
+	 * The array an argument handed to an inlined parameter really means.
+	 *
+	 * Inlining does not deliver arguments into parameter slots -- it rebinds
+	 * the parameter to the argument's own storage. For an array that has no
+	 * address, "rebinding" can only mean: USE THE ARGUMENT'S OWN REGISTERS.
+	 * Anything else (making the parameter a fresh array of its own) copies it,
+	 * and a write inside the function then lands in the copy and is lost.
+	 *
+	 * @param {any} argNode The argument at this call site
+	 * @returns {import('./mindcSemantic.js').SymbolEntry?} null when the
+	 *          argument is not a plain array name, so nothing can be aliased
+	 */
+	arrayArgumentSymbolOf(argNode) {
+		if (!argNode || argNode.type !== 'Identifier') return null;
+		const symbol = argNode.symbol ?? null;
+		if (symbol && symbol.myType?.()?.kind === 'array') return symbol;
+		const scope = argNode.scope ?? this.currentScope ?? null;
+		const found = scope?.lookup?.(argNode.name) ?? null;
+		if (found && found.myType?.()?.kind === 'array') return found;
+		return null;
+	}
+
+	/**
+	 * Whether this call may be inlined given the arrays it hands over.
+	 *
+	 * @param {any} funcNode
+	 * @param {any} callNode
+	 * @returns {boolean}
+	 */
+	canInlineArrayArguments(funcNode, callNode) {
+		const params = funcNode.parameters ?? [];
+		for (let i = 0; i < params.length; i++) {
+			const arg = (callNode.arguments ?? [])[i];
+			if (!arg) continue;
+			const type = arg.dataType ?? null;
+			if (!type || type.kind !== 'array') continue;
+			if (this.arrayArgumentSymbolOf(arg)) continue;
+			/*
+			Not a plain array name -- there is nothing to alias to, so the
+			parameter would have to become an array of its own. Keep the real
+			call instead, which passes a handle and stays correct.
+			*/
+			return false;
+		}
+		return true;
+	}
+
 	inlineFunctionAtSite(funcNode, callNode, parentNode, context) {
 		// Cloned body must be a compound statement
 		// 检查是否适合内联
 		if (!this.isSuitableForInlining(funcNode, callNode, context)) {
 			return false;
 		}
+		/*
+		An array argument has to be aliasable, or inlining would hand the
+		function a COPY of it (see `arrayArgumentSymbolOf`).
+		*/
+		if (!this.canInlineArrayArguments(funcNode, callNode)) return false;
 		/*
 		const funcSymbol = funcNode.scope.lookup(funcNode.name);
 		if (!funcSymbol) {
@@ -6715,6 +6773,18 @@ export class Optimizer extends ASTVisitor {
 						this.duplicateVariable(funcNode.scope, param.name, ziel, symbolName);
 						const symbolTarget = ziel.lookupCurrent(symbolName);
 						symbolTarget.kind = 'variable';	// Don't be 'parameter'!
+						/*
+						An array parameter is an ALIAS, not an array of its own:
+						point it at the caller's array so that a write inside the
+						inlined body really lands there. Without this the
+						parameter gets a fresh layout and the write is lost.
+						*/
+						const aliased = this.arrayArgumentSymbolOf(callNode.arguments[index]);
+						if (aliased) {
+							symbolTarget.arrayAliasOf = aliased;
+							// It is no longer a slot that gets a handle delivered
+							symbolTarget.arrayParamRep = null;
+						}
 					}
 				}
 			});

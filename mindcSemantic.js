@@ -882,6 +882,8 @@ export class SemanticAnalyzer extends ASTVisitor {
     analyze(ast) {
         this.errors = [];
         this.warnings = [];
+        // `remote()` bindings that name an array declared further down
+        this.pendingRemoteLinks = [];
         this.currentScope = new Scope(null, 'g');
         this.currentFunction = null;
 		this.globalScope = this.currentScope;
@@ -953,7 +955,17 @@ export class SemanticAnalyzer extends ASTVisitor {
 		    register too;
 		  - anything else genuinely needs an address.
 		*/
-		this.collectAddressUses(ast);
+        this.collectAddressUses(ast);
+        /*
+        Only now is the whole program read, so only now can a `remote()` that
+        mentions an array declared further down be bound.
+        */
+        this.finalizeRemoteLinks();
+        /*
+        Only now is every call site known, so only now can each array parameter
+        be told which layout it will be given.
+        */
+        this.finalizeArrayParameters(ast);
 
         return {
             success: this.errors.length === 0,
@@ -1208,7 +1220,19 @@ export class SemanticAnalyzer extends ASTVisitor {
 						returnType: typedefNode.functionDefinition.returnType.typeName,
 						parameters: typedefNode.functionDefinition.parameters.map(param => ({
 							name: param.name,
-							type: this.getTypeNameFromTypeNode(param.type)
+							type: ((param) => {
+									/*
+									An array parameter keeps its dimensions on the
+									PARAMETER node, not on the type specifier -- so
+									`typedef void (*cb)(int s[3])` used to come out
+									as `cb{void || int}` and no array could ever be
+									handed to it.
+									*/
+									if (param.arrayDimensions?.length && !param.type?.arrayDimensions?.length) {
+										param.type.arrayDimensions = param.arrayDimensions;
+									}
+									return this.getTypeNameFromTypeNode(param.type);
+								})(param)
 						}))
 					},
 					this.globalScope,
@@ -1552,6 +1576,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 
 		// 获取返回类型名称
 		// Added after correctional conversation.
+		this.checkOverloading(node);
 		const returnTypeName = this.getTypeNameFromTypeNode(node.returnType);
 		if (!returnTypeName) {
 			this.addError(`Invalid return type for function '${node.name}'`, node.returnType.location);
@@ -2040,6 +2065,14 @@ export class SemanticAnalyzer extends ASTVisitor {
 		}
 		declarator.setAttribute('arrayImplementation', requested);
 		symbol.requestedArrayImplementation = requested;
+		/*
+		An array named after a lookup table can only be as long as that table.
+		*/
+		const category = this.lookupCategoryOf(requested);
+		if (category) {
+			this.checkLookupCapacity(symbol.name, category,
+				this.arrayDimensionsOf(symbol.myType?.())[0] ?? 0, initializer.location);
+		}
 		declarator.initializer = contents;
 		if (contents) {
 			this.recordArrayInitialValues(symbol, contents, requested === 'encoded',
@@ -2255,9 +2288,19 @@ export class SemanticAnalyzer extends ASTVisitor {
 	/**
 	 * `remote T x = remote(<processor>, <variable>);`
 	 *
-	 * The processor may be any device expression; the variable has to be one
-	 * that the OTHER processor really has a register for, so it must be a
-	 * global (a local's register name depends on optimisations that differ
+	 * `remote(dev, x)` means: ON THE DEVICE `dev` there is a variable named
+	 * `x`, and this declaration operates THAT one. Every access is a
+	 * `read` / `write` to `dev`, so the variable need not be declared in this
+	 * program at all -- its NAME is all that is needed.
+	 *
+	 * A declaration of the same name here is therefore only a DESCRIPTION of
+	 * the variable over there (its type, and for an array its length and
+	 * layout); it does NOT become the thing being read and written. The one
+	 * exception is `remote(@this, x)`: the device is this very processor, so
+	 * the local declaration really is the target.
+	 *
+	 * `dev` may be any device expression. For a variable over there it should
+	 * be a global (a local's register name depends on optimisations that differ
 	 * between two programs).
 	 *
 	 * The initializer is consumed: what is left is the binding, which the code
@@ -2304,6 +2347,12 @@ export class SemanticAnalyzer extends ASTVisitor {
 			? String(layoutNode.raw ?? layoutNode.value).replace(/^"|"$/g, '') : null;
 		const deviceNode = args[0];
 		const targetNode = args[1];
+		/*
+		`remote(@this, x)` is the one case where the local declaration IS the
+		target: the device named is this very processor.
+		*/
+		const selfDevice = deviceNode?.type === 'Identifier'
+			&& String(deviceNode.name) === '@this';
 		// `&s` gives a pointer, a plain `s` binds the variable itself
 		let inner = targetNode;
 		if (inner.type === 'UnaryExpression' && inner.operator === '&') inner = inner.argument;
@@ -2340,7 +2389,52 @@ export class SemanticAnalyzer extends ASTVisitor {
 			declarator.initializer = null;
 			return;
 		}
+		if (!targetSymbol && inner.type === 'Identifier' && !selfDevice) {
+			/*
+			The variable lives on the OTHER processor, so all that is needed is
+			its name -- declaring it here just to be able to name it would be
+			pointless, and would also suggest that THIS program's variable is
+			the one being used.
+			*/
+			symbol.remoteDevice = deviceNode;
+			symbol.remoteName = `${this.globalScope.getPath()}.${inner.name}`;
+			symbol.isRemote = true;
+			if (layout) symbol.requestedArrayImplementation = layout;
+			/*
+			Without a declaration here the length is unknown, and an array
+			cannot be reached element by element without it.
+			*/
+			if (finalType && finalType.kind === 'array') {
+				const dims = this.arrayDimensionsOf(finalType);
+				if (!dims.length || dims[0] === null) {
+					this.addError(`'${inner.name}' is not declared here, so remote() cannot know `
+						+ `how long the array on the other processor is: give the length, as in `
+						+ `'remote int ru[5] = remote(processor1, ${inner.name})'`, location);
+					declarator.initializer = null;
+					return;
+				}
+			}
+			declarator.initializer = null;
+			return;
+		}
 		if (!targetSymbol) {
+			/*
+			Not declared YET: `remote int ru[] = remote(p1, u);` may well appear
+			before `int u[4];`. Nothing about this binding can be decided before
+			the whole program is read, so remember it and try again once it has
+			been -- see `finalizeRemoteLinks`.
+			*/
+			if (targetNode.type !== 'StringLiteral' && targetNode.type !== 'UnaryExpression') {
+				/*
+				Take the initializer away for now: it is a `remote(...)` call,
+				and nothing here knows how to type-check one. It is put back when
+				the binding is retried.
+				*/
+				(this.pendingRemoteLinks ??= []).push(
+					{ declarator, symbol, finalType, qualifiers, initializer: declarator.initializer });
+				declarator.initializer = null;
+				return;
+			}
 			this.addError(`'${inner.name}' is not declared, so it cannot be reached remotely`, location);
 			declarator.initializer = null;
 			return;
@@ -2374,12 +2468,40 @@ export class SemanticAnalyzer extends ASTVisitor {
 			and `lookup` names them after contents instead of after the array.
 			*/
 			const requested = targetSymbol.requestedArrayImplementation ?? null;
+			/*
+			The layout belongs to BOTH sides: the remote declaration may name it
+			(the third argument of remote()), and the array itself may. Agreeing
+			is what makes `ru[1]` mean the same register on both processors.
+			*/
+			if (layout && requested && layout !== requested) {
+				this.addError(`'${targetSymbol.name}' is declared array("${requested}"), `
+					+ `but remote() asks for "${layout}": the two processors have to agree `
+					+ `on the layout`, location);
+			}
 			if (requested === null) {
-				targetSymbol.requestedArrayImplementation = 'embedded_divided';
+				/*
+				Nothing was asked for, so the layout is chosen automatically --
+				and an automatically chosen `lookup` table is exactly what two
+				processors may guess differently. Pick the plain register layout
+				instead: it only needs the array's own name, which both sides
+				already share.
+				*/
+				targetSymbol.requestedArrayImplementation = layout ?? 'embedded_divided';
 			} else if (requested === 'encoded' || requested === 'traditional') {
 				this.addError(`A remote array has to keep its elements in registers: `
 					+ `'${targetSymbol.name}' is declared '${requested}'`, location);
-			} else if (requested === 'embedded_lookup') {
+				} else if (this.lookupCategoryOf(requested)) {
+					/*
+					Allowed, and the table is named -- but the array may not be
+					longer than that table, or the extra elements would read as 0.
+					*/
+					const effective = layout ?? requested;
+					const category = this.lookupCategoryOf(effective);
+					if (category) {
+						this.checkLookupCapacity(targetSymbol.name, category,
+							this.arrayDimensionsOf(targetSymbol.myType?.())[0] ?? 0, location);
+					}
+				} else if (requested === 'embedded_lookup') {
 				/*
 				Allowed, but only with the table named: two processors that
 				guess may well guess differently.
@@ -2393,9 +2515,15 @@ export class SemanticAnalyzer extends ASTVisitor {
 			initializer is consumed here -- so nothing would be left to keep it
 			alive and its elements would never be initialised.
 			*/
-			targetSymbol.isRemoteTarget = true;
+			if (selfDevice) targetSymbol.isRemoteTarget = true;
 		}
-		targetSymbol.isRemoteTarget = true;
+		/*
+		Only `remote(@this, x)` really uses the declaration of this program:
+		elsewhere the declaration is just a description of a variable that lives
+		on the other processor, and emitting registers for it here would only
+		waste them.
+		*/
+		if (selfDevice) targetSymbol.isRemoteTarget = true;
 		declarator.initializer = null;
 		symbol.remoteDevice = deviceNode;
 		symbol.remoteTarget = targetSymbol;
@@ -2598,7 +2726,11 @@ export class SemanticAnalyzer extends ASTVisitor {
         }
 
 		if (typeNode.arrayDimensions && typeNode.arrayDimensions.length) {
-			ptrSuffix += ' ' + typeNode.arrayDimensions.map(dim => `[${dim.value}]`).join('');
+			/*
+			An unspecified dimension (`int p[]`) has no node to read a value
+			from -- it is exactly the "any size" the caller is allowed to pass.
+			*/
+			ptrSuffix += ' ' + typeNode.arrayDimensions.map(dim => `[${dim?.value ?? ''}]`).join('');
 		}
 		
         // 如果是TypeSpecifier节点
@@ -3430,6 +3562,301 @@ export class SemanticAnalyzer extends ASTVisitor {
 		return true;
 	}
 
+    /**
+     * The name a function is emitted under.
+     *
+     * RESERVED FOR FUNCTION OVERLOADING: once several functions may share a
+     * name, the emitted name has to differ per parameter list (otherwise two
+     * overloads would collide in `FunctionRegisterer`). Today there is only one
+     * function per name, so this returns the name unchanged -- and the parts
+     * that would need it (`functionInfo`, `functionCallGraph`, the call sites)
+     * are still keyed by the plain name.
+     *
+     * @param {string} name
+     * @param {any[]} [parameterTypes]
+     * @returns {string}
+     */
+    mangleFunctionName(name, parameterTypes = []) {
+        return name;
+    }
+
+    /**
+     * How the compiler reacts to several functions sharing one name.
+     *
+     * RESERVED FOR FUNCTION OVERLOADING -- see `#pragma overload`. Not
+     * implemented yet: anything that asks for it is rejected in
+     * `visitFunctionDeclaration`.
+     *
+     * @returns {'auto' | 'default' | 'none'}
+     */
+    overloadMode() {
+        return 'none';
+    }
+
+    /**
+     * How many elements a lookup table can name, and their names.
+     *
+     * @param {string} category item | liquid | unit | building
+     * @returns {string[]}
+     */
+    lookupNamesFor(category) {
+        const table = this.contentTable;
+        if (!table?.namesOf) return [];
+        const wanted = (category === 'building') ? 'block' : category;
+        return (table.namesOf(wanted) ?? []).map(n => String(n).replace(/^@/, ''));
+    }
+
+    /**
+     * `array("embedded_lookup_item", ...)` names its elements after contents,
+     * so it cannot hold more elements than that table has names for. Without
+     * this check the extra elements silently read as 0.
+     *
+     * @param {string} name The array's name, for the message
+     * @param {string} category item | liquid | unit | building
+     * @param {number} length
+     * @param {any} location
+     * @returns {void}
+     */
+    checkLookupCapacity(name, category, length, location) {
+        const names = this.lookupNamesFor(category);
+        if (!names.length && !this.contentTable) return;	// no table: nothing to check
+        if (length > names.length) {
+            this.addError(`Array '${name}' has ${length} elements, but the '${category}' `
+                + `lookup table only names ${names.length}: use at most ${names.length}, `
+                + `or another implementation such as array("embedded_divided", ...)`,
+                location);
+        }
+    }
+
+    /**
+     * Which lookup table an array implementation string asks for.
+     *
+     * @param {string?} requested
+     * @returns {string?} item | liquid | unit | building, or null
+     */
+    lookupCategoryOf(requested) {
+        if (!requested || !String(requested).startsWith('embedded_lookup_')) return null;
+        const CATEGORY_ALIASES = {
+            item: 'item', liquid: 'liquid', unit: 'unit', block: 'building', building: 'building'
+        };
+        return CATEGORY_ALIASES[String(requested).slice('embedded_lookup_'.length)] ?? null;
+    }
+
+    /**
+     * The dimensions of an array type, outermost first. `null` marks one that
+     * was left unspecified (`int p[]`).
+     *
+     * @param {TypeInfo?} type
+     * @returns {(number|null)[]}
+     */
+    arrayDimensionsOf(type) {
+        const dims = [];
+        let current = type;
+        while (current && current.isTypeInfo && current.kind === 'array') {
+            const size = current.arraySize ?? null;
+            /*
+            Two different shapes reach this point:
+              - a VARIABLE keeps one dimension per array level, as the node the
+                program wrote (`int a[3][4]` is an array of `int[4]`);
+              - a PARAMETER keeps all of them in one place, because its type is
+                rebuilt from a name like "int [3][4]".
+            `NaN` (from `[]`) and a missing size both mean "unspecified".
+            */
+            const number = value => (Number.isFinite(Number(value)) ? Number(value) : null);
+            if (Array.isArray(size)) {
+                for (const entry of size) dims.push(number(entry));
+            } else if (typeof size === 'number') {
+                dims.push(number(size));
+            } else if (size && typeof size.value !== 'undefined') {
+                dims.push(number(size.value));
+            } else {
+                dims.push(null);
+            }
+            current = current.pointerTo ?? null;
+        }
+        return dims;
+    }
+
+    /**
+     * `void f(int p[4])` may only be handed an array with at least 4 elements;
+     * `void f(int p[][])` accepts any size. Every dimension is checked, so
+     * `void f(int p[3][4])` needs `[>=3][>=4]`.
+     *
+     * @param {string} functionName
+     * @param {{name: string, type: any}} declared The parameter as declared
+     * @param {any} arg The argument expression
+     * @param {number} index 0-based argument position
+     * @returns {void}
+     */
+    checkArrayArgumentDimensions(functionName, declared, arg, index) {
+        /*
+        The function type stores a parameter's type as a name as often as not,
+        so normalise it before looking for dimensions.
+        */
+        const paramType = this.getTypeInfo(declared?.type ?? null) ?? null;
+        if (!paramType || !paramType.isTypeInfo || paramType.kind !== 'array') return;
+        const argType = this.getExpressionType(arg);
+        if (!argType || !argType.isTypeInfo || argType.kind !== 'array') return;
+        const want = this.arrayDimensionsOf(paramType);
+        const got = this.arrayDimensionsOf(argType);
+        if (want.length !== got.length) {
+            this.addError(
+                `Argument ${index + 1} of '${functionName}' is '${this.typeToString(argType)}', `
+                + `which does not have the ${want.length} dimension(s) the parameter asks for`,
+                arg.location);
+            return;
+        }
+        for (let i = 0; i < want.length; i++) {
+            if (want[i] === null || got[i] === null) continue;   // `[]` accepts anything
+            if (got[i] < want[i]) {
+                this.addError(
+                    `Argument ${index + 1} of '${functionName}' has ${got[i]} element(s) in `
+                    + `dimension ${i + 1}, but the parameter needs at least ${want[i]}`,
+                    arg.location);
+                return;
+            }
+        }
+    }
+
+    /**
+     * Record, for each array parameter, what the call sites hand over.
+     *
+     * An array argument is never silently decayed into a pointer, because a
+     * non-memory array has no address to decay into. So the parameter has to
+     * take over the representation the caller's array uses:
+     *
+     *   - `remote`      -- the elements are registers of another processor;
+     *   - `names`       -- an embedded / encoded layout, so the elements are
+     *                      registers here and are reached by name;
+     *   - `traditional` -- an ordinary in-memory array, passed as a pointer.
+     *
+     * @param {any} callNode
+     * @param {SymbolEntry?} funcSymbol
+     * @param {{name: string, type: any}[]} expectedParams
+     * @returns {void}
+     */
+    noteArrayArguments(callNode, funcSymbol, expectedParams) {
+        if (!funcSymbol) return;
+        const scope = funcSymbol.owningScope ?? null;
+        if (!scope) return;
+        (callNode.arguments ?? []).forEach((arg, index) => {
+            const declared = expectedParams[index];
+            if (!declared) return;
+            const paramSymbol = scope.lookup(declared.name);
+            if (!paramSymbol) return;
+            const paramType = paramSymbol.myType?.() ?? null;
+            if (!paramType || paramType.kind !== 'array') return;
+            if (arg.type !== 'Identifier') return;
+            const argSymbol = this.currentScope.lookup(arg.name);
+            if (!argSymbol) return;
+            const argType = argSymbol.myType?.() ?? null;
+            if (!argType || argType.kind !== 'array') return;
+            const notes = paramSymbol.arrayArgumentNotes
+                ?? (paramSymbol.arrayArgumentNotes = {
+                    remote: false, register: false, traditional: false, requested: new Set()
+                });
+            const requested = argSymbol.requestedArrayImplementation ?? null;
+            if (argSymbol.isRemote === true) {
+                notes.remote = true;
+            } else if (requested && requested !== 'traditional') {
+                notes.register = true;
+                notes.requested.add(requested);
+            } else {
+                notes.traditional = true;
+            }
+            /*
+            The callee can write into the array, and this program cannot see
+            when it does. So the array is no longer a set of known constants --
+            without this, `print(a[1])` after a call would be folded back to the
+            value the array was initialised with and lose the write.
+            */
+            argSymbol.arrayEscapes = true;
+        });
+    }
+
+    /**
+     * Bind the `remote()` directives whose array was declared further down.
+     *
+     * @returns {void}
+     */
+    finalizeRemoteLinks() {
+        const pending = this.pendingRemoteLinks ?? [];
+        this.pendingRemoteLinks = [];
+        for (const entry of pending) {
+            entry.declarator.initializer = entry.initializer;
+            this.consumeRemoteDirective(entry.declarator, entry.symbol, entry.finalType,
+                entry.qualifiers);
+        }
+        for (const entry of (this.pendingRemoteLinks ?? [])) {
+            this.addError(`The variable of remote() is not declared anywhere in this program`,
+                entry.declarator?.location ?? null);
+        }
+        this.pendingRemoteLinks = [];
+    }
+
+    /**
+     * Turn the notes collected at every call site into one decision per array
+     * parameter. Called once, after the whole program has been visited.
+     *
+     * @param {any} ast
+     * @returns {void}
+     */
+    finalizeArrayParameters(ast) {
+        const visitScope = scope => {
+            if (!scope) return;
+            for (const symbol of scope.symbols.values()) {
+                const notes = symbol.arrayArgumentNotes;
+                if (!notes) continue;
+                const declaredRemote = symbol.isRemote === true;
+                if (declaredRemote || notes.remote) {
+                    symbol.arrayParamRep = 'handle';
+                    if (notes.traditional) {
+                        this.addError(`Parameter '${symbol.name}' is declared 'remote', `
+                            + `but is also passed an ordinary array: the elements cannot be `
+                            + `in another processor and in memory at the same time`, symbol.location);
+                    }
+                } else if (notes.register) {
+                    symbol.arrayParamRep = 'handle';
+                    if (notes.traditional) {
+                        this.addError(`Parameter '${symbol.name}' is passed both an array held in `
+                            + `registers and an ordinary in-memory array; they have no layout in common`,
+                            symbol.location);
+                    }
+                } else {
+                    symbol.arrayParamRep = 'traditional';
+                }
+            }
+            (scope.children ?? []).forEach(visitScope);
+        };
+        visitScope(this.globalScope);
+    }
+
+    /**
+     * Reject everything that only function overloading could support.
+     *
+     * @param {any} node A function declaration
+     * @returns {void}
+     */
+    checkOverloading(node) {
+        const mode = this.compiler?.overloadMode ?? null;
+        if (mode !== null && mode !== undefined) {
+            this.addError(
+                `Function overloading is not implemented yet: '#pragma overload(${mode})' cannot be used`,
+                node.location ?? null);
+        }
+        for (const param of (node.parameters ?? [])) {
+            const qualifiers = param?.type?.getAttribute?.('qualifiers') ?? [];
+            const isAuto = qualifiers.includes('auto')
+                || /\bauto\b/.test(String(this.getTypeNameFromTypeNode(param) ?? ''));
+            if (isAuto) {
+                this.addError(
+                    `Function overloading is not implemented yet: an 'auto' parameter `
+                    + `('${param?.name ?? '?'}') would need one version of this function `
+                    + `per representation`, param?.location ?? node.location ?? null);
+            }
+        }
+    }
+
     visitFunctionCall(node) {
 		if (node.callee && node.callee.type === 'Identifier' && node.callee.name === 'byname') {
 			// Keep it a call: the generator turns it into the address.
@@ -3504,7 +3931,19 @@ export class SemanticAnalyzer extends ASTVisitor {
                     arg.location
                 );
             }
+            /*
+            An array argument is NOT decayed into a pointer, so its dimensions
+            stay part of the contract: every dimension the parameter names has
+            to be at least as large as what is handed over. `void f(int p[])`
+            names nothing and therefore accepts anything.
+            */
+            this.checkArrayArgumentDimensions(readableFunctionName, expectedParams[index], arg, index);
         });
+        /*
+        An array keeps its own layout when it is passed, so the parameter has to
+        be told which layout it will be given -- see `finalizeArrayParameters`.
+        */
+        this.noteArrayArguments(node, funcSymbol, expectedParams);
 
 		if (isFunctionPointer) {
 			node.dataType = this.getTypeInfo(funcSymbol ?

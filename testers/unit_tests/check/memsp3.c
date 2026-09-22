@@ -1,3 +1,4 @@
+/* EXPECT: 77 1 0 */
 auto device message1;
 auto device bank1;
 void main() {

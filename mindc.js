@@ -426,6 +426,24 @@ export class Compiler {
 								}
 								break;
 						}
+					} else if (info.startsWith("overload")) {
+						/*
+						#pragma overload(auto|default|none)
+						Reserved for function overloading: how the compiler may
+						react to several functions sharing a name, and to an
+						`auto` parameter (one version of the function per
+						representation of the argument). None of it is
+						implemented yet -- recording the mode is what lets the
+						semantic analyzer reject it with a clear message
+						instead of silently ignoring it.
+						*/
+						const comment = info.substring(info.indexOf('(') + 1, info.lastIndexOf(')'));
+						const mode = String(comment).trim();
+						if (!['auto', 'default', 'none'].includes(mode)) {
+							throw new InternalGenerationFailure(
+								`#pragma overload expects auto, default or none, but got '${mode}'`);
+						}
+						this.overloadMode = mode;
 					} else if (info.startsWith("noinline")) {
 						/*
 						#pragma noinline        -- never inline anything automatically

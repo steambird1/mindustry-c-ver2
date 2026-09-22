@@ -21,7 +21,8 @@ import { Instruction, InstructionBuilder, InstructionReferrer, MemoryBlock, Memo
 import { findRecursiveFunctions } from "./mindcBase.js";
 
 import { ensureMemspHelper, remoteDeviceRegOf, remoteNameRegOf, RemotePointerRet, RemoteArrayRet, RemoteStoredPointerRet, LookupArrayRet, NameStructPointerRet, NameStructDerefRet,
-	RemoteStructPointerRet, arrayLengthOfType, componentCountOf, isFlatComponentType, CATEGORY_ALIASES, Globals, VariableRet, ImmediateRet, BasicRet, IntRet, BoolRet, FloatRet, ContentRet,
+	RemoteStructPointerRet,
+	NameArrayRet, ArrayHandleRet, ensureArrayHandle, arrayLengthOfType, componentCountOf, isFlatComponentType, CATEGORY_ALIASES, Globals, VariableRet, ImmediateRet, BasicRet, IntRet, BoolRet, FloatRet, ContentRet,
 	PointerRet, RefPointerRet, MemPointerRet, VolatilePointerRet, MemoryRefRet, StructRefRet,
 	symbolRef, ExportRet, valueClassOf, readThrough, writeThrough, pointerStep,
 	RegistryStructRet, NamePointerRet,
@@ -1769,10 +1770,29 @@ export class CodeGenerator extends ASTVisitor {
 			no register of its own at all).
 			*/
 			if (symbol.isExtern && !isArray) {
-				push(symbol.getAssemblySymbol());
+				/*
+				An exported POINTER is TWO registers over there (`qq_block` and
+				`qq_pos`) -- that pair is exactly what `int *remote` reads back,
+				so those two names are the ones that have to be declared. The
+				pointer's own name alone would leave the other processor reading
+				registers that do not exist.
+				*/
+				if (type && type.kind === 'pointer') {
+					push(`${symbol.getAssemblySymbol()}_block`);
+					push(`${symbol.getAssemblySymbol()}_pos`);
+				} else {
+					push(symbol.getAssemblySymbol());
+				}
 				continue;
 			}
 			if (!isArray) continue;
+			/*
+			A `remote` array is only a binding: what has to be declared are the
+			registers on the OTHER side, and those are declared by the program
+			that owns them (or, for `remote(@this, x)`, by the `extern` entry of
+			`x` itself).
+			*/
+			if (symbol.isRemote) continue;
 			if (!symbol.isExtern && symbol.arrayInitialValues && symbol.arrayInitialValues.length) continue;
 			const style = this.arrayStyleFor?.(symbol) ?? null;
 			if (!symbol.isExtern && (!style || style.type === 'traditional')) continue;
@@ -3296,7 +3316,40 @@ export class CodeGenerator extends ASTVisitor {
 	}
 
 	arrayStyleFor(symbol) {
+		/*
+		An inlined parameter has no style of its own: it borrows the caller's.
+		*/
+		if (symbol?.arrayAliasOf) return this.arrayStyleFor(symbol.arrayAliasOf);
+		/*
+		A parameter that is handed a non-memory array has to keep that shape:
+		the call site gives it names, not an address. Saying so here is also what
+		stops the array from being given memory of its own, and what lets
+		`arraySymbolOf` pick the by-name path instead of stepping a pointer.
+		*/
+		if (symbol?.arrayParamRep === 'handle' || symbol?.arrayParamRep === 'remote'
+			|| symbol?.arrayParamRep === 'names') {
+			return { type: 'embedded', implement: 'divided', reason: 'array parameter' };
+		}
+		/*
+		An ordinary in-memory array parameter is passed as a pointer, exactly as
+		it always was -- and it must NOT be auto-selected into a register layout
+		just because its own length is unknown (`int p[]`).
+		*/
+		if (symbol?.arrayParamRep === 'traditional') {
+			return { type: 'traditional', implement: null, reason: 'array parameter' };
+		}
 		if (symbol.chosenArrayStyle) return symbol.chosenArrayStyle;
+		/*
+		A `remote` array stores nothing here: its elements are registers of the
+		other processor. So it must never be given memory of its own (which is
+		what the automatic choice below would do), and its own requested layout
+		-- if any -- is what says how those elements are named.
+		*/
+		if (symbol.isRemote === true) {
+			symbol.chosenArrayStyle = { type: 'embedded', implement: 'divided',
+				reason: 'remote array' };
+			return symbol.chosenArrayStyle;
+		}
 		const forced = this.forcedTraditionalReason(symbol);
 		if (forced) {
 			symbol.chosenArrayStyle = { type: 'traditional', implement: null, reason: forced };
@@ -3346,6 +3399,29 @@ export class CodeGenerator extends ASTVisitor {
 	 */
 	arrayRetFor(symbol, pointer) {
 		const glob = this.glob;
+		/*
+		An inlined parameter is the caller's array, not an array of its own.
+		This has to be checked before anything that would give the parameter a
+		representation of its own (a handle, or a fresh register layout).
+		*/
+		if (symbol?.arrayAliasOf) return this.arrayViewOf(symbol.arrayAliasOf);
+		/*
+		A parameter holding NAMES instead of an address. Every access goes
+		through `read` / `write <device> <the name>`, which is the only way to
+		reach an array that has no address -- and the only way that writes back
+		into the caller's array.
+		*/
+		if (symbol?.arrayParamRep === 'handle' || symbol?.arrayParamRep === 'remote'
+			|| symbol?.arrayParamRep === 'names') {
+			/*
+			The parameter holds a HANDLE: two registers with the entry points of
+			the get / set helpers of the array it was handed. No device register
+			is needed -- the helper was built for the caller's array and already
+			knows which processor to talk to.
+			*/
+			const length = this.arrayLengthOf(symbol) || 0;
+			return new ArrayHandleRet(glob, symbol.getAssemblySymbol(), symbol.myType(), length);
+		}
 		const style = this.arrayStyleFor(symbol);
 		const type = symbol.myType();
 		const length = this.arrayLengthOf(symbol);
@@ -3831,7 +3907,8 @@ export class CodeGenerator extends ASTVisitor {
 		const parameter = symbol.owningScope.lookupCurrent(functionType.parameters[index].name);
 		return {
 			name: parameter.getAssemblySymbol(),
-			type: parameter.type.type
+			type: parameter.type.type,
+			parameter
 		};
 	}
 
@@ -3843,12 +3920,135 @@ export class CodeGenerator extends ASTVisitor {
 	 * @param {VariableRet} argument The already evaluated argument
 	 * @returns {VariableRet}
 	 */
-	deliverArgument(slotName, slotType, argument) {
+	/**
+	 * The array view of a symbol, whatever layout it uses.
+	 *
+	 * A remote array is not covered by `arrayRetFor`: its elements are registers
+	 * of ANOTHER processor, so the view has to name that processor instead of
+	 * being chosen from the layouts available here.
+	 *
+	 * @param {import('./mindcSemantic.js').SymbolEntry} symbol
+	 * @returns {import('./mindcInfrastructure.js').ArrayRet?}
+	 */
+	arrayViewOf(symbol) {
+		const glob = this.glob;
+		/*
+		An inlined parameter: the array IS the caller's array. Delegating is
+		what keeps the inlined body writing into it -- and what lets a
+		non-memory array be inlined at all, since an alias has no layout of
+		its own to fall back on.
+		*/
+		if (symbol?.arrayAliasOf) return this.arrayViewOf(symbol.arrayAliasOf);
+		const type = symbol?.myType?.() ?? null;
+		if (!type || type.kind !== 'array') return null;
+		if (symbol.isRemote === true) {
+			const target = symbol.remoteName ?? symbol.remoteTarget?.getAssemblySymbol?.() ?? null;
+			if (!target) return null;
+			/*
+			`remote int rs[]` leaves the length open, so it has to come from the
+			array on the other side -- guessing 1 would make every subscript but
+			the first land on element 0.
+			*/
+			let length = arrayLengthOfType(type);
+			if (!length || length <= 1) {
+				const guessed = symbol.remoteTarget ? this.arrayLengthOf(symbol.remoteTarget) : 0;
+				if (guessed > 0) length = guessed;
+			}
+			return new RemoteArrayRet(glob, remoteDeviceRegOf(symbol.getAssemblySymbol()),
+				target, type, length);
+		}
+		return this.arrayRetFor(symbol, null);
+	}
+
+	/**
+	 * The name of element `index` of an array value, or the register holding it.
+	 *
+	 * @param {import('./mindcInfrastructure.js').ArrayRet} array
+	 * @param {number} index
+	 * @returns {{name: string, dynamic: boolean}?} null when the layout has no
+	 *          such element name (an `encoded` array, say)
+	 */
+	arrayElementNameOf(array, index) {
+		if (!array) return null;
+		// The elements are registers of another processor, named `<array>_<i>`
+		if (array instanceof RemoteArrayRet) {
+			return { name: `${array.targetAssembly}_${index}`, dynamic: false };
+		}
+		// Named after content constants (`copper`, `lead`, ...) -- same everywhere
+		if (array instanceof LookupArrayRet) {
+			return { name: array.names?.[index] ?? null, dynamic: false };
+		}
+		// Already a by-name array: the name is itself in a register
+		if (array instanceof NameArrayRet) {
+			return { name: array.elementName(index), dynamic: true };
+		}
+		if (typeof array.elementName === 'function') {
+			return { name: array.elementName(index), dynamic: false };
+		}
+		return null;
+	}
+
+	deliverArgument(slotName, slotType, argument, paramSymbol = null, argNode = null) {
 		const glob = this.glob;
 		// `get()` + `materialize()`: the argument ends up in a temporary symbol of
 		// its own, so that evaluating the *next* argument (which may call a function,
 		// possibly this very one) cannot clobber it.
 		const value = argument.get().materialize();
+		/*
+		An array handed to a parameter that takes NAMES: store the NAME of every
+		element (see NameArrayRet). This is what makes an access inside the
+		function reach the CALLER's array rather than a copy -- and it is the only
+		thing that CAN be handed over, because a non-memory array has no address.
+		*/
+		const representation = paramSymbol?.arrayParamRep ?? null;
+		if ((representation === 'handle' || representation === 'remote' || representation === 'names')
+			&& argNode && argNode.type === 'Identifier') {
+			const argSymbol = this.currentScope?.lookup?.(argNode.name)
+				?? this.semantic?.globalScope?.lookup?.(argNode.name) ?? null;
+			if (argSymbol && argSymbol.myType?.()?.kind === 'array') {
+				const array = this.arrayViewOf(argSymbol);
+				const handle = array ? ensureArrayHandle(glob, array) : null;
+				if (!handle) {
+					throw new InternalGenerationFailure(
+						`Array '${argNode.name}' cannot be handed to a function: `
+						+ `it has no representation that travels as a value`, argNode.location);
+				}
+				const length = arrayLengthOfType(slotType) || array.length || 0;
+				const instructions = [value.instructions, handle.instructions,
+					InstructionBuilder.set(`${slotName}_get`, handle.get)];
+				if (handle.set) {
+					instructions.push(InstructionBuilder.set(`${slotName}_set`, handle.set));
+				}
+				return new ArrayHandleRet(glob, slotName, slotType, length, instructions);
+			}
+		}
+		/*
+		An indirect call: the callee is not known here, so the parameter symbol
+		is missing. A non-memory array still cannot be turned into a pointer --
+		and the fixed `__param_N` slots cannot carry a per-element description --
+		so it, too, has to travel as a handle.
+		*/
+		if (!paramSymbol && argNode && argNode.type === 'Identifier'
+			&& slotType && slotType.kind === 'array') {
+			const argSymbol = this.currentScope?.lookup?.(argNode.name)
+				?? this.semantic?.globalScope?.lookup?.(argNode.name) ?? null;
+			if (argSymbol && argSymbol.myType?.()?.kind === 'array'
+				&& argSymbol.arrayParamRep !== 'traditional'
+				&& !argSymbol.isTraditionalArray) {
+				/*
+				The callee is not known here, so nothing can tell it that its
+				parameter arrived as a handle -- and without that it would read
+				the handle as a block/offset pair. Say so instead of emitting
+				code that silently breaks. (Function overloading, once it
+				exists, is what removes this restriction: the parameter's
+				representation then comes from the declared type.)
+				*/
+				throw new InternalGenerationFailure(
+					`Array '${argNode.name}' is not laid out in memory, so it cannot be handed `
+					+ `to a function pointer yet: call the function directly, or give the `
+					+ `array a memory layout`, argNode.location);
+			}
+		}
 		/*
 		A name based struct pointer: what travels is the SET OF NAMES, one per
 		member. `rename` would only retarget `X_block` / `X_pos`, which do not
@@ -3918,7 +4118,8 @@ export class CodeGenerator extends ASTVisitor {
 				value = value.convertTo(contentType,
 					contentTypeOf(argument.dataType ? argument.dataType.name : null));
 			}
-			result.concat(this.deliverArgument(slot.name, slot.type, value));
+			result.concat(this.deliverArgument(slot.name, slot.type, value,
+				slot.parameter ?? null, argument));
 		}
 
 		// Pre-call ended. Calling
