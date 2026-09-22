@@ -11,7 +11,7 @@ try { r = await new Compiler(fs.readFileSync(file,'utf8'), [new MemoryBlock('ban
 catch (e) { console.log = log; console.log('THROWN:', e.message); console.log(e.stack?.split('\n').slice(1,6).join('\n')); process.exit(1); }
 console.log = log;
 console.log('success:', r.success);
-console.log('errors:', JSON.stringify((r.errors??[]).map(e=>e.message??String(e)), null, 1));
+console.log('errors:',(r.errors??[]).map(e=>'line '+e.line+' col '+e.column+': '+(e.message??e)).join('\n'), JSON.stringify((r.errors??[]).map(e=>e.message??String(e)), null));
 console.log('fatal:', String(r.fatalError ?? 'none').split('\n').slice(0,4).join(' | '));
 console.log('warnings:', JSON.stringify((r.warnings??[]).map(e=>e.message??String(e)), null, 1));
 if (process.argv.includes('--code') && r.success) console.log(String(r.code??''));

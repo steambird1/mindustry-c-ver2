@@ -1884,6 +1884,25 @@ export class SemanticAnalyzer extends ASTVisitor {
 			*/
 			this.consumeArrayDirective(declarator, varSymbol);
 			/*
+			`int *byname r` -- the pointer holds a NAME, so `*r` is
+			`read / write @this <the name>`. Written on the declaration it is an
+			explicit request, exactly like `byname(&c)`, and so it needs the
+			target version but not `#pragma optimize(pointer)`.
+
+			Only the parameter form and the `int *byname remote` form were
+			honoured; on a variable the qualifier was silently dropped and the
+			pointer fell back to a block/offset pair -- which is a memory
+			access, and therefore wrong for a pointer meant to carry a name.
+			*/
+			const pointeeKind = finalType.kind === 'pointer'
+				? (finalType.pointerTo?.kind ?? null) : null;
+			if (finalType.kind === 'pointer' && !varSymbol.isRemote
+				&& !['struct', 'union'].includes(pointeeKind)
+				&& this.hasByNameQualifier(declarator)) {
+				varSymbol.usesNamePointer = true;
+				varSymbol.forcedNamePointer = true;
+			}
+			/*
 			`int *remote p` -- a pointer that ITSELF lives in another processor.
 			Reaching it would mean reading two registers out of the other
 			processor, which is not implemented; the check below is where the
