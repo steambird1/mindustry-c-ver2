@@ -1563,7 +1563,19 @@ export class SemanticAnalyzer extends ASTVisitor {
     visitProgram(node) {
         // 遍历所有全局声明和函数
 		node.globalDeclarations.forEach(decl => this.visit(decl));
+		/*
+		Both passes below need the whole program: the set of overloads (a call
+		may come before some of them), and the arguments of every call to an
+		`auto` function (that is what decides the versions to emit).
+		*/
+		this.prescanFunctionDeclarations(node);
+		/*
+		Everything is visited FIRST: an `auto` version is chosen from what the
+		call site really hands over, and that is only known once the arguments
+		have symbols (a local has none before its function is visited).
+		*/
         node.functions.forEach(func => this.visit(func));
+		if (this.overloadMode() !== 'none') this.expandAutoTemplates(node);
     }
 
     visitFunctionDeclaration(node) {
@@ -1598,7 +1610,11 @@ export class SemanticAnalyzer extends ASTVisitor {
             'function',
             node.location
         );
-		funcSymbol.owningScope = node.scope;
+		/*
+		Not yet: the scope above may not exist yet (a function built by the
+		compiler, such as an `auto` instantiation, has none until the next
+		lines make one). It is assigned again once it surely does.
+		*/
 
         this.currentScope.addSymbol(funcSymbol);
         this.currentFunction = funcSymbol;
@@ -1607,8 +1623,16 @@ export class SemanticAnalyzer extends ASTVisitor {
 		let functionScope = node.scope;
 		if (!functionScope) {
 			node.scope = functionScope = new Scope(this.currentScope, 'f');
+			/*
+			The scope has to know which declaration it belongs to: several later
+			passes (the optimizer's function info, for one) look the body up
+			through it. A scope the parser never saw -- one made here for an
+			`auto` instantiation -- would otherwise have none.
+			*/
+			functionScope.astNode = node;
 			this.currentScope.children.push(functionScope);
 		}
+		funcSymbol.owningScope = functionScope;
 		this.currentScope = functionScope;
 
         // 添加参数到作用域
@@ -1628,9 +1652,24 @@ export class SemanticAnalyzer extends ASTVisitor {
 			`void f(struct pt *byname q)` -- the parameter itself carries the
 			member NAMES, so it must not be treated as a block/offset pair.
 			*/
-			if (this.hasByNameQualifier(param)) {
+            if (this.hasByNameQualifier(param)) {
 				paramSymbol.usesNamePointer = true;
 				paramSymbol.forcedNamePointer = true;
+			}
+			/*
+			An `auto` parameter of an instantiated version: the representation
+			this version was made for. Setting it here -- instead of letting the
+			call-site notes decide -- is what lets one version take names while
+			another takes addresses, which a single function cannot do.
+			*/
+			const autoRep = param.autoRep ?? param.getAttribute?.('autoRep') ?? null;
+			if (autoRep === 'name') {
+				paramSymbol.usesNamePointer = true;
+				paramSymbol.forcedNamePointer = true;
+			} else if (autoRep === 'memory' || autoRep === 'handle') {
+				paramSymbol.noNamePointer = true;
+				paramSymbol.arrayParamRep = (autoRep === 'handle' && gotType.kind === 'array')
+					? 'handle' : (gotType.kind === 'array' ? 'traditional' : null);
 			}
             this.currentScope.addSymbol(paramSymbol);
         });
@@ -2311,7 +2350,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 	 * @param {TypeInfo} finalType
 	 * @returns {void}
 	 */
-	consumeRemoteDirective(declarator, symbol, finalType, qualifiers = []) {
+	consumeRemoteDirective(declarator, symbol, finalType, qualifiers = [], deferred = false) {
 		const initializer = declarator.initializer;
 		if (!initializer) return;
 		const called = (initializer.type === 'BuiltinCall')
@@ -2363,6 +2402,22 @@ export class SemanticAnalyzer extends ASTVisitor {
 		}
 		let targetSymbol = this.lookupSymbol?.(inner.name) ?? this.currentScope?.lookup?.(inner.name) ?? null;
 		/*
+		`remote int turn = remote(dev, turn)` names the variable `turn` OF THE
+		OTHER PROCESSOR -- the declaration being made here must not shadow it,
+		or it would look like "a remote variable reaching a remote variable".
+		*/
+		if (targetSymbol && targetSymbol === symbol) targetSymbol = null;
+		/*
+		A name visible in a NON-global scope is taken as it is -- but it is a
+		local, whose register name depends on optimisations that differ between
+		two processors, so reaching it from another processor is not reliable.
+		*/
+		if (targetSymbol && !targetSymbol.isGlobal && !selfDevice) {
+			this.addWarning(`'${inner.name}' is a local: its register name depends on how this `
+				+ `program is optimised, so another processor may not find it under that name. `
+				+ `Declare it globally to reach it remotely`, location);
+		}
+		/*
 		A string names the variable of the OTHER processor, which need not exist
 		here at all -- but it MAY: `remote(@this, "g:.u")` reaches this very
 		program. Resolving the string to the local declaration is what keeps it
@@ -2391,31 +2446,39 @@ export class SemanticAnalyzer extends ASTVisitor {
 		}
 		if (!targetSymbol && inner.type === 'Identifier' && !selfDevice) {
 			/*
-			The variable lives on the OTHER processor, so all that is needed is
-			its name -- declaring it here just to be able to name it would be
-			pointless, and would also suggest that THIS program's variable is
-			the one being used.
+			Only an array whose length is not written here has a reason to wait:
+			a declaration further down may still supply it.
 			*/
-			symbol.remoteDevice = deviceNode;
-			symbol.remoteName = `${this.globalScope.getPath()}.${inner.name}`;
-			symbol.isRemote = true;
-			if (layout) symbol.requestedArrayImplementation = layout;
-			/*
-			Without a declaration here the length is unknown, and an array
-			cannot be reached element by element without it.
-			*/
-			if (finalType && finalType.kind === 'array') {
-				const dims = this.arrayDimensionsOf(finalType);
-				if (!dims.length || dims[0] === null) {
-					this.addError(`'${inner.name}' is not declared here, so remote() cannot know `
-						+ `how long the array on the other processor is: give the length, as in `
-						+ `'remote int ru[5] = remote(processor1, ${inner.name})'`, location);
-					declarator.initializer = null;
-					return;
-				}
+			const lengthUnknown = finalType && finalType.kind === 'array'
+				&& (() => {
+					const dims = this.arrayDimensionsOf(finalType);
+					return !dims.length || dims[0] === null;
+				})();
+			if (lengthUnknown && !deferred) {
+				/*
+				Take the initializer away for now: it is a `remote(...)` call,
+				and nothing here knows how to type-check one. It is put back when
+				the binding is retried.
+				*/
+				(this.pendingRemoteLinks ??= []).push(
+					{ declarator, symbol, finalType, qualifiers, initializer: declarator.initializer });
+				declarator.initializer = null;
+				return;
 			}
-			declarator.initializer = null;
-			return;
+			if (lengthUnknown) {
+				this.addError(`'${inner.name}' is not declared here, so remote() cannot know how `
+					+ `long the array on the other processor is: give the length, as in `
+					+ `'remote int ru[5] = remote(processor1, ${inner.name})'`, location);
+				declarator.initializer = null;
+				return;
+			}
+			/*
+			Not declared here -- so take the symbol a global `x` of this type
+			would have. Nothing is defined by that; it is what carries the
+			description of the variable over there.
+			*/
+			targetSymbol = this.synthesiseRemoteTarget(inner.name, finalType, location);
+			if (layout) targetSymbol.requestedArrayImplementation = layout;
 		}
 		if (!targetSymbol) {
 			/*
@@ -2439,10 +2502,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 			declarator.initializer = null;
 			return;
 		}
-		if (!targetSymbol.isGlobal) {
-			this.addWarning(`'${inner.name}' is not global: another processor may name this register differently, `
-				+ `so remote access to it is not reliable`, location);
-		}
+
 		if (targetSymbol.isRemote) {
 			this.addError(`'${inner.name}' is itself remote: remote() cannot chain through two processors`, location);
 			declarator.initializer = null;
@@ -3565,32 +3625,176 @@ export class SemanticAnalyzer extends ASTVisitor {
     /**
      * The name a function is emitted under.
      *
-     * RESERVED FOR FUNCTION OVERLOADING: once several functions may share a
-     * name, the emitted name has to differ per parameter list (otherwise two
-     * overloads would collide in `FunctionRegisterer`). Today there is only one
-     * function per name, so this returns the name unchanged -- and the parts
-     * that would need it (`functionInfo`, `functionCallGraph`, the call sites)
-     * are still keyed by the plain name.
+     * Several functions may share a name (overloading), and they must not
+     * collide in the `FunctionRegisterer` -- so all but the first get a
+     * suffixed name. The first keeps the plain name, which keeps ordinary
+     * programs untouched.
      *
      * @param {string} name
-     * @param {any[]} [parameterTypes]
+     * @param {number} [index] Position among the functions sharing this name
      * @returns {string}
      */
-    mangleFunctionName(name, parameterTypes = []) {
-        return name;
+    mangleFunctionName(name, index = 0) {
+        return index === 0 ? name : `${name}__ov${index}`;
     }
 
     /**
      * How the compiler reacts to several functions sharing one name.
      *
-     * RESERVED FOR FUNCTION OVERLOADING -- see `#pragma overload`. Not
-     * implemented yet: anything that asks for it is rejected in
-     * `visitFunctionDeclaration`.
+     * `#pragma overload(auto | default | none)`. `default` (and `auto`) allow
+     * it; `none` refuses.
      *
      * @returns {'auto' | 'default' | 'none'}
      */
     overloadMode() {
-        return 'none';
+        const mode = this.compiler?.overloadMode ?? null;
+        return (mode === 'auto' || mode === 'default' || mode === 'none') ? mode : 'default';
+    }
+
+    /**
+     * Whether a parameter is written `auto` -- `void f(auto int *s)`.
+     *
+     * `auto` is also a storage class (`auto device`), so the qualifier may sit
+     * in either place, exactly as `byname` does.
+     *
+     * @param {any} node A parameter node
+     * @returns {boolean}
+     */
+    hasAutoQualifier(node) {
+        const levels = [
+            ...(node?.pointerQualifiers ?? []),
+            ...(node?.type?.pointerQualifiers ?? []),
+            node?.type?.getAttribute?.('qualifiers') ?? []
+        ];
+        if (levels.some(list => (list ?? []).includes('auto'))) return true;
+        return /\bauto\b/.test(String(this.getTypeNameFromTypeNode(node) ?? ''));
+    }
+
+    /**
+     * Whether a pointer that only ever holds register names is allowed here.
+     * @returns {boolean}
+     */
+    namePointersEnabled() {
+        const config = this.compiler?.optimizerConfig ?? null;
+        if (config?.getAttribute?.('doPointerOptimize') === true) return true;
+        if (config?.doPointerOptimize === true) return true;
+        return (this.compiler?.config?.getAttribute?.('doPointerOptimize') === true);
+    }
+
+    /**
+     * A deep copy of an AST subtree.
+     *
+     * Needed to emit one version of an `auto` function per representation of
+     * its arguments: the versions are the same program, only the parameter's
+     * representation differs, so the body has to be copied rather than shared.
+     *
+     * @param {any} node
+     * @param {Map} [seen]
+     * @returns {any}
+     */
+    cloneAstNode(node, seen = new Map()) {
+        if (node === null || node === undefined || typeof node !== 'object') return node;
+        if (Array.isArray(node)) return node.map(n => this.cloneAstNode(n, seen));
+        if (seen.has(node)) return seen.get(node);
+        if (typeof node.type !== 'string' || !(node._attributes instanceof Map)) return node;
+        const copy = new ASTNode(node.type, node.location);
+        seen.set(node, copy);
+        for (const [key, value] of node._attributes) copy.setAttribute(key, value);
+        for (const key of Object.keys(node)) {
+            /*
+            A cached `scope` or `symbol` belongs to the function this was
+            copied from: keeping it would make the copy's body look up names
+            in a scope that is not its own. They are rebuilt when the copy is
+            visited.
+            */
+            if (key === 'parent' || key === 'scope' || key === 'symbol'
+                || key === '_attributes' || key === 'type' || key === 'location') continue;
+            copy[key] = this.cloneAstNode(node[key], seen);
+        }
+        return copy;
+    }
+
+    /**
+     * The parameter type list of a function declaration, as type names.
+     * @param {any} node
+     * @returns {string[]}
+     */
+    parameterTypeNamesOf(node) {
+        return (node?.parameters ?? []).map(param => String(this.getTypeNameFromTypeNode(param) ?? '?'));
+    }
+
+    /**
+     * Collect every function declaration and give each one the name it will be
+     * emitted under.
+     *
+     * Done before anything is visited, so that a call site always sees the
+     * complete set of overloads -- a call may appear before some of them.
+     *
+     * @param {any} ast
+     * @returns {void}
+     */
+    prescanFunctionDeclarations(ast) {
+        /** @type {Map<string, {node: any, paramTypes: string[]}[]>} */
+        this.overloadSets = new Map();
+        for (const func of (ast?.functions ?? [])) {
+            if (!func || func.type !== 'FunctionDeclaration' || !func.name) continue;
+            if (!this.overloadSets.has(func.name)) this.overloadSets.set(func.name, []);
+            this.overloadSets.get(func.name).push({ node: func, paramTypes: this.parameterTypeNamesOf(func) });
+        }
+        for (const [name, list] of this.overloadSets) {
+            list.forEach((entry, index) => {
+                entry.node.name = this.mangleFunctionName(name, index);
+            });
+            /*
+            Two functions with the same name AND the same parameter list are
+            not overloads -- they are a redefinition.
+            */
+            for (let i = 0; i < list.length; i++) {
+                for (let j = i + 1; j < list.length; j++) {
+                    if (list[i].paramTypes.join(',') === list[j].paramTypes.join(',')) {
+                        this.addError(`Function '${name}' is already declared with these parameter types`,
+                            list[j].node.location);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * The symbol of a variable that `remote(dev, x)` names by IDENTIFIER.
+     *
+     * `x` need not be declared in this program at all -- the variable lives on
+     * the other processor, and its name is all that is needed to reach it. But
+     * a SYMBOL is what carries the rest of the description (the length of an
+     * array, the layout its elements have), so behave as if a global `x` of the
+     * type this declaration asks for had been declared, and take its symbol.
+     *
+     * It is deliberately NOT added to any scope: nothing is really defined
+     * here, so no registers must be emitted for it and it must not be exported.
+     *
+     * @param {string} name
+     * @param {TypeInfo} finalType The type the declaration asks for
+     * @param {any} [location]
+     * @returns {SymbolEntry}
+     */
+    synthesiseRemoteTarget(name, finalType, location = null) {
+        this.remoteTargetCache ??= new Map();
+        const key = `${this.globalScope?.getPath?.() ?? 'g:'}.${name}`;
+        if (this.remoteTargetCache.has(key)) return this.remoteTargetCache.get(key);
+        /*
+        The variable over there is an ordinary one: `remote` describes how THIS
+        program reaches it, not what it is.
+        */
+        let type = finalType;
+        if (finalType && (finalType.qualifiers ?? []).includes('remote')) {
+            type = Object.create(Object.getPrototypeOf(finalType));
+            Object.assign(type, finalType);
+            type.qualifiers = [...finalType.qualifiers].filter(q => q !== 'remote');
+        }
+        const symbol = new SymbolEntry(name, { type: type }, this.globalScope, 'variable', location);
+        symbol.isGlobal = true;
+        this.remoteTargetCache.set(key, symbol);
+        return symbol;
     }
 
     /**
@@ -3745,12 +3949,23 @@ export class SemanticAnalyzer extends ASTVisitor {
             const paramSymbol = scope.lookup(declared.name);
             if (!paramSymbol) return;
             const paramType = paramSymbol.myType?.() ?? null;
-            if (!paramType || paramType.kind !== 'array') return;
+            if (!paramType) return;
             if (arg.type !== 'Identifier') return;
             const argSymbol = this.currentScope.lookup(arg.name);
             if (!argSymbol) return;
             const argType = argSymbol.myType?.() ?? null;
             if (!argType || argType.kind !== 'array') return;
+            /*
+            Handed over as a POINTER (`void f(auto int *p)` / `f(arr)`): the
+            callee may write into it at any time, so its contents are no longer
+            known constants. Without this, `print(arr[0])` after the call is
+            folded back to the initial value and the write is lost.
+            */
+            if (paramType.kind === 'pointer') {
+                argSymbol.arrayEscapes = true;
+                return;
+            }
+            if (paramType.kind !== 'array') return;
             const notes = paramSymbol.arrayArgumentNotes
                 ?? (paramSymbol.arrayArgumentNotes = {
                     remote: false, register: false, traditional: false, requested: new Set()
@@ -3785,13 +4000,385 @@ export class SemanticAnalyzer extends ASTVisitor {
         for (const entry of pending) {
             entry.declarator.initializer = entry.initializer;
             this.consumeRemoteDirective(entry.declarator, entry.symbol, entry.finalType,
-                entry.qualifiers);
+                entry.qualifiers, true);
         }
         for (const entry of (this.pendingRemoteLinks ?? [])) {
-            this.addError(`The variable of remote() is not declared anywhere in this program`,
-                entry.declarator?.location ?? null);
+            /*
+            Retrying with `deferred` set resolves it against a global symbol of
+            the required type -- which is enough unless the length of an array
+            is still unknown, the one thing a name alone cannot supply.
+            */
+            entry.declarator.initializer = entry.initializer;
+            this.consumeRemoteDirective(entry.declarator, entry.symbol, entry.finalType,
+                entry.qualifiers, true);
         }
         this.pendingRemoteLinks = [];
+    }
+
+    /**
+     * Which representation an `auto` parameter has to use for one argument.
+     *
+     * Only what can be known for sure is used; everything else falls back to
+     * the representation that is always correct (a memory pointer, or an array
+     * handle). Guessing the other way would generate wrong code.
+     *
+     * @param {any} template The function declaration
+     * @param {number} index Which parameter
+     * @param {any} arg The argument at this call site
+     * @returns {'name' | 'memory' | 'handle' | 'unknown'}
+     */
+    /**
+     * The declaration a name refers to, found in the AST itself.
+     *
+     * Needed because an `auto` function is specialised BEFORE the program is
+     * visited: at that point no scope holds the locals yet, so `scope.lookup()`
+     * cannot answer. Everything that decides a representation -- `remote`,
+     * `array("embedded_divided", ...)`, a plain `int b[4]` -- is visible in the
+     * source, so reading it there is enough.
+     *
+     * @param {any} ast
+     * @param {string} name
+     * @returns {{declarator: any, declaration: any, isRemote: boolean}?}
+     */
+    findDeclarationOf(ast, name) {
+        const wanted = String(name ?? '');
+        if (!wanted) return null;
+        let found = null;
+        const look = declaration => {
+            if (found || !declaration) return;
+            for (const declarator of (declaration.declarators ?? [])) {
+                if (String(declarator?.name ?? '') !== wanted) continue;
+                const qualifiers = [
+                    ...(declaration.type?.getAttribute?.('qualifiers') ?? []),
+                    ...(declarator.type?.getAttribute?.('qualifiers') ?? [])
+                ];
+                /*
+                `remote int ru[] = remote(dev, u)`: the qualifier may sit on the
+                declaration or on the declarator, and the binding itself is a
+                `remote(...)` call -- any of the three is enough to tell that the
+                array lives in another processor.
+                */
+                const initializer = declarator?.initializer ?? null;
+                const called = initializer?.type === 'BuiltinCall'
+                    ? initializer.functionName
+                    : (initializer?.callee?.name ?? null);
+                const isRemote = qualifiers.includes('remote') || called === 'remote';
+                found = { declarator, declaration, isRemote };
+                return;
+            }
+        };
+        /*
+        A directed walk: global declarations, then each function's statements
+        (into nested blocks). Walking every property instead wandered into the
+        type tables and never came back.
+        */
+        const statements = list => {
+            for (const statement of (list ?? [])) {
+                if (found || !statement || typeof statement !== 'object') continue;
+                if (statement.type === 'VariableDeclaration') look(statement);
+                else if (statement.type === 'CompoundStatement') statements(statement.statements);
+                else if (statement.body) {
+                    if (statement.body.type === 'CompoundStatement') statements(statement.body.statements);
+                    else statements([statement.body]);
+                }
+            }
+        };
+        statements(ast?.globalDeclarations ?? []);
+        for (const func of (ast?.functions ?? [])) {
+            if (found) break;
+            statements(func?.body?.statements ?? []);
+        }
+        return found;
+    }
+
+    autoRepresentationOf(template, index, arg, ast = null) {
+        const param = (template.parameters ?? [])[index];
+        if (!param) return 'unknown';
+        const type = this.getTypeInfo(this.getTypeNameFromTypeNode(param));
+        let inner = arg;
+        if (inner && inner.type === 'UnaryExpression' && inner.operator === '&') inner = inner.argument;
+        const symbol = (inner && inner.type === 'Identifier')
+            ? (inner.symbol ?? this.globalScope?.lookup?.(inner.name) ?? null) : null;
+        const declaration = (inner && inner.type === 'Identifier' && ast)
+            ? this.findDeclarationOf(ast, inner.name) : null;
+        if (!symbol && !declaration) return 'unknown';
+        if (type && type.kind === 'array') {
+            /*
+            Decided from the declaration, because the choice is a property of
+            how the array was written -- and it has to be known while the
+            versions are still being made.
+            */
+            if (declaration?.isRemote || symbol?.isRemote === true) return 'handle';
+            const requested = declaration?.declarator?.getAttribute?.('arrayImplementation')
+                ?? symbol?.requestedArrayImplementation ?? null;
+            if (requested === 'traditional') return 'memory';
+            if (requested) return 'handle';
+            /*
+            Nothing was written down, so the layout is chosen automatically --
+            and that choice is not visible here. Guessing would risk a version
+            that expects a pointer for an array that ended up in registers (or
+            the other way round), so refuse instead.
+            */
+            if (this.compiler?.arrayOptimize === true) return 'ambiguous';
+            return 'memory';
+        }
+        if (type && type.kind === 'pointer') {
+            /*
+            An array with no address of its own has to travel as a handle; one
+            in memory travels as a pointer.
+            */
+            if (symbol.isRemote === true) return 'handle';
+            const requested = symbol.requestedArrayImplementation ?? null;
+            if (requested === 'traditional') return 'memory';
+            if (requested === null && !(this.compiler?.arrayOptimize === true)) return 'memory';
+            return 'handle';
+        }
+        if (type && type.kind === 'pointer') {
+            /*
+            `&x` can be the NAME of x, which lets x stay in a register -- but
+            only when x really is one plain register and name pointers are on.
+            */
+            if (arg && arg.type === 'UnaryExpression' && arg.operator === '&') {
+                if (symbol) {
+                    const targetType = symbol.myType?.() ?? null;
+                    const oneRegister = !!targetType && targetType.size === 1
+                        && !['array', 'struct', 'union'].includes(targetType.kind);
+                    const movable = !symbol.isVolatile && !symbol.isExtern && !symbol.isStatic
+                        && !symbol.accessThroughPointer && !symbol.needMemoryAllocation;
+                    if (oneRegister && movable && this.namePointersEnabled()) return 'name';
+                    return 'memory';
+                }
+                /*
+                A local: no symbol yet, so judge the declaration. A plain scalar
+                that nothing else forces into memory can be named.
+                */
+                const qualifierList = [
+                    ...(declaration?.declaration?.type?.getAttribute?.('qualifiers') ?? []),
+                    ...(declaration?.declarator?.type?.getAttribute?.('qualifiers') ?? [])
+                ];
+                const forced = qualifierList.includes('volatile') || qualifierList.includes('extern')
+                    || qualifierList.includes('static');
+                const typeName = String(declaration?.declarator?.type?.typeName
+                    ?? declaration?.declaration?.type?.typeName ?? '');
+                const composite = /\bstruct\b|\bunion\b|\[/.test(typeName);
+                if (!forced && !composite && this.namePointersEnabled()) return 'name';
+                return 'memory';
+            }
+            if (symbol.usesNamePointer === true) return 'name';
+            if (symbol.myType?.()?.kind === 'array') return 'memory';
+            return 'memory';
+        }
+        return 'unknown';
+    }
+
+    /**
+     * Does the body use the `auto` parameter in a way only an address allows?
+     *
+     * A name pointer or an array handle cannot be moved, so `s + 1` (and
+     * `s[i]`, which is the same thing) rules that instance out.
+     *
+     * @param {any} template
+     * @param {string} paramName
+     * @returns {boolean}
+     */
+    autoBodyNeedsAddress(template, paramName) {
+        let found = false;
+        const seen = new Set();
+        const walk = node => {
+            if (!node || typeof node !== 'object' || found) return;
+            if (seen.has(node)) return;
+            seen.add(node);
+            if (Array.isArray(node)) { node.forEach(walk); return; }
+            /*
+            An ARRAY parameter is a different matter: `s[i]` is a subscript, and
+            a handle supports that (it is what indexing a handle means). Only
+            moving the parameter itself -- `s + 1` -- needs an address.
+            */
+            const paramIsArray = (() => {
+                const p = (template.parameters ?? []).find(x => String(x?.name ?? '') === paramName);
+                if (!p) return false;
+                const t = this.getTypeInfo(this.getTypeNameFromTypeNode(p));
+                return !!t && t.kind === 'array';
+            })();
+            if (node.type === 'BinaryExpression'
+                && (node.operator === '+' || node.operator === '-')
+                && [node.left, node.right].some(side => side?.type === 'Identifier' && side.name === paramName)) {
+                found = true; return;
+            }
+            if (node.type === 'MemberExpression' && !paramIsArray) {
+                const object = node.children?.[0] ?? node.object ?? null;
+                if (object?.type === 'Identifier' && object.name === paramName) { found = true; return; }
+            }
+            for (const key of Object.keys(node)) {
+                if (key === 'parent' || key === 'scope') continue;
+                walk(node[key]);
+            }
+        };
+        walk(template.body);
+        return found;
+    }
+
+    /**
+     * Emit one version of every `auto` function per representation of its
+     * arguments.
+     *
+     * `void f(auto int *s)` is a TEMPLATE, not a function: what `s` has to be
+     * (a name, an address, an array handle) depends on what each call site
+     * hands over. One call site needing a name and another needing an address
+     * used to be a silent miscompilation -- a single function cannot do both.
+     * Here each call site picks its own version.
+     *
+     * @param {any} ast
+     * @returns {void}
+     */
+    expandAutoTemplates(ast) {
+        const templates = (ast?.functions ?? []).filter(
+            func => (func?.parameters ?? []).some((param, i) => this.hasAutoQualifier(param)));
+        if (!templates.length) return;
+
+        /** @type {any[]} */
+        const calls = [];
+        const seen = new Set();
+        const walk = node => {
+            if (!node || typeof node !== 'object') return;
+            if (seen.has(node)) return;		// scopes and `parent` point back
+            seen.add(node);
+            if (Array.isArray(node)) { node.forEach(walk); return; }
+            if (node.type === 'FunctionCall') calls.push(node);
+            for (const key of Object.keys(node)) {
+                if (key === 'parent' || key === 'scope') continue;
+                walk(node[key]);
+            }
+        };
+        walk(ast);
+
+        for (const template of templates) {
+            const originalName = String(template.name ?? '');
+            /*
+            Marked: it is a pattern, not a function that is emitted. Its
+            parameters carry the notes of every call site mixed together, which
+            is exactly what the versions are here to separate -- so later passes
+            must not read them.
+            */
+            template.setAttribute('autoTemplate', true);
+            const autoIndices = (template.parameters ?? [])
+                .map((param, i) => (this.hasAutoQualifier(param) ? i : -1)).filter(i => i >= 0);
+            const mine = calls.filter(call => call?.callee?.type === 'Identifier'
+                && String(call.callee.name) === originalName);
+            const groups = new Map();
+            for (const call of mine) {
+                const signature = autoIndices
+                    .map(i => this.autoRepresentationOf(template, i, call.arguments?.[i] ?? null, ast)).join('|');
+                if (!groups.has(signature)) groups.set(signature, []);
+                groups.get(signature).push(call);
+            }
+            if (groups.size === 0) continue;
+            /*
+            Nothing is really being overloaded here, just specialised: mark
+            every instance so the versions keep their own names.
+            */
+            const instances = [];
+            let index = 0;
+            for (const [signature, callSites] of groups) {
+                const reps = signature.split('|');
+                if (reps.includes('ambiguous')) {
+                    this.addError(`'${originalName}' has an 'auto' parameter, and this call hands it `
+                        + `an array whose layout is chosen automatically -- which one it is cannot be `
+                        + `known here. Write it down (array("embedded_divided", ...), or `
+                        + `array("traditional", ...)), or turn '#pragma optimize(array)' off`,
+                        callSites[0]?.location ?? null);
+                    continue;
+                }
+                if (reps.includes('unknown')) {
+                    this.addError(`'${originalName}' has an 'auto' parameter, and what this call hands `
+                        + `it cannot be made out`, callSites[0]?.location ?? null);
+                    continue;
+                }
+                const name = this.mangleFunctionName(originalName, index++);
+                for (let a = 0; a < autoIndices.length; a++) {
+                    const paramIndex = autoIndices[a];
+                    const paramName = template.parameters[paramIndex]?.name;
+                    if (reps[a] !== 'memory' && paramName
+                        && this.autoBodyNeedsAddress(template, paramName)) {
+                        this.addError(`Parameter '${paramName}' of '${originalName}' is 'auto', and this `
+                            + `call hands it something that has no address (${reps[a]}) -- but the body `
+                            + `moves the pointer (s + 1, or s[i]), which needs one`,
+                            callSites[0]?.location ?? null);
+                    }
+                }
+                const copy = this.cloneAstNode(template);
+                copy.name = name;
+                copy.scope = null;
+                copy.setAttribute('autoInstance', true);
+                copy.setAttribute('autoReps', signature);
+                autoIndices.forEach((paramIndex, a) => {
+                    const param = copy.parameters?.[paramIndex];
+                    /*
+                    A parameter node is a plain object (it is built by spreading
+                    an ASTNode), so the representation goes on it directly.
+                    */
+                    if (param) param.autoRep = reps[a];
+                });
+                instances.push(copy);
+                for (const call of callSites) {
+                    call.callee.name = name;
+                    call.callee.setAttribute('overloadResolved', true);
+                }
+            }
+            const list = ast.functions ?? [];
+            const at = list.indexOf(template);
+            /*
+            Nothing could be specialised (every call was refused): keep the
+            template, so the program still names something.
+            */
+            if (!instances.length) continue;
+            /*
+            The template was already visited, so its name is taken. Drop the
+            symbol before the versions claim the names -- the first version
+            keeps the plain name.
+            */
+            for (const scope of [this.globalScope, template.scope]) {
+                if (scope?.symbols?.delete) scope.symbols.delete(originalName);
+            }
+            if (at >= 0) list.splice(at, 1, ...instances);
+            /*
+            The versions are built after the program was visited, so they have
+            to be visited now -- that is what gives each one its own scope and
+            its own parameter symbols.
+            */
+            const savedScope = this.currentScope;
+            this.currentScope = this.globalScope;
+            for (const instance of instances) this.visit(instance);
+            this.currentScope = savedScope;
+            for (const call of mine) {
+                if (call?.callee?.type !== 'Identifier') continue;
+                call.callee.symbol = this.globalScope?.lookup?.(call.callee.name) ?? call.callee.symbol;
+            }
+            /*
+            The versions are chosen by representation, not by type -- so put
+            them in the overload set under the name they were written with,
+            and let the call sites (already rewritten) keep their pick.
+            */
+            this.overloadSets?.set(originalName,
+                instances.map(node => ({ node, paramTypes: this.parameterTypeNamesOf(node) })));
+        }
+    }
+
+    /**
+     * Whether `remote` appears anywhere on a type -- on the array itself, or on
+     * the element level (`remote int s[4]` puts it on `int`).
+     *
+     * @param {TypeInfo?} type
+     * @returns {boolean}
+     */
+    typeHasRemoteQualifier(type) {
+        let current = type ?? null;
+        let guard = 0;
+        while (current && guard++ < 8) {
+            if ((current.qualifiers ?? []).includes('remote')) return true;
+            current = current.pointerTo ?? null;
+        }
+        return false;
     }
 
     /**
@@ -3804,11 +4391,42 @@ export class SemanticAnalyzer extends ASTVisitor {
     finalizeArrayParameters(ast) {
         const visitScope = scope => {
             if (!scope) return;
+            /*
+            The pattern behind `auto` versions: nothing is emitted for it, and
+            its parameters hold every call site's notes at once.
+            */
+            if (scope.astNode?.getAttribute?.('autoTemplate') === true) {
+                (scope.children ?? []).forEach(visitScope);
+                return;
+            }
             for (const symbol of scope.symbols.values()) {
                 const notes = symbol.arrayArgumentNotes;
+                /*
+                A version emitted for one representation already knows it:
+                re-deciding from the call-site notes would mix them back
+                together, which is exactly what the versions are here to avoid.
+                */
+                if (symbol.arrayParamRep) continue;
+                const declaredRemote = symbol.isRemote === true
+                    || this.typeHasRemoteQualifier(symbol.myType?.());
+                /*
+                `remote int s[4]`: the elements are registers of another
+                processor, so this parameter travels as a HANDLE. That has to be
+                decided from the declaration alone -- a call through a function
+                pointer gives no call-site information at all, yet the callee
+                still has to agree on the form the array arrives in.
+                */
+                if (declaredRemote) {
+                    symbol.arrayParamRep = 'handle';
+                    if (notes?.traditional) {
+                        this.addError(`Parameter '${symbol.name}' is declared 'remote', `
+                            + `but is also passed an ordinary array: the elements cannot be `
+                            + `in another processor and in memory at the same time`, symbol.location);
+                    }
+                    continue;
+                }
                 if (!notes) continue;
-                const declaredRemote = symbol.isRemote === true;
-                if (declaredRemote || notes.remote) {
+                if (notes.remote) {
                     symbol.arrayParamRep = 'handle';
                     if (notes.traditional) {
                         this.addError(`Parameter '${symbol.name}' is declared 'remote', `
@@ -3839,22 +4457,63 @@ export class SemanticAnalyzer extends ASTVisitor {
      */
     checkOverloading(node) {
         const mode = this.compiler?.overloadMode ?? null;
-        if (mode !== null && mode !== undefined) {
-            this.addError(
-                `Function overloading is not implemented yet: '#pragma overload(${mode})' cannot be used`,
-                node.location ?? null);
+        const hasAuto = (node.parameters ?? []).some(param => this.hasAutoQualifier(param));
+        if (hasAuto && mode === 'none') {
+            this.addError(`An 'auto' parameter needs function overloading, which is turned off `
+                + `by '#pragma overload(none)'`, node.location ?? null);
         }
-        for (const param of (node.parameters ?? [])) {
-            const qualifiers = param?.type?.getAttribute?.('qualifiers') ?? [];
-            const isAuto = qualifiers.includes('auto')
-                || /\bauto\b/.test(String(this.getTypeNameFromTypeNode(param) ?? ''));
-            if (isAuto) {
-                this.addError(
-                    `Function overloading is not implemented yet: an 'auto' parameter `
-                    + `('${param?.name ?? '?'}') would need one version of this function `
-                    + `per representation`, param?.location ?? node.location ?? null);
+        /* Whether two functions may share a name is decided in
+           `prescanFunctionDeclarations`; `auto` versions are emitted in
+           `expandAutoTemplates`. */
+    }
+
+    /**
+     * Pick which of several functions sharing a name this call means.
+     *
+     * Called after the arguments have been visited (their types are needed)
+     * and rewrites `node.callee.name` to the chosen function's emitted name, so
+     * that everything downstream -- the generator, the optimizer, the inliner --
+     * sees one ordinary function, as before.
+     *
+     * @param {any} node A FunctionCall
+     * @returns {void}
+     */
+    resolveOverloadedCall(node) {
+        if (node?.callee?.type !== 'Identifier') return;
+        if (node.callee.getAttribute?.('overloadResolved') === true) return;
+        const name = String(node.callee.name ?? '');
+        const set = this.overloadSets?.get(name) ?? null;
+        if (!set || set.length <= 1) return;
+        const argTypes = (node.arguments ?? []).map(arg => this.getExpressionType(arg));
+        const score = entry => {
+            if (entry.paramTypes.length !== argTypes.length) return -1;
+            let total = 0;
+            for (let i = 0; i < argTypes.length; i++) {
+                const want = entry.paramTypes[i];
+                const got = argTypes[i];
+                if (!got) continue;
+                if (String(got.name ?? got) === String(want)) continue;
+                if (this.isTypeCompatible(want, got)) { total += 1; continue; }
+                return -1;
             }
+            return total;
+        };
+        let best = null;
+        let bestScore = -1;
+        for (const entry of set) {
+            const got = score(entry);
+            if (got < 0) continue;
+            if (best === null || got < bestScore) { best = entry; bestScore = got; }
         }
+        if (!best) {
+            this.addError(`No version of '${name}' accepts these arguments`
+                + ` (${argTypes.map(t => String(t?.name ?? t)).join(', ')})`, node.location);
+            return;
+        }
+        if (String(best.node.name) === name) return;
+        node.callee.name = best.node.name;
+        const symbol = this.currentScope?.lookup?.(best.node.name) ?? null;
+        if (symbol) node.callee.symbol = symbol;
     }
 
     visitFunctionCall(node) {
@@ -3909,6 +4568,21 @@ export class SemanticAnalyzer extends ASTVisitor {
 			givenType: this.getTypeInfo(expectedParams[index].type),
 			givenTypeUnsure: true
 		}));
+
+		/*
+		Only now are the argument types known, so only now can the right
+		overload be chosen. Everything below then works on that one.
+		*/
+		this.resolveOverloadedCall(node);
+		if (node.callee.type === 'Identifier') {
+			const chosen = this.currentScope?.lookup?.(node.callee.name) ?? null;
+			if (chosen && chosen.kind === 'function') {
+				funcSymbol = chosen;
+				funcType = chosen.myType();
+				readableFunctionName = chosen.name;
+				expectedParams = funcType.parameters || [];
+			}
+		}
 
         // 检查参数数量
        

@@ -874,6 +874,37 @@ export class Optimizer extends ASTVisitor {
 					}
 					break;
 				}
+				case 'BinaryExpression': {
+					/*
+					`p + 1` (and `p - q`) need a real ADDRESS to move. A pointer
+					that holds a name has none, so such a pointer must not be
+					given the name representation -- otherwise the emitted code
+					copies its (never assigned) `_block` / `_pos` and walks off
+					to a link that does not exist.
+					*/
+					const op = node.operator;
+					if (op === '+' || op === '-') {
+						for (const side of [node.left, node.right]) {
+							if (!side || side.type !== 'Identifier') continue;
+							const symbol = scope?.lookup(side.name) ?? null;
+							if (isPointerSymbol(symbol)) register(symbol).bad = true;
+						}
+					}
+					break;
+				}
+				case 'AssignmentExpression': {
+					/*
+					`p += 1` is the same thing written another way.
+					*/
+					if (node.operator === '+=' || node.operator === '-=') {
+						const left = node.left;
+						if (left && left.type === 'Identifier') {
+							const symbol = scope?.lookup(left.name) ?? null;
+							if (isPointerSymbol(symbol)) register(symbol).bad = true;
+						}
+					}
+					break;
+				}
 				case 'MemberExpression': {
 					// `p[i]` is pointer arithmetic
 					const object = node.children?.[0] ?? node.object ?? null;
@@ -954,6 +985,12 @@ export class Optimizer extends ASTVisitor {
 				let ok = true;
 				for (const key of group) {
 					const entry = pointers.get(key);
+					/*
+					`auto` version made for real addresses: it must not be given
+					the name representation, even if every call site would allow
+					it -- the body may move the pointer.
+					*/
+					if (entry?.symbol?.noNamePointer === true) { ok = false; break; }
 					if (!entry || entry.bad) { ok = false; break; }
 					for (const source of entry.sources) {
 						if (source !== 'register' && source !== 'pointer') { ok = false; break; }
@@ -1208,6 +1245,13 @@ export class Optimizer extends ASTVisitor {
 						const recursiveGraph = this.findRecursiveFunctions(this.functionCallGraph);
 						node.functions.forEach(func => {
 							const relevantSymbol = this.globalScope.lookup(func.name);
+							/*
+							Gone means it was inlined everywhere and dropped:
+							there is nothing left to analyse. (A function built
+							by the compiler -- an `auto` instantiation -- is
+							dropped the same way once every call was inlined.)
+							*/
+							if (!relevantSymbol) return;
 							if (relevantSymbol.isAddressed || recursiveGraph.has(func.name)) {
 								this.analyzeNode(func, {
 									actualCalling: false,
@@ -6714,7 +6758,7 @@ export class Optimizer extends ASTVisitor {
 			return false;
 		}
 
-		const clonedBody = this.cloneAST(funcNode.body);
+		const clonedBody = this.reparentCloned(this.cloneAST(funcNode.body), null);
 		if (!clonedBody) return false;
 		
 		// 处理返回语句
@@ -7218,6 +7262,14 @@ export class Optimizer extends ASTVisitor {
 							const clonedReplacement = this.cloneAST(replacement);
 							clonedReplacement.location = node.location;
 							clonedReplacement.symbol = symbolMapper.lookup(replacement.name);
+							/*
+							Renamed in place rather than swapped into its parent:
+							a clone keeps the ORIGINAL's `parent`, so `replaceNode`
+							edited the function's own body -- and inlining the
+							function a second time then renamed the original's
+							parameters, leaving the newer copy referring to names
+							that belong to the earlier inlining.
+							*/
 							this.replaceNode(node, clonedReplacement);
 						}
 					}
@@ -7229,8 +7281,20 @@ export class Optimizer extends ASTVisitor {
 
 		const tsrc = node.getAttribute('totalSource');
 		if (tsrc && tsrc.type === 'Identifier') {
-			doReplacement(tsrc);
-			node.setAttribute('totalSource', this.cloneAST(paramMap.get(tsrc.name)));
+			/*
+			Attributes are shared with the node this was cloned from, so `tsrc`
+			may well be the ORIGINAL function's identifier. Replacing it would
+			rename the function's own body -- and inlining it a second time then
+			produced a copy referring to the parameters of the FIRST inlining.
+			Only this node's attribute is updated.
+			*/
+			const tsrcReplacement = paramMap.get(tsrc.name);
+			if (tsrcReplacement) {
+				const clonedReplacement = this.cloneAST(tsrcReplacement);
+				clonedReplacement.location = tsrc.location;
+				clonedReplacement.symbol = symbolMapper.lookup(tsrcReplacement.name);
+				node.setAttribute('totalSource', clonedReplacement);
+			}
 		}
 		
 		// 递归处理子节点
@@ -7510,6 +7574,42 @@ export class Optimizer extends ASTVisitor {
 	/**
 	 * 克隆AST节点
 	 */
+	/**
+	 * Point every node of a CLONED subtree at its parent WITHIN that subtree.
+	 *
+	 * `cloneAST` copies `parent` from the original, so a clone's root still
+	 * points into the original tree. That leaks: `replaceNode` edits
+	 * `oldNode.parent`, so inlining a function a SECOND time renamed the
+	 * identifiers of the ORIGINAL body -- and the second copy then referred to
+	 * the parameters of the first inlining (names belonging to a scope that is
+	 * not an ancestor of it), which failed as "Unknown variable".
+	 *
+	 * @param {any} root
+	 * @param {any?} [parent]
+	 * @returns {any} root
+	 */
+	reparentCloned(root, parent = null) {
+		const seen = new Set();
+		const skip = new Set(['parent', 'scope', 'symbol', '_attributes', 'dataType', 'location']);
+		const fix = (node, from) => {
+			if (!node || typeof node !== 'object' || seen.has(node)) return;
+			seen.add(node);
+			node.parent = from;
+			const visit = child => {
+				if (!child || typeof child !== 'object') return;
+				if (Array.isArray(child)) { child.forEach(visit); return; }
+				if (typeof child.type !== 'string') return;
+				fix(child, node);
+			};
+			for (const key of Object.keys(node)) {
+				if (skip.has(key)) continue;
+				visit(node[key]);
+			}
+		};
+		fix(root, parent);
+		return root;
+	}
+
 	cloneAST(node) {
 		if (!node) return null;
 		// console.log("Now cloning AST",node);	// debug ...

@@ -703,39 +703,17 @@ export class Parser {
             qualifiers.push(qualifierToken.value);
         }
 		/*
-		`remote` is deliberately NOT a reserved word: `remote(dev, var)` is a
-		pseudo function and has to keep lexing as an identifier. So it is
-		recognised as a qualifier only where one can appear -- in front of a
-		type, never in front of `(`.
+		`remote` is a reserved word, so `remote int x` needs no lookahead. It is
+		also the pseudo function `remote(dev, var)`, which is why expression
+		position hands it over as the identifier it looks like (see below).
 		*/
-		while (this.isRemoteQualifierHere()) {
+		while (this.matchToken(TokenType.REMOTE)) {
 			this.consumeToken();
 			qualifiers.push('remote');
 		}
         return qualifiers;
     }
 
-	/**
-	 * Whether the current token starts a `remote <type>` declaration.
-	 *
-	 * @returns {boolean}
-	 */
-	isRemoteQualifierHere() {
-		const token = this.getCurrentToken?.() ?? null;
-		if (!token || token.type !== TokenType.IDENTIFIER || token.value !== 'remote') return false;
-		const next = this.peekToken?.(1) ?? null;
-		if (!next) return false;
-		if (next.type === TokenType.IDENTIFIER) return true;	// a typedef name
-		const typeTokens = [
-			TokenType.INT, TokenType.CHAR, TokenType.FLOAT, TokenType.DOUBLE,
-			TokenType.LONG, TokenType.SHORT, TokenType.SIGNED, TokenType.UNSIGNED,
-			TokenType.VOID, TokenType.BOOL,
-			TokenType.STRUCT, TokenType.UNION, TokenType.ENUM,
-			TokenType.CONST, TokenType.VOLATILE, TokenType.STATIC,
-			TokenType.EXTERN, TokenType.AUTO, TokenType.REGISTER, TokenType.NEAR
-		];
-		return typeTokens.includes(next.type);
-	}
 
 	// ****
 	// THIS FUNCTION HAS A MANUAL CHANGE
@@ -2296,6 +2274,14 @@ export class Parser {
             case TokenType.BYNAME: {
                 this.consumeToken();
                 return ASTBuilder.identifier('byname').setAttribute('location', token.location);
+            }
+			/*
+			Same for `remote`: a reserved word, but `remote(dev, var)` is a call,
+			so in expression position it is handed over as an identifier.
+			*/
+            case TokenType.REMOTE: {
+                this.consumeToken();
+                return ASTBuilder.identifier('remote').setAttribute('location', token.location);
             }
             
             case TokenType.NUMBER: {

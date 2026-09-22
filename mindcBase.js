@@ -278,7 +278,7 @@ export class CompilationPhase {
 	 * 找到所有递归的函数
 	 * @param {Map<string, Set<string>>} callGraph - 函数调用关系图
 	 * @returns {Set<string>} - 递归的函数集合
-	 * @remark By deepseek (so stupid) and myself (I still need some OI techniques)
+	 * @remark By Hunyuan, deepseek (so stupid) and myself (I still need some OI techniques)
 	 */
 	findRecursiveFunctions(callGraph) {
         return findRecursiveFunctions(callGraph);

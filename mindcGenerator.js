@@ -23,6 +23,7 @@ import { findRecursiveFunctions } from "./mindcBase.js";
 import { ensureMemspHelper, remoteDeviceRegOf, remoteNameRegOf, RemotePointerRet, RemoteArrayRet, RemoteStoredPointerRet, LookupArrayRet, NameStructPointerRet, NameStructDerefRet,
 	RemoteStructPointerRet,
 	NameArrayRet, ArrayHandleRet, ensureArrayHandle, arrayLengthOfType, componentCountOf, isFlatComponentType, CATEGORY_ALIASES, Globals, VariableRet, ImmediateRet, BasicRet, IntRet, BoolRet, FloatRet, ContentRet,
+	TraditionalArrayRet,
 	PointerRet, RefPointerRet, MemPointerRet, VolatilePointerRet, MemoryRefRet, StructRefRet,
 	symbolRef, ExportRet, valueClassOf, readThrough, writeThrough, pointerStep,
 	RegistryStructRet, NamePointerRet,
@@ -451,9 +452,17 @@ export class CodeGenerator extends ASTVisitor {
 			.map(name => this.currentScope?.lookup?.(name) ?? this.semantic?.globalScope?.lookup?.(name) ?? null);
 		const onlyBuiltinOutputs = !!addressUses && addressUses.other === 0
 			&& addressUses.pointers.size === 0 && addressUses.builtin > 0;
+		/*
+		Every pointer that takes `&x` has to really HOLD A NAME. A pointer the
+		analysis refused (because it is stepped, indexed, or otherwise needs a
+		real address) leaves `usesNamePointer` unset -- and taking its silence
+		for consent made x stay in a register while the pointer read it as a
+		pair of block/offset registers that were never assigned.
+		*/
 		const takenByNamePointers = !!addressUses && addressUses.other === 0
 			&& addressUses.pointers.size > 0 && this.namePointerAllowed()
-			&& pointerTakers.every(p => p === null || p.usesNamePointer === true || p.usesNamePointer === undefined);
+			&& pointerTakers.length > 0
+			&& pointerTakers.every(p => p !== null && p.usesNamePointer === true);
 		const addressedAsOutput = symbol.addressedAsBuiltinOutput === true
 			|| onlyBuiltinOutputs || takenByNamePointers;
 		/*
@@ -1132,6 +1141,11 @@ export class CodeGenerator extends ASTVisitor {
 			//result.concat();
 			// Check the scope that this function owns
 			const funcSymbol = this.currentScope.lookup(func.name);
+			/*
+			Inlined into every caller and then dropped: nothing is left to
+			emit. (The body already travelled into those callers.)
+			*/
+			if (!funcSymbol) return;
 			if (func.name === 'main') {
 				mainSymbol = funcSymbol;
 			}
@@ -1423,6 +1437,22 @@ export class CodeGenerator extends ASTVisitor {
 				if ((sym.type.type.kind === 'struct' || sym.type.type.kind === 'union')) {
 					// Must be copied (NOTE: They are NOT .__pointer NOw!)
 					return [this.copyStruct(sym.getAssemblySymbol(), paramName, sym.type.type)];
+				}
+				/*
+				An array parameter that takes a HANDLE: what arrives is the pair
+				`<param>_get` / `<param>_set`, not a block/offset pair. Copying
+				`_block` / `_pos` (which `writeSymbol` would do) leaves both
+				halves undefined, and the first access then jumps through a
+				register that is still 0 -- an endless loop.
+				*/
+				if (sym.myType?.()?.kind === 'array'
+					&& (sym.arrayParamRep === 'handle' || sym.arrayParamRep === 'remote'
+						|| sym.arrayParamRep === 'names')) {
+					const base = sym.getAssemblySymbol();
+					return [
+						InstructionBuilder.set(`${base}_get`, `${paramName}_get`),
+						InstructionBuilder.set(`${base}_set`, `${paramName}_set`)
+					];
 				}
 				return [this.writeSymbol(sym, paramName)];
 			})));	// Copy the parameters
@@ -3719,6 +3749,7 @@ export class CodeGenerator extends ASTVisitor {
 			case 'Identifier': {
 				const identity = this.currentScope.lookup(left.name);
 				if (!identity) {
+
 					throw new InternalGenerationFailure(`Unknown variable ${left.name}`, left);
 				}
 				return symbolRef(glob, identity);
@@ -4001,53 +4032,78 @@ export class CodeGenerator extends ASTVisitor {
 		thing that CAN be handed over, because a non-memory array has no address.
 		*/
 		const representation = paramSymbol?.arrayParamRep ?? null;
-		if ((representation === 'handle' || representation === 'remote' || representation === 'names')
-			&& argNode && argNode.type === 'Identifier') {
-			const argSymbol = this.currentScope?.lookup?.(argNode.name)
-				?? this.semantic?.globalScope?.lookup?.(argNode.name) ?? null;
-			if (argSymbol && argSymbol.myType?.()?.kind === 'array') {
-				const array = this.arrayViewOf(argSymbol);
-				const handle = array ? ensureArrayHandle(glob, array) : null;
-				if (!handle) {
-					throw new InternalGenerationFailure(
-						`Array '${argNode.name}' cannot be handed to a function: `
-						+ `it has no representation that travels as a value`, argNode.location);
-				}
-				const length = arrayLengthOfType(slotType) || array.length || 0;
-				const instructions = [value.instructions, handle.instructions,
-					InstructionBuilder.set(`${slotName}_get`, handle.get)];
-				if (handle.set) {
-					instructions.push(InstructionBuilder.set(`${slotName}_set`, handle.set));
-				}
-				return new ArrayHandleRet(glob, slotName, slotType, length, instructions);
+		const argSymbol = (argNode && argNode.type === 'Identifier')
+			? (this.currentScope?.lookup?.(argNode.name)
+				?? this.semantic?.globalScope?.lookup?.(argNode.name) ?? null)
+			: null;
+		const argIsArray = !!argSymbol && argSymbol.myType?.()?.kind === 'array';
+		/*
+		How an array travels is decided by the SLOT it goes into, not by the call
+		site -- an indirect call has no call-site information at all, since the
+		callee is a register holding a line number:
+		  - a parameter marked `handle` / `remote` / `names`, or one whose type is
+		    declared `remote`, takes a HANDLE (two helper entry points). That is
+		    the only form an array without an address can travel as, and it is
+		    also accepted from a memory array;
+		  - anything else takes a POINTER.
+		*/
+		/*
+		`remote int s[4]`: on an array the qualifier sits on the ELEMENT level
+		(`remote int` is the element type), so both levels have to be looked at.
+		*/
+		const slotWantsHandle = !!slotType
+			&& ((slotType.qualifiers ?? []).includes('remote')
+				|| (slotType.pointerTo?.qualifiers ?? []).includes('remote'));
+		const wantsHandle = argIsArray && !!slotType && slotType.kind === 'array'
+			&& (representation === 'handle' || representation === 'remote'
+				|| representation === 'names' || (!paramSymbol && slotWantsHandle));
+
+		if (wantsHandle) {
+			/*
+			`arrayViewOf` cannot describe a MEMORY array (it has no pointer to
+			build the view from), so one is built from the value that was just
+			materialised -- for an array that value IS its address.
+			*/
+			let array = null;
+			/*
+			`arrayViewOf` cannot describe a memory array at all (it builds the
+			view from a pointer it is never given), so ask first.
+			*/
+			if (this.arrayStyleFor(argSymbol)?.type !== 'traditional') {
+				array = this.arrayViewOf(argSymbol);
 			}
+			if (!array && value instanceof PointerRet) {
+				const length = arrayLengthOfType(slotType) || this.arrayLengthOf(argSymbol) || 0;
+				array = new TraditionalArrayRet(glob, value, slotType ?? argSymbol.myType?.(), length);
+			}
+			const handle = array ? ensureArrayHandle(glob, array) : null;
+			if (!handle) {
+				throw new InternalGenerationFailure(
+					`Array '${argNode.name}' cannot be handed to a function: `
+					+ `it has no representation that travels as a value`, argNode.location);
+			}
+			const length = arrayLengthOfType(slotType) || array.length || 0;
+			const instructions = [value.instructions, handle.instructions,
+				InstructionBuilder.set(`${slotName}_get`, handle.get)];
+			if (handle.set) {
+				instructions.push(InstructionBuilder.set(`${slotName}_set`, handle.set));
+			}
+			return new ArrayHandleRet(glob, slotName, slotType, length, instructions);
 		}
 		/*
-		An indirect call: the callee is not known here, so the parameter symbol
-		is missing. A non-memory array still cannot be turned into a pointer --
-		and the fixed `__param_N` slots cannot carry a per-element description --
-		so it, too, has to travel as a handle.
+		An indirect call whose slot expects a POINTER: a memory array has one, so
+		it falls through to the ordinary delivery below. One that does not cannot
+		be turned into an address, and the fixed `__param_N` slots cannot carry a
+		per-element description either -- say so instead of emitting code that
+		silently reads a block/offset pair nobody assigned.
 		*/
-		if (!paramSymbol && argNode && argNode.type === 'Identifier'
-			&& slotType && slotType.kind === 'array') {
-			const argSymbol = this.currentScope?.lookup?.(argNode.name)
-				?? this.semantic?.globalScope?.lookup?.(argNode.name) ?? null;
-			if (argSymbol && argSymbol.myType?.()?.kind === 'array'
-				&& argSymbol.arrayParamRep !== 'traditional'
-				&& !argSymbol.isTraditionalArray) {
-				/*
-				The callee is not known here, so nothing can tell it that its
-				parameter arrived as a handle -- and without that it would read
-				the handle as a block/offset pair. Say so instead of emitting
-				code that silently breaks. (Function overloading, once it
-				exists, is what removes this restriction: the parameter's
-				representation then comes from the declared type.)
-				*/
-				throw new InternalGenerationFailure(
-					`Array '${argNode.name}' is not laid out in memory, so it cannot be handed `
-					+ `to a function pointer yet: call the function directly, or give the `
-					+ `array a memory layout`, argNode.location);
-			}
+		if (!paramSymbol && argIsArray && !!slotType && slotType.kind === 'array'
+			&& this.arrayStyleFor(argSymbol)?.type !== 'traditional') {
+			throw new InternalGenerationFailure(
+				`Array '${argNode.name}' has no address, so it cannot be handed to a `
+				+ `function pointer whose parameter is an ordinary array: declare that `
+				+ `parameter 'remote' (it then travels as a handle), or give the array a `
+				+ `memory layout`, argNode.location);
 		}
 		/*
 		A name based struct pointer: what travels is the SET OF NAMES, one per
