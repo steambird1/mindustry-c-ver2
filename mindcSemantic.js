@@ -4095,6 +4095,17 @@ export class SemanticAnalyzer extends ASTVisitor {
         const param = (template.parameters ?? [])[index];
         if (!param) return 'unknown';
         const type = this.getTypeInfo(this.getTypeNameFromTypeNode(param));
+        /*
+        Look at the PARAMETER before looking at the argument: whether there is
+        anything to decide follows from the parameter alone.
+
+        A SCALAR has exactly one representation, so `void f(auto int x)` is
+        simply `void f(int x)` -- nothing is specialised and no argument has to
+        be inspected. Refusing anything but a bare name here is what rejected
+        `f(3)`, `f((int)q)` and every other ordinary expression.
+        */
+        if (!type) return 'unknown';
+        if (type.kind !== 'array' && type.kind !== 'pointer') return 'scalar';
         let inner = arg;
         if (inner && inner.type === 'UnaryExpression' && inner.operator === '&') inner = inner.argument;
         const symbol = (inner && inner.type === 'Identifier')
@@ -4121,17 +4132,6 @@ export class SemanticAnalyzer extends ASTVisitor {
             */
             if (this.compiler?.arrayOptimize === true) return 'ambiguous';
             return 'memory';
-        }
-        if (type && type.kind === 'pointer') {
-            /*
-            An array with no address of its own has to travel as a handle; one
-            in memory travels as a pointer.
-            */
-            if (symbol.isRemote === true) return 'handle';
-            const requested = symbol.requestedArrayImplementation ?? null;
-            if (requested === 'traditional') return 'memory';
-            if (requested === null && !(this.compiler?.arrayOptimize === true)) return 'memory';
-            return 'handle';
         }
         if (type && type.kind === 'pointer') {
             /*
@@ -4298,7 +4298,12 @@ export class SemanticAnalyzer extends ASTVisitor {
                 for (let a = 0; a < autoIndices.length; a++) {
                     const paramIndex = autoIndices[a];
                     const paramName = template.parameters[paramIndex]?.name;
-                    if (reps[a] !== 'memory' && paramName
+                    /*
+                    `scalar` is exempt: `x + 1` on a plain int is arithmetic,
+                    not a pointer being stepped, so it says nothing about the
+                    representation.
+                    */
+                    if (reps[a] !== 'memory' && reps[a] !== 'scalar' && paramName
                         && this.autoBodyNeedsAddress(template, paramName)) {
                         this.addError(`Parameter '${paramName}' of '${originalName}' is 'auto', and this `
                             + `call hands it something that has no address (${reps[a]}) -- but the body `
