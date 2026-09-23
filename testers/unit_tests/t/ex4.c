@@ -1,3 +1,4 @@
+#include "sharelist.js"
 auto device message1;
 void main() {
     sdlist_t l = sdcreate(7, 5);

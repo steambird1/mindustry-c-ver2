@@ -278,7 +278,7 @@ export class CompilationPhase {
 	 * 找到所有递归的函数
 	 * @param {Map<string, Set<string>>} callGraph - 函数调用关系图
 	 * @returns {Set<string>} - 递归的函数集合
-	 * @remark By deepseek (so stupid) and myself (I still need some OI techniques)
+	 * @remark By Hunyuan, deepseek (so stupid) and myself (I still need some OI techniques)
 	 */
 	findRecursiveFunctions(callGraph) {
         return findRecursiveFunctions(callGraph);
@@ -793,6 +793,33 @@ export class ASTVisitor extends CompilationPhase {
 		});
         
         return result;
+	}
+
+	/**
+	 * Walk the AST itself -- and nothing else.
+	 *
+	 * `further` descends ONE level, and only through the fields that hold child
+	 * nodes. Walking every key of every object instead reaches `scope`,
+	 * `dataType`, the type tables and the symbol tables, which form a graph
+	 * WITH CYCLES: a node's scope holds its symbols, and a symbol holds that
+	 * scope again. That is why such a walk needed a `seen` set and a depth cap
+	 * to terminate at all -- and why the cap silently truncated it.
+	 *
+	 * Here every object reached is a node, so the walk terminates on its own.
+	 *
+	 * @param {ASTNode} node
+	 * @param {ASTVisitorCallback} callee
+	 * @returns {void}
+	 */
+	deepWalk(node, callee) {
+		if (!node) return;
+		const visit = n => {
+			if (!n || typeof n !== 'object') return;
+			callee(n);
+			// `further` is a method of this visitor, not of the node
+			this.further(n, child => visit(child));
+		};
+		visit(node);
 	}
 }
 

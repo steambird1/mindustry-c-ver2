@@ -1,3 +1,4 @@
+#include "archon.js"
 auto device message1;
 void main() {
     argetblock("floor", 1, 2);

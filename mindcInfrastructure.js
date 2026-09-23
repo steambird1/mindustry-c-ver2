@@ -2377,8 +2377,15 @@ export class RemoteSlotRet extends VariableRet {
 
 	/** `&rs` -- the binding itself, so that it can be copied around. */
 	address() {
-		return new RemotePointerRet(this.glob, this.deviceReg, this.nameReg,
+		const ret = new RemotePointerRet(this.glob, this.deviceReg, this.nameReg,
 			pointerTypeOf(this.glob, this.type), this.instructions);
+		/*
+		It is TWO registers (processor + name). `replace_variable` would
+		rename the one it is told about and leave the other behind, so it has
+		to be handed over as a value instead.
+		*/
+		ret.setAttribute('disallowReplacement', true);
+		return ret;
 	}
 
 	get() {
@@ -3246,6 +3253,27 @@ function handleShapeOf(array) {
 		for (let i = 0; i < array.length; i++) names.push(array.elementName(i));
 		return { length: array.length, device: '@this', names, dynamic: false };
 	}
+	/*
+	A MEMORY array has no element NAMES, but it does have an address -- and an
+	address is enough: the helper computes `base + i * size`, turns the block
+	number into the building and reads through it. No `select` chain is needed,
+	which is what makes this cheap even for a long array.
+
+	This is the one layout that can also travel as a plain pointer, so it keeps
+	that ability; the handle is an additional representation, not a replacement.
+	*/
+	if (array instanceof TraditionalArrayRet) {
+		const pointer = array.pointer ?? null;
+		if (!pointer) return null;
+		return {
+			length: array.length,
+			kind: 'memory',
+			block: pointer.blockOperand?.() ?? `${pointer.name}_block`,
+			pos: `${pointer.name}_pos`,
+			size: array.elementSize ?? 1,
+			names: [], dynamic: false
+		};
+	}
 	return null;
 }
 
@@ -3294,6 +3322,28 @@ export function ensureArrayHandle(glob, array) {
 			return key;
 		}
 		const body = new Instruction();
+		/*
+		A memory array: work out the address of element `__arridx` first, then
+		read or write through it. `getlink` has to happen INSIDE the helper
+		because only there is the offset known.
+		*/
+		if (shape.kind === 'memory') {
+			if (shape.size > 1) {
+				body.concat(InstructionBuilder.op('mul', '__arrsel', '__arridx', shape.size));
+				body.concat(InstructionBuilder.op('add', '__arrsel', shape.pos, '__arrsel'));
+			} else {
+				body.concat(InstructionBuilder.op('add', '__arrsel', shape.pos, '__arridx'));
+			}
+			body.concat(InstructionBuilder.getlink('__arrblk', shape.block));
+			if (kind === 'get') {
+				body.concat(InstructionBuilder.read('__arrret', '__arrblk', '__arrsel'));
+			} else {
+				body.concat(InstructionBuilder.write('__arrval', '__arrblk', '__arrsel'));
+			}
+			reg.addFunction(key, body, null, [], true, false, true);
+			reg.functionCollection.get(key).calls++;
+			return key;
+		}
 		if (kind === 'get') {
 			if (shape.dynamic) {
 				body.concat(InstructionBuilder.read('__arrret', shape.device, shape.names[0]));
@@ -3330,8 +3380,55 @@ export function ensureArrayHandle(glob, array) {
 	return {
 		instructions: array.instructions ?? [],
 		get: helperAddressOf(build('get')),
-		set: helperAddressOf(build('set'))
+		set: helperAddressOf(build('set')),
+		length: shape.length ?? 0,
+		size: shape.size ?? 1
 	};
+}
+
+/**
+ * The bit layout of a packed handle.
+ * @see ArrayHandleRet
+ */
+export const HANDLE_FIELD_BITS = 12;
+export const HANDLE_MASK = (1 << HANDLE_FIELD_BITS) - 1;	// 4095
+
+/** The constant `len << 24 | size << 36`, folded at compile time. */
+export function handleTailOf(length = 0, size = 1) {
+	/*
+	NOT `<<`: JavaScript's shift truncates to 32 bits, so `1 << 36` came out
+	as 16 -- the size field silently landed on top of the length one. BigInt
+	keeps the full width, which is what the machine's own 64-bit numbers do.
+	*/
+	return Number((BigInt(Math.trunc(Number(length) || 0)) << BigInt(HANDLE_FIELD_BITS * 2))
+		| (BigInt(Math.trunc(Number(size) || 0)) << BigInt(HANDLE_FIELD_BITS * 3)));
+}
+
+/**
+ * Instructions that build the packed handle in `target`.
+ *
+ * @param {Globals} glob
+ * @param {string} target the register to hold the handle
+ * @param {{get: string, set: string?, length: number, size: number}} handle
+ * @returns {any[]}
+ */
+export function packHandle(glob, target, handle) {
+	const out = [];
+	const tail = handleTailOf(handle.length, handle.size);
+	/*
+	The get helper is already in the low bits, so it is copied straight in; the
+	set helper is shifted up. The two constant fields are OR'd in as one
+	literal -- which is what keeps this to three instructions instead of five.
+	*/
+	out.push(InstructionBuilder.set(target, handle.get));
+	if (handle.set) {
+		const shifted = glob?.tmp?.(null, 'handle') ?? `${target}__shl`;
+		const name = typeof shifted === 'string' ? shifted : nameOf(shifted);
+		out.push(InstructionBuilder.op('shl', name, handle.set, String(HANDLE_FIELD_BITS)));
+		out.push(InstructionBuilder.op('or', target, target, name));
+	}
+	if (tail) out.push(InstructionBuilder.op('or', target, target, String(tail)));
+	return out;
 }
 
 /**
@@ -3355,8 +3452,20 @@ export class ArrayHandleRet extends ArrayRet {
 		this.setAttribute('disallowReplacement', true);
 	}
 
+	/*
+	ONE register. Four fields are packed into it (see `packHandle`):
+
+	    bits  0..11  the get helper's line number
+	    bits 12..23  the set helper's line number
+	    bits 24..35  lenof, i.e. the element count
+	    bits 36..47  sizeof, i.e. the size of one element
+
+	Two registers would be simpler, but a function pointer carries its
+	arguments in fixed `__param_N` slots and cannot know anything about the
+	call site -- so what travels has to be a single value.
+	*/
 	get width() {
-		return 2;
+		return 1;
 	}
 
 	/** The address of the get helper. */
@@ -3392,6 +3501,26 @@ class ArrayHandleSlotRet extends VariableRet {
 		this.operand = operand;
 	}
 
+	/** `op and <tmp> <handle> 4095` -- the get helper sits in the low bits. */
+	extractGet() {
+		const glob = this.glob;
+		const tmp = glob.tmp(null, 'handle');
+		const tn = nameOf(tmp);
+		return { name: tn, instruction: InstructionBuilder.op('and', tn, this.array.name,
+			String(HANDLE_MASK)) };
+	}
+
+	/** `op shr` + `op and` -- the set helper sits one field up. */
+	extractSet() {
+		const glob = this.glob;
+		const tmp = glob.tmp(null, 'handle');
+		const tn = nameOf(tmp);
+		return { name: tn, instructions: [
+			InstructionBuilder.op('shr', tn, this.array.name, String(HANDLE_FIELD_BITS)),
+			InstructionBuilder.op('and', tn, tn, String(HANDLE_MASK))
+		] };
+	}
+
 	get() {
 		const glob = this.glob;
 		const target = glob.tmp(this.type);
@@ -3401,8 +3530,12 @@ class ArrayHandleSlotRet extends VariableRet {
 		name known at compile time. That is the whole point of a handle -- the
 		function does not know which array it was handed.
 		*/
-		const call = glob.funcReg.getRawFunctionCall(this.array.getReg,
+		const got = this.extractGet();
+		const call = glob.funcReg.getRawFunctionCall(got.name,
 			new Map([['__arridx', this.operand.name]]), false, null);
+		return valueClassOf(glob, this.type).create(glob,
+			[this.instructions, got.instruction, call, InstructionBuilder.set(tn, '__arrret')],
+			tn, this.type, true);
 		return valueClassOf(glob, this.type).create(glob,
 			[this.instructions, call, InstructionBuilder.set(tn, '__arrret')],
 			tn, this.type, true);
@@ -3411,10 +3544,12 @@ class ArrayHandleSlotRet extends VariableRet {
 	set(other) {
 		const glob = this.glob;
 		const value = other.get().convertTo(this.type ?? other.type);
-		const call = glob.funcReg.getRawFunctionCall(this.array.setReg,
+		const got = this.extractSet();
+		const call = glob.funcReg.getRawFunctionCall(got.name,
 			new Map([['__arridx', this.operand.name], ['__arrval', value.name]]), false, null);
 		return valueClassOf(glob, this.type).create(glob,
-			[this.instructions, value.instructions, call], value.name, this.type, false);
+			[this.instructions, got.instructions, value.instructions, call],
+			value.name, this.type, false);
 	}
 }
 
@@ -3677,6 +3812,24 @@ export function symbolRef(glob, symbol) {
 	A pointer to a struct may carry the NAME of every member: one register per
 	member instead of a block/offset pair.
 	*/
+	/*
+	`remote int *p` -- the POINTEE is remote, so the pointer is the pair
+	(processor, name) rather than (block, offset). Reading it as the latter is
+	what made `remote int *p2 = &rs;` emit `p2_block`, a register that was never
+	assigned.
+	*/
+	if (!symbol.isRemote && type && type.kind === 'pointer'
+		&& (type.pointerTo?.qualifiers ?? []).includes('remote')
+		&& !symbol.accessThroughPointer && !symbol.needMemoryAllocation) {
+		const ret = new RemotePointerRet(glob, remoteDeviceRegOf(assembly),
+			remoteNameRegOf(assembly), type, []);
+		ret.setAttribute('relevantSymbol', symbol);
+		ret.setAttribute('relevantSymbolRead', symbol);
+		ret.setAttribute('isSymbolic', true);
+		ret.setAttribute('disallowReplacement', true);
+		return ret;
+	}
+
 	if (type && type.kind === 'pointer' && glob.generator?.structNamePointerAllowed?.(type.pointerTo)
 		&& (symbol.usesNamePointer === true || symbol.forcedNamePointer === true
 			|| symbol.addressedByName === true)) {
