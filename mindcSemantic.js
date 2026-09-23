@@ -772,6 +772,14 @@ export class MemberInfo {
         this.type = type;
         this.offset = offset; // 成员偏移量
         this.bitField = bitField; // 位域信息 [Unused!!]
+        /*
+        `int *byname ptr` inside a struct: the member is a pointer that carries
+        a NAME, so `*s.ptr` is `read / write @this <the name>`. It has to be
+        recorded here because the member has no SymbolEntry of its own -- which
+        is exactly why the qualifier used to be dropped, making the write put
+        one word and the read take two.
+        */
+        this.namePointer = false;
     }
 }
 
@@ -960,12 +968,27 @@ export class SemanticAnalyzer extends ASTVisitor {
         Only now is the whole program read, so only now can a `remote()` that
         mentions an array declared further down be bound.
         */
+        /*
+        A function POINTER type is a fixed contract: what travels through it is
+        a line number, so the function behind it cannot be told which
+        instantiation to use. A template struct in such a signature has no
+        single representation to pick, so it is rejected here -- write the
+        concrete struct instead (`struct cvt { int *byname p; }`).
+        */
+        this.rejectTemplateInFunctionPointers();
         this.finalizeRemoteLinks();
         /*
         Only now is every call site known, so only now can each array parameter
         be told which layout it will be given.
         */
         this.finalizeArrayParameters(ast);
+        /*
+        Only now is every store into a struct member known, so only now can an
+        `auto` member settle on the representation its instance needs.
+        */
+        this.specializeStructTemplates(ast);
+        this.specializeStructTemplateFunctions(ast);
+        this.verifyStructConversions();
 
         return {
             success: this.errors.length === 0,
@@ -1281,6 +1304,36 @@ export class SemanticAnalyzer extends ASTVisitor {
         const structType = new TypeInfo(typeName, kind, 0); // 初始大小为0
         structType.members = [];
         
+        /*
+        Registered BEFORE the members are read: a member may point at the very
+        struct being defined (`struct node { struct node *next; }`). The entry is
+        incomplete at this point (size 0, no members), which is harmless -- a
+        pointer to it is 2 words whatever it turns out to contain -- and it is
+        filled in below.
+        */
+        this.typeTable.set(typeName, structType);
+        this.structTable.set(typeName, structType);
+        structType.beingDefined = true;
+        /*
+        `struct tmpl { auto int *p; }` -- a member asking for whichever
+        representation the instance turns out to need. Such a struct is a
+        PATTERN: every instance has to settle on one representation per `auto`
+        member before the type can be used.
+        */
+        const templateMembers = [];
+        (defNode.members ?? []).forEach(member => {
+            const q = [
+                ...(member?.type?.getAttribute?.('qualifiers') ?? []),
+                ...((member?.type?.pointerQualifiers ?? []).flat()),
+                ...(member?.getAttribute?.('qualifiers') ?? [])
+            ];
+            if (q.includes('auto')) templateMembers.push(member.name);
+        });
+        if (templateMembers.length) {
+            structType.isTemplate = true;
+            structType.templateMembers = templateMembers;
+        }
+
         // 处理成员
         let currentOffset = 0;
         let maxMemberSize = 0;
@@ -1295,6 +1348,7 @@ export class SemanticAnalyzer extends ASTVisitor {
                     this.addError(`Unknown member type '${memberTypeName}'`, member.location);
                     return;
                 }
+                const memberByname = this.hasByNameQualifier(member);
                 
                 // 计算成员大小（所有基本类型大小为1）
                 const memberSize = this.calculateTypeSize(memberType);
@@ -1310,6 +1364,7 @@ export class SemanticAnalyzer extends ASTVisitor {
                         currentOffset,
                         member.bitField
                     );
+                    memberInfo.namePointer = memberByname;
                     structType.members.push(memberInfo);
                     currentOffset += memberSize;
                 }
@@ -1340,9 +1395,8 @@ export class SemanticAnalyzer extends ASTVisitor {
             structType.size = 0;
         }
         
-        // 存储到类型表
-        this.typeTable.set(typeName, structType);
-        this.structTable.set(typeName, structType);
+        // 存储到类型表 (already registered above, before the members were read)
+        structType.beingDefined = false;
         
         // 如果结构体有名称，添加到当前作用域
         if (defNode.name) {
@@ -1498,7 +1552,16 @@ export class SemanticAnalyzer extends ASTVisitor {
 				if (this.typeTable.has(typeName)) {
 					result = this.typeTable.get(typeName).duplicate();
 				} else if (this.structTable.has(typeName)) {
-					result = this.structTable.get(typeName).duplicate();
+					const live = this.structTable.get(typeName);
+					/*
+					A struct that is still being defined (`struct node { struct node
+					*next; }` -- its own name appears while the members are read).
+					Hand back the LIVE entry, not a copy: a copy taken now is empty
+					and stays empty, so `p->next` later found no members and read at
+					the wrong offset. The live entry is filled in as the definition
+					finishes, which is exactly what a pointer to it needs.
+					*/
+					result = (live.beingDefined === true) ? live : live.duplicate();
 				} else {
 					return null;	// Unable to fetch information
 				}
@@ -1662,7 +1725,20 @@ export class SemanticAnalyzer extends ASTVisitor {
 			call-site notes decide -- is what lets one version take names while
 			another takes addresses, which a single function cannot do.
 			*/
-			const autoRep = param.autoRep ?? param.getAttribute?.('autoRep') ?? null;
+				/*
+				The signature is kept on the FUNCTION node and read back here.
+				Putting it on the parameter object instead did not survive: the
+				parameter list of a cloned node is not the object the visit walks.
+				*/
+				let autoRep = param?.autoRep ?? null;
+				if (!autoRep) {
+					const signature = node.getAttribute?.('autoReps') ?? null;
+					if (signature) {
+						const repsAll = String(signature).split('|');
+						const at = (node.parameters ?? []).indexOf(param);
+						if (at >= 0 && at < repsAll.length) autoRep = repsAll[at];
+					}
+				}
 			if (autoRep === 'name') {
 				paramSymbol.usesNamePointer = true;
 				paramSymbol.forcedNamePointer = true;
@@ -1884,6 +1960,25 @@ export class SemanticAnalyzer extends ASTVisitor {
 			*/
 			this.consumeArrayDirective(declarator, varSymbol);
 			/*
+			`int *byname r` -- the pointer holds a NAME, so `*r` is
+			`read / write @this <the name>`. Written on the declaration it is an
+			explicit request, exactly like `byname(&c)`, and so it needs the
+			target version but not `#pragma optimize(pointer)`.
+
+			Only the parameter form and the `int *byname remote` form were
+			honoured; on a variable the qualifier was silently dropped and the
+			pointer fell back to a block/offset pair -- which is a memory
+			access, and therefore wrong for a pointer meant to carry a name.
+			*/
+			const pointeeKind = finalType.kind === 'pointer'
+				? (finalType.pointerTo?.kind ?? null) : null;
+			if (finalType.kind === 'pointer' && !varSymbol.isRemote
+				&& !['struct', 'union'].includes(pointeeKind)
+				&& this.hasByNameQualifier(declarator)) {
+				varSymbol.usesNamePointer = true;
+				varSymbol.forcedNamePointer = true;
+			}
+			/*
 			`int *remote p` -- a pointer that ITSELF lives in another processor.
 			Reaching it would mean reading two registers out of the other
 			processor, which is not implemented; the check below is where the
@@ -1955,7 +2050,44 @@ export class SemanticAnalyzer extends ASTVisitor {
                 
                 // 类型检查初始化表达式
                 const initType = this.getExpressionType(declarator.initializer);
-                if (initType && !this.isTypeCompatible(finalType, initType)) {
+                /*
+                A function pointer naming a CONCRETE struct may be given a
+                function whose parameter is the template that struct spells
+                out: the version for that variant is emitted and the pointer
+                takes its line number (see
+                `specializeStructTemplateFunctions`).
+                */
+                const fpAcceptsTemplate = (fp, fn) => {
+                    const fpParams = fp?.parameters ?? fp?.functionTo?.parameters ?? null;
+                    const fnParams = fn?.parameters ?? fn?.functionTo?.parameters ?? null;
+                    if (!fpParams || !fnParams) return false;
+                    if (fpParams.length !== fnParams.length) return false;
+                    return fpParams.every((p, i) => {
+                        const want = (typeof p?.type === 'string') ? this.getTypeInfo(p.type) : p?.type;
+                        const got = (typeof fnParams[i]?.type === 'string')
+                            ? this.getTypeInfo(fnParams[i].type) : fnParams[i]?.type;
+                        if (!want || !got) return false;
+                        if (!['struct', 'union'].includes(want.kind)) return false;
+                        const canonical = this.canonicalStructType(got.kind === 'pointer'
+                            ? got.pointerTo : got);
+                        if (canonical?.isTemplate !== true) return false;
+                        /*
+                        The variant the pointer asks for: each `auto` member
+                        takes the representation that struct spells out.
+                        */
+                        const reps = (canonical.templateMembers ?? []).map(mn => {
+                            const m = (want.members ?? []).find(x => x.name === mn);
+                            return (m?.namePointer === true) ? 'name' : 'memory';
+                        });
+                        const variant = this.structVariantOf(canonical, reps);
+                        const vm = variant.members ?? [], wm = want.members ?? [];
+                        return vm.length === wm.length && vm.every((m, k) =>
+                            m.name === wm[k].name
+                            && (m.namePointer === true) === (wm[k].namePointer === true));
+                    });
+                };
+                if (initType && !this.isTypeCompatible(finalType, initType)
+                    && !fpAcceptsTemplate(finalType, initType)) {
                     this.addError(
                         `Cannot initialize '${this.typeToString(finalType)}' with '${this.typeToString(initType)}'`,
                         declarator.initializer.location
@@ -2367,6 +2499,20 @@ export class SemanticAnalyzer extends ASTVisitor {
 		if (!finalType.isRemote() && !qualifiers.includes('remote') && !symbol.remoteStored) {
 			this.addError(`remote() needs the declaration to be qualified 'remote', as in 'remote int x = remote(...)'`,
 				location);
+			declarator.initializer = null;
+			return;
+		}
+		/*
+		A remote array is a flat row of registers on the other side, one name
+		per element. Two or more dimensions have no such shape, and without
+		saying so here the failure came much later, as an internal error about
+		registers.
+		*/
+		const dimCount = (declarator.arrayDimensions ?? []).length
+			|| (symbol.arrayDimensions ?? symbol.dimensions ?? []).length || 1;
+		if (finalType.kind === 'array' && dimCount > 1) {
+			this.addError(`A 'remote' array can only have one dimension: its elements are `
+				+ `single registers of the other processor`, location);
 			declarator.initializer = null;
 			return;
 		}
@@ -3085,6 +3231,450 @@ export class SemanticAnalyzer extends ASTVisitor {
 	 * @param {TypeInfo} type
 	 * @returns {TypeInfo}
 	 */
+	/**
+	 * Whether `from` is an instantiation of the struct template that `to`
+	 * spells out concretely.
+	 *
+	 * `struct tmpl { auto int *p; }` produces variants that all keep the NAME
+	 * `tmpl`. Handing one to `void f(struct cvt)` -- where `struct cvt` has the
+	 * same members, in the same order, with concrete representations -- is
+	 * allowed, because the variant and `cvt` describe the same layout. Anything
+	 * else (a different member, or a different order) is not.
+	 *
+	 * @param {TypeInfo?} from
+	 * @param {TypeInfo?} to
+	 * @returns {boolean}
+	 */
+	isStructVariantOf(from, to) {
+		// A parameter's type is often still the NAME at this point
+		const resolve = t => (typeof t === 'string') ? this.getTypeInfo(t) : t;
+		from = resolve(from); to = resolve(to);
+		if (!from || !to) return false;
+		/*
+		Whether either side is still a pattern has to be asked by NAME: the
+		flag lives on the canonical entry, and a variant does not carry it. The
+		MEMBERS, though, must be read from the object handed in -- a variant's
+		members say what was chosen, and going back to the pattern would lose
+		that.
+		*/
+		const fromIsPattern = from.isTemplate === true
+			|| this.canonicalStructType(from)?.isTemplate === true;
+		if (!['struct', 'union'].includes(from.kind)) return false;
+		if (!['struct', 'union'].includes(to.kind)) return false;
+		if (from.kind !== to.kind) return false;
+		const fm = from.members ?? [], tm = to.members ?? [];
+		if (fm.length !== tm.length) return false;
+		return fm.every((m, i) => {
+			const t = tm[i];
+			if (m.name !== t.name) return false;
+			/*
+			The representation has to agree: a member carrying a NAME and one
+			carrying an address are not the same thing, so a name variant does
+			not convert into a struct that expects an address.
+			*/
+				/*
+			Checked later if `from` is still a pattern: its representation is
+			not chosen until the whole program has been read, which happens
+			after this check runs.
+			*/
+			if (!fromIsPattern
+				&& (m.namePointer === true) !== (t.namePointer === true)) return false;
+			return this.isSameType(m.type, t.type);
+		});
+	}
+
+	/**
+	 * Check the conversions that were accepted while the struct was still a
+	 * pattern: by now every instance has chosen a representation.
+	 *
+	 * @returns {void}
+	 */
+	verifyStructConversions() {
+		for (const entry of this.pendingStructConversions ?? []) {
+			if (!entry.name || !entry.expected) continue;
+			const expected = this.getTypeInfo(entry.expected);
+			if (!expected) continue;
+			const owner = this.symbolByName(entry.name);
+			const actual = owner?.myType?.() ?? null;
+			if (!actual) continue;
+			/*
+			Compared on the MEMBERS of the chosen variant: going through
+			`canonicalStructType` here would find the pattern again, whose
+			members still say "undecided", and every conversion would pass.
+			*/
+			const fm = actual.members ?? [], em = expected.members ?? [];
+			const agree = fm.length === em.length && fm.every((m, i) =>
+				m.name === em[i].name
+				&& (m.namePointer === true) === (em[i].namePointer === true));
+			if (agree) continue;
+			this.addError(`'${entry.name}' does not convert into '${entry.expected}': its 'auto' `
+				+ `members settled on a different representation than that struct spells out`,
+				entry.location);
+		}
+		this.pendingStructConversions = [];
+	}
+
+	/**
+	 * Look a name up across every scope.
+	 *
+	 * @param {string} name
+	 * @returns {SymbolEntry?}
+	 */
+	symbolByName(name) {
+		const visit = scope => {
+			if (!scope) return null;
+			const found = scope.lookup?.(name) ?? null;
+			if (found) return found;
+			for (const child of scope.children ?? []) {
+				const got = visit(child);
+				if (got) return got;
+			}
+			return null;
+		};
+		return visit(this.currentScope) ?? visit(this.globalScope);
+	}
+
+	/**
+	 * Reject `typedef void (*f)(struct tmpl)` -- a template struct in the
+	 * signature of a function POINTER type.
+	 *
+	 * @returns {void}
+	 */
+	rejectTemplateInFunctionPointers() {
+		const inner = t => (t?.kind === 'pointer') ? t.pointerTo : t;
+		const bad = t => {
+			// A parameter's type is still the NAME at this point
+			const raw = (typeof t === 'string') ? this.getTypeInfo(t) : t;
+			const c = this.canonicalStructType(inner(raw));
+			return !!c && c.isTemplate === true;
+		};
+		for (const entry of this.typeTable?.values?.() ?? []) {
+			const fn = entry?.functionTo ?? null;
+			if (!fn) continue;
+			const params = fn.myType?.()?.parameters ?? fn.parameters ?? [];
+			if (!params.some(p => bad(p?.type ?? p))) continue;
+			this.addError(`'${entry.name}' is a function pointer type, and its signature names `
+				+ `a struct with 'auto' members -- which has no single representation to `
+				+ `travel as. Use the concrete struct instead (one whose members spell out `
+				+ `their representation)`, null);
+		}
+	}
+
+	/**
+	 * The canonical entry for a struct type.
+	 *
+	 * A symbol does not necessarily hold the object in `structTable`: it holds
+	 * a copy taken at some point, and flags put on the canonical entry after
+	 * that do not appear in it. Asking by NAME always reaches the one place
+	 * that is kept up to date.
+	 *
+	 * @param {TypeInfo?} type
+	 * @returns {TypeInfo?}
+	 */
+	canonicalStructType(type) {
+		if (!type || !type.name) return type;
+		return this.structTable?.get(type.name)
+			?? this.typeTable?.get(type.name) ?? type;
+	}
+
+	/**
+	 * The concrete variant of a template struct for one representation.
+	 *
+	 * `struct tmpl { auto int *p; }` is a pattern. An instance that stores a
+	 * name in `p` and one that stores an address are two different types --
+	 * exactly like two C++ template instantiations -- and they do not convert
+	 * into each other.
+	 *
+	 * The NAME is kept, so a struct written out with concrete members
+	 * (`struct cvt { int *byname p; }`) compares equal to the variant it
+	 * matches. Converting therefore needs the member names to be the same, in
+	 * the same order -- which is the cheap rule to check, and enough.
+	 *
+	 * Members are deep copied: `TypeInfo.duplicate()` shares the `members`
+	 * array, so setting `namePointer` on a variant would otherwise reach back
+	 * into the pattern.
+	 *
+	 * @param {TypeInfo} type
+	 * @param {string[]} reps one per template member: 'name' or 'memory'
+	 * @returns {TypeInfo}
+	 */
+	structVariantOf(type, reps) {
+		const signature = reps.join('|');
+		this.structVariants = this.structVariants ?? new Map();
+		const key = `${type.name}|${signature}`;
+		const existing = this.structVariants.get(key);
+		if (existing) return existing;
+		const copy = type.duplicate();
+		copy.members = (type.members ?? []).map(m => {
+			const cm = new MemberInfo(m.name, m.type?.duplicate?.() ?? m.type, m.offset, m.bitField);
+			cm.namePointer = m.namePointer;
+			return cm;
+		});
+		const names = type.templateMembers ?? [];
+		names.forEach((memberName, i) => {
+			const m = copy.members.find(x => x.name === memberName);
+			if (!m) return;
+			m.namePointer = (reps[i] === 'name');
+			/*
+			`auto` is what made this a pattern; the variant has decided, so it
+			must not keep asking.
+			*/
+			if (m.type && Array.isArray(m.type.qualifiers)) {
+				m.type.qualifiers = m.type.qualifiers.filter(q => q !== 'auto');
+			}
+		});
+		copy.isTemplate = false;
+		copy.variantSignature = signature;
+		this.structVariants.set(key, copy);
+		return copy;
+	}
+
+	/** The representation a struct member is given by this assignment. */
+	representationOfMemberAssignment(right) {
+		if (!right) return null;
+		let got = null;
+		this.deepWalk(right, n => {
+			if (got) return;
+			const who = String(n.functionName ?? n.callee?.name ?? '');
+			if (who === 'byname') got = 'name';
+			else if (n.type === 'UnaryExpression' && n.operator === '&') got = 'memory';
+		});
+		if (got) return got;
+		/*
+		A variable declared `int *byname q` and stored straight into the member
+		carries a name too.
+		*/
+		if (right.type === 'Identifier') {
+			const sym = this.currentScope?.lookup?.(right.name) ?? null;
+			if (sym?.forcedNamePointer === true || sym?.usesNamePointer === true) return 'name';
+			if (sym?.myType?.()?.kind === 'pointer') return 'memory';
+		}
+		return null;
+	}
+
+	/**
+	 * Settle every template struct instance on one representation per `auto`
+	 * member, from what is actually stored into it.
+	 *
+	 * @param {ASTNode} ast
+	 * @returns {void}
+	 */
+	specializeStructTemplates(ast) {
+		if (!ast) return;
+		const collect = type => {
+			const out = [];
+			this.deepWalk(ast, n => { if (n.type === type) out.push(n); });
+			return out;
+		};
+		/** @type {Map<string, Map<string, string>>} symbol -> member -> rep */
+		const wanted = new Map();
+		/*
+		The whole program has been visited by now, so `currentScope` is the
+		GLOBAL one -- locals live in child scopes, which is why a plain
+		lookup is not enough.
+		*/
+		/*
+		Every node remembers the scope it was written in (`linkScopesToAST` put
+		it there), so asking that scope resolves SHADOWING the way the program
+		reads: a local `m` wins over a global one of the same name. Searching
+		the whole tree for a name instead could pick the wrong one.
+		*/
+		const ownerOf = (name, node) => node?.scope?.lookup?.(name)
+			?? this.symbolByName(name);
+		for (const node of collect('AssignmentExpression')) {
+			if (node.operator !== '=' || node.left?.type !== 'MemberExpression') continue;
+			if (node.left.getAttribute?.('operator') !== '.') continue;
+			const baseNode = node.left.children?.[0];
+			if (baseNode?.type !== 'Identifier') continue;
+			const ownerName = baseNode.name;
+			const owner = ownerOf(ownerName, node);
+			const declared = owner?.myType?.() ?? null;
+			/*
+			Asked by NAME: the symbol's own copy of the type may predate the
+			flags that mark it as a pattern.
+			*/
+			const canonical = this.canonicalStructType(declared);
+			if (!canonical || canonical.isTemplate !== true) continue;
+			const memberName = node.left.children[1]?.name;
+			const rep = this.representationOfMemberAssignment(node.right);
+			if (!memberName || !rep) continue;
+			if (!wanted.has(ownerName)) wanted.set(ownerName, new Map());
+			const prev = wanted.get(ownerName).get(memberName);
+			if (prev && prev !== rep) {
+				this.addError(`'${ownerName}.${memberName}' is given both a name and an `
+					+ `address, so '${ownerName}' has no single representation`,
+					node.location);
+			}
+			wanted.get(ownerName).set(memberName, rep);
+		}
+		for (const [ownerName, members] of wanted) {
+			const owner = ownerOf(ownerName);
+			if (!owner) continue;
+			const declared = owner.myType?.() ?? null;
+			const type = this.canonicalStructType(declared);
+			if (!type) continue;
+			const names = type.templateMembers ?? [];
+			const reps = names.map(n => members.get(n) ?? null);
+			if (reps.some(r => !r)) {
+				const which = names.filter((n, i) => !reps[i]).join(', ');
+				this.addError(`'${ownerName}' has an 'auto' member (${which}) whose representation `
+					+ `is never decided -- store either '&x' or 'byname(&x)' into it`, null);
+				continue;
+			}
+			const variant = this.structVariantOf(type, reps);
+			if (owner.type && typeof owner.type === 'object' && owner.type.type) {
+				owner.type.type = variant;
+			} else {
+				owner.type = variant;
+			}
+			owner.structVariant = variant;
+			owner.templateRepSignature = reps.join('|');
+			/*
+			Member expressions were resolved while the type was still a pattern,
+			so they carry no `memberByname`. Visit them again now that the
+			variant has decided -- otherwise the write would put one word and
+			the read take two.
+			*/
+			this.refreshMemberFlags(ast, ownerName, variant);
+		}
+	}
+
+	/**
+	 * A function whose parameter is a TEMPLATE struct is a pattern too: it has
+	 * to be emitted once per variant it is called with, because a member that
+	 * carries a name and one that carries an address are not read the same way.
+	 *
+	 * @param {ASTNode} ast
+	 * @returns {void}
+	 */
+	specializeStructTemplateFunctions(ast) {
+		const list = ast?.functions ?? [];
+		/** @type {Map<string, any[]>} */
+		const calls = new Map();
+		this.deepWalk(ast, n => {
+			if (n.type !== 'FunctionCall') return;
+			const name = n.callee?.type === 'Identifier' ? String(n.callee.name) : null;
+			if (!name) return;
+			if (!calls.has(name)) calls.set(name, []);
+			calls.get(name).push(n);
+		});
+		const valueUses = [];
+		this.deepWalk(ast, n => {
+			if (n.type === 'VariableDeclarator' && n.initializer?.type === 'Identifier') {
+				valueUses.push({ node: n.initializer, holder: n.name });
+			} else if (n.type === 'AssignmentExpression' && n.right?.type === 'Identifier') {
+				valueUses.push({ node: n.right, holder: n.left?.name });
+			}
+		});
+		const repsOfArgument = arg => {
+			if (!arg || arg.type !== 'Identifier') return null;
+			const sym = this.symbolByName(arg.name);
+			const type = sym?.myType?.() ?? null;
+			if (!type || !['struct', 'union'].includes(type.kind)) return null;
+			const names = this.canonicalStructType(type)?.templateMembers ?? null;
+			if (!names) return null;
+			return (type.members ?? []).filter(m => names.includes(m.name))
+				.map(m => (m.namePointer === true ? 'name' : 'memory')).join('|');
+		};
+		const extra = [];
+		for (const func of [...list]) {
+			const name = String(func.name ?? '');
+			const paramTypes = (func.parameters ?? []).map(p => {
+				const raw = p?.type ?? null;
+				const t = (typeof raw === 'string') ? this.getTypeInfo(raw) : raw;
+				return this.canonicalStructType(t?.kind === 'pointer' ? t.pointerTo : t);
+			});
+			const templateIndices = paramTypes
+				.map((t, i) => (t?.isTemplate === true ? i : -1)).filter(i => i >= 0);
+			if (!templateIndices.length) continue;
+			/** @type {Map<string, any[]>} signature -> nodes to retarget */
+			const groups = new Map();
+			const retarget = new Map();
+			for (const call of calls.get(name) ?? []) {
+				const signature = templateIndices
+					.map(i => repsOfArgument(call.arguments?.[i])).join('|');
+				if (!signature || signature.split('|').some(r => !r)) continue;
+				if (!groups.has(signature)) { groups.set(signature, []); retarget.set(signature, []); }
+				retarget.get(signature).push(call.callee);
+			}
+			for (const use of valueUses) {
+				if (String(use.node?.name) !== name) continue;
+				const sym = this.symbolByName(use.holder);
+				const fpType = sym?.myType?.() ?? null;
+				if (!fpType?.parameters) continue;
+				const signature = templateIndices
+					.map(i => this.autoRepFromExpectedType(fpType.parameters[i]?.type
+						?? fpType.parameters[i])).join('|');
+				if (!signature || signature.split('|').some(r => !r)) continue;
+				if (!groups.has(signature)) { groups.set(signature, []); retarget.set(signature, []); }
+				retarget.get(signature).push(use.node);
+			}
+			if (!groups.size) continue;
+			const saved = this.currentScope;
+			this.currentScope = this.globalScope;
+			const made = [];
+			let index = 0;
+			for (const signature of groups.keys()) {
+				const copy = this.cloneAstNode(func);
+				copy.name = this.mangleFunctionName(name, index++);
+				copy.scope = null;
+				copy.setAttribute('autoInstance', true);
+				copy.setAttribute('autoReps', signature);
+				templateIndices.forEach((paramIndex, a) => {
+					const param = copy.parameters?.[paramIndex];
+					if (!param) return;
+					const wanted = signature.split('|')[a];
+					/*
+					The variant the parameter has to see: same name, members
+					decided.
+					*/
+					const base = paramTypes[paramIndex];
+					const reps = (base?.templateMembers ?? []).map((_, k) =>
+						signature.split('|')[k] ?? 'memory');
+					param.type = this.structVariantOf(base, reps);
+				});
+				this.visit(copy);
+				made.push(copy);
+				for (const node of retarget.get(signature) ?? []) {
+					node.name = copy.name;
+					node.setAttribute('overloadResolved', true);
+				}
+			}
+			this.currentScope = saved;
+			const at = list.indexOf(func);
+			if (at >= 0) list.splice(at, 1, ...made);
+			extra.push(...made);
+		}
+		if (extra.length) (ast.functions ?? []).push(...[]);
+	}
+
+	/**
+	 * Re-resolve `x.m` for one struct variable after its type changed.
+	 *
+	 * @param {ASTNode} ast
+	 * @param {string} ownerName
+	 * @param {TypeInfo} variant
+	 * @returns {void}
+	 */
+	refreshMemberFlags(ast, ownerName, variant) {
+		if (!ast) return;
+		const collect = type => {
+			const out = [];
+			this.deepWalk(ast, n => { if (n.type === type) out.push(n); });
+			return out;
+		};
+		for (const node of collect('MemberExpression')) {
+			if (node.children?.[0]?.type !== 'Identifier') continue;
+			if (node.children[0].name !== ownerName) continue;
+			const memberName = node.children[1]?.name;
+			const info = (variant.members ?? []).find(m => m.name === memberName);
+			if (info?.namePointer !== true || info.type?.kind !== 'pointer') continue;
+			node.setAttribute('memberByname', true);
+			node.memberInfo = info;
+			if (info.type) node.dataType = info.type;
+		}
+	}
+
 	memoryVariantOf(type) {
 		if (!type || !type.isTypeInfo) return type;
 		if (!['struct', 'union'].includes(type.kind)) return type;
@@ -3433,6 +4023,15 @@ export class SemanticAnalyzer extends ASTVisitor {
 		
 		// 设置节点属性，便于代码生成阶段使用
 		node.setAttribute('memberOffset', memberInfo.offset);
+		/*
+		`int *byname ptr` inside a struct: carried on the node so the generator
+		knows this MEMBER holds a name. A member has no SymbolEntry, which is
+		why the qualifier used to be dropped: the write put one word (the name)
+		and the read then took two (block + offset), and the two never met.
+		*/
+		if (memberInfo.namePointer === true && memberInfo.type?.kind === 'pointer') {
+			node.setAttribute('memberByname', true);
+		}
 		node.setAttribute('memberName', memberName);
 		regOffset(memberInfo.offset);
 
@@ -3608,6 +4207,31 @@ export class SemanticAnalyzer extends ASTVisitor {
 				this.addError(`lenof() takes exactly one operand`, location);
 				return true;
 			}
+			/*
+			An array that arrived as a HANDLE: its length is not part of the
+			PARAMETER's type, so it cannot be answered here -- it rides along in
+			the packed handle and is asked for at run time. Folding it produced 0.
+			*/
+			const argNode = args[0];
+			if (argNode.type === 'Identifier') {
+				const sym = this.currentScope?.lookup(argNode.name) ?? null;
+				const symType = sym?.myType?.() ?? null;
+				const dims = (symType && symType.kind === 'array')
+					? (this.dimensionListOf(symType) ?? []) : null;
+				/*
+				`void f(int s[])` -- the parameter's type says nothing about the
+				length, so the answer has to come from the handle at run time.
+				(`arrayParamRep` cannot be used here: it is filled in only after
+				the call sites have been seen, which is later than this.)
+				*/
+				const known = dims ? dims[0] : null;
+				if (sym && dims && (known === undefined || known === null
+					|| !Number.isFinite(Number(known)) || Number(known) === 0)) {
+					node.dataType = this.getTypeInfo('int');
+					node.setAttribute('lenofOfHandle', sym.getAssemblySymbol?.() ?? argNode.name);
+					return true;
+				}
+			}
 			value = this.lenofOf(args[0], location);
 			if (value === null) return true;
 		}
@@ -3675,9 +4299,18 @@ export class SemanticAnalyzer extends ASTVisitor {
      * @returns {boolean}
      */
     namePointersEnabled() {
-        const config = this.compiler?.optimizerConfig ?? null;
-        if (config?.getAttribute?.('doPointerOptimize') === true) return true;
+        /*
+        The pragma lands in `extraConfig.optimizeOption` -- the same place the
+        generator reads it (`namePointerAllowed`). The two `optimizerConfig`
+        objects probed here do not exist, so this always answered false: an
+        `auto` parameter could never be given the 'name' representation, and
+        `#pragma optimize(pointer)` looked like it had no effect here at all.
+        */
+        const config = this.compiler?.extraConfig?.getAttribute?.('optimizeOption') ?? null;
         if (config?.doPointerOptimize === true) return true;
+        const fallback = this.compiler?.optimizerConfig ?? null;
+        if (fallback?.getAttribute?.('doPointerOptimize') === true) return true;
+        if (fallback?.doPointerOptimize === true) return true;
         return (this.compiler?.config?.getAttribute?.('doPointerOptimize') === true);
     }
 
@@ -4016,6 +4649,72 @@ export class SemanticAnalyzer extends ASTVisitor {
     }
 
     /**
+     * Which representation an `auto` parameter has to use, given the CONCRETE
+     * parameter type a function pointer spells out.
+     *
+     * A function pointer is a line number: nothing at run time can choose, so
+     * the version has to be picked here, from the type the pointer declares.
+     *
+     * @param {TypeInfo|string?} expected
+     * @returns {'name' | 'memory' | 'traditional' | null}
+     */
+    autoRepFromExpectedType(expected) {
+        let t = (typeof expected === 'string') ? this.getTypeInfo(expected) : expected;
+        if (!t) return null;
+        const quals = [
+            ...(t.qualifiers ?? []),
+            ...((t.pointerQualifiers ?? []).flat?.() ?? [])
+        ];
+        if (t.kind === 'pointer') {
+            return quals.includes('byname') ? 'name' : 'memory';
+        }
+        if (t.kind === 'struct' || t.kind === 'union') {
+            const members = t.members ?? [];
+            if (members.some(m => m.namePointer === true)) return 'name';
+            return 'memory';
+        }
+        if (t.kind === 'array') {
+            return (quals.includes('remote')) ? 'handle' : 'traditional';
+        }
+        return 'memory';
+    }
+
+    /**
+     * A function pointer may not name a template: it would need a choice that
+     * only exists at run time.
+     *
+     * @param {TypeInfo?} functionPointerType
+     * @param {any} location
+     * @returns {boolean} whether it was rejected
+     */
+    rejectTemplateInFunctionPointer(functionPointerType, location) {
+        const params = functionPointerType?.parameters ?? null;
+        if (!params) return false;
+        for (const p of params) {
+            const raw = p?.type ?? p;
+            let t = (typeof raw === 'string') ? this.getTypeInfo(raw) : raw;
+            if (!t) continue;
+            const quals = [
+                ...(t.qualifiers ?? []),
+                ...((t.pointerQualifiers ?? []).flat?.() ?? [])
+            ];
+            if (quals.includes('auto')) {
+                this.addError(`A function pointer cannot have an 'auto' parameter: its value is a `
+                    + `line number, so nothing can choose the version at run time. Write the `
+                    + `concrete type instead`, location);
+                return true;
+            }
+            const canonical = this.canonicalStructType(t.kind === 'pointer' ? t.pointerTo : t);
+            if (canonical?.isTemplate === true) {
+                this.addError(`A function pointer cannot name the template '${canonical.name}': `
+                    + `write the concrete struct it settles on instead`, location);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Which representation an `auto` parameter has to use for one argument.
      *
      * Only what can be known for sure is used; everything else falls back to
@@ -4095,6 +4794,17 @@ export class SemanticAnalyzer extends ASTVisitor {
         const param = (template.parameters ?? [])[index];
         if (!param) return 'unknown';
         const type = this.getTypeInfo(this.getTypeNameFromTypeNode(param));
+        /*
+        Look at the PARAMETER before looking at the argument: whether there is
+        anything to decide follows from the parameter alone.
+
+        A SCALAR has exactly one representation, so `void f(auto int x)` is
+        simply `void f(int x)` -- nothing is specialised and no argument has to
+        be inspected. Refusing anything but a bare name here is what rejected
+        `f(3)`, `f((int)q)` and every other ordinary expression.
+        */
+        if (!type) return 'unknown';
+        if (type.kind !== 'array' && type.kind !== 'pointer') return 'scalar';
         let inner = arg;
         if (inner && inner.type === 'UnaryExpression' && inner.operator === '&') inner = inner.argument;
         const symbol = (inner && inner.type === 'Identifier')
@@ -4124,17 +4834,6 @@ export class SemanticAnalyzer extends ASTVisitor {
         }
         if (type && type.kind === 'pointer') {
             /*
-            An array with no address of its own has to travel as a handle; one
-            in memory travels as a pointer.
-            */
-            if (symbol.isRemote === true) return 'handle';
-            const requested = symbol.requestedArrayImplementation ?? null;
-            if (requested === 'traditional') return 'memory';
-            if (requested === null && !(this.compiler?.arrayOptimize === true)) return 'memory';
-            return 'handle';
-        }
-        if (type && type.kind === 'pointer') {
-            /*
             `&x` can be the NAME of x, which lets x stay in a register -- but
             only when x really is one plain register and name pointers are on.
             */
@@ -4143,8 +4842,17 @@ export class SemanticAnalyzer extends ASTVisitor {
                     const targetType = symbol.myType?.() ?? null;
                     const oneRegister = !!targetType && targetType.size === 1
                         && !['array', 'struct', 'union'].includes(targetType.kind);
+                    /*
+                    Whether `&x` can be a NAME has to be judged from what `x`
+                    IS, not from flags that taking its address has already set:
+                    `&x` marks the symbol `accessThroughPointer`, so asking for
+                    `!accessThroughPointer` here asked whether the address had
+                    been taken -- which it has, by definition. The answer was
+                    therefore always 'memory', and the 'name' version of an
+                    `auto` function was never emitted.
+                    */
                     const movable = !symbol.isVolatile && !symbol.isExtern && !symbol.isStatic
-                        && !symbol.accessThroughPointer && !symbol.needMemoryAllocation;
+                        && !symbol.needMemoryAllocation;
                     if (oneRegister && movable && this.namePointersEnabled()) return 'name';
                     return 'memory';
                 }
@@ -4183,12 +4891,18 @@ export class SemanticAnalyzer extends ASTVisitor {
      */
     autoBodyNeedsAddress(template, paramName) {
         let found = false;
-        const seen = new Set();
+        /*
+        `deepWalk` reaches only child nodes, so no `seen` set and no depth cap
+        are needed: every object it visits is a node, and the walk terminates
+        on its own.
+        */
         const walk = node => {
             if (!node || typeof node !== 'object' || found) return;
-            if (seen.has(node)) return;
-            seen.add(node);
-            if (Array.isArray(node)) { node.forEach(walk); return; }
+            /*
+            Only this node is looked at: the DESCENT is `deepWalk`'s job, and
+            calling it again from here would hand it the same node back and
+            never finish.
+            */
             /*
             An ARRAY parameter is a different matter: `s[i]` is a subscript, and
             a handle supports that (it is what indexing a handle means). Only
@@ -4209,12 +4923,8 @@ export class SemanticAnalyzer extends ASTVisitor {
                 const object = node.children?.[0] ?? node.object ?? null;
                 if (object?.type === 'Identifier' && object.name === paramName) { found = true; return; }
             }
-            for (const key of Object.keys(node)) {
-                if (key === 'parent' || key === 'scope') continue;
-                walk(node[key]);
-            }
         };
-        walk(template.body);
+        this.deepWalk(template.body, walk);
         return found;
     }
 
@@ -4238,19 +4948,22 @@ export class SemanticAnalyzer extends ASTVisitor {
 
         /** @type {any[]} */
         const calls = [];
-        const seen = new Set();
-        const walk = node => {
-            if (!node || typeof node !== 'object') return;
-            if (seen.has(node)) return;		// scopes and `parent` point back
-            seen.add(node);
-            if (Array.isArray(node)) { node.forEach(walk); return; }
+        this.deepWalk(ast, node => {
             if (node.type === 'FunctionCall') calls.push(node);
-            for (const key of Object.keys(node)) {
-                if (key === 'parent' || key === 'scope') continue;
-                walk(node[key]);
+        });
+
+        /*
+        Value uses: `fptr z = handler;` -- the function is named, not called.
+        The pointer's own parameter types say which version is wanted.
+        */
+        const valueUses = [];
+        this.deepWalk(ast, n => {
+            if (n.type === 'VariableDeclarator' && n.initializer?.type === 'Identifier') {
+                valueUses.push({ node: n.initializer, owner: n, holder: n.name });
+            } else if (n.type === 'AssignmentExpression' && n.right?.type === 'Identifier') {
+                valueUses.push({ node: n.right, owner: n, holder: n.left?.name });
             }
-        };
-        walk(ast);
+        });
 
         for (const template of templates) {
             const originalName = String(template.name ?? '');
@@ -4271,6 +4984,34 @@ export class SemanticAnalyzer extends ASTVisitor {
                     .map(i => this.autoRepresentationOf(template, i, call.arguments?.[i] ?? null, ast)).join('|');
                 if (!groups.has(signature)) groups.set(signature, []);
                 groups.get(signature).push(call);
+            }
+            /*
+            A function pointer cannot name a template -- so what it DOES name
+            decides the version.
+            */
+            /** @type {Map<string, any[]>} signature -> identifier nodes to retarget */
+            const retarget = new Map();
+            for (const use of valueUses) {
+                if (String(use.node?.name) !== originalName) continue;
+                const holder = use.holder ?? null;
+                if (!holder) continue;
+                const sym = use.owner?.scope?.lookup?.(holder)
+                    ?? this.globalScope?.lookup?.(holder) ?? null;
+                const fpType = sym?.myType?.() ?? null;
+                if (!fpType || !fpType.parameters) continue;
+                if (this.rejectTemplateInFunctionPointer(fpType, use.node.location ?? null)) continue;
+                const signature = autoIndices
+                    .map(i => this.autoRepFromExpectedType(fpType.parameters[i]?.type
+                        ?? fpType.parameters[i]))
+                    .join('|');
+                if (!signature || signature.split('|').some(r => !r)) {
+                    this.addError(`'${originalName}' has an 'auto' parameter, and '${holder}' `
+                        + `does not say which version it wants`, use.node.location ?? null);
+                    continue;
+                }
+                if (!groups.has(signature)) groups.set(signature, []);
+                if (!retarget.has(signature)) retarget.set(signature, []);
+                retarget.get(signature).push(use.node);
             }
             if (groups.size === 0) continue;
             /*
@@ -4298,7 +5039,12 @@ export class SemanticAnalyzer extends ASTVisitor {
                 for (let a = 0; a < autoIndices.length; a++) {
                     const paramIndex = autoIndices[a];
                     const paramName = template.parameters[paramIndex]?.name;
-                    if (reps[a] !== 'memory' && paramName
+                    /*
+                    `scalar` is exempt: `x + 1` on a plain int is arithmetic,
+                    not a pointer being stepped, so it says nothing about the
+                    representation.
+                    */
+                    if (reps[a] !== 'memory' && reps[a] !== 'scalar' && paramName
                         && this.autoBodyNeedsAddress(template, paramName)) {
                         this.addError(`Parameter '${paramName}' of '${originalName}' is 'auto', and this `
                             + `call hands it something that has no address (${reps[a]}) -- but the body `
@@ -4323,6 +5069,10 @@ export class SemanticAnalyzer extends ASTVisitor {
                 for (const call of callSites) {
                     call.callee.name = name;
                     call.callee.setAttribute('overloadResolved', true);
+                }
+                for (const ident of retarget.get(signature) ?? []) {
+                    ident.name = name;
+                    ident.setAttribute('overloadResolved', true);
                 }
             }
             const list = ast.functions ?? [];
@@ -4349,6 +5099,32 @@ export class SemanticAnalyzer extends ASTVisitor {
             const savedScope = this.currentScope;
             this.currentScope = this.globalScope;
             for (const instance of instances) this.visit(instance);
+            /*
+            Each version has to be told how its `auto` parameter arrives.
+
+            The choice was made from the call sites of the TEMPLATE, but a
+            version gets a fresh parameter symbol when it is visited -- and
+            `finalizeArrayParameters` decides from the notes gathered on that
+            symbol, of which a fresh one has none. It therefore fell back to
+            `traditional`, i.e. a pointer: right for a memory array, wrong for
+            one held in registers or in another processor. (Inlining hid this,
+            because an inlined parameter borrows the caller's array instead.)
+            */
+            for (const instance of instances) {
+                const signature = instance.getAttribute?.('autoReps') ?? null;
+                if (!signature) continue;
+                const reps = String(signature).split('|');
+                autoIndices.forEach((paramIndex, a) => {
+                    const rep = reps[a];
+                    if (!rep || rep === 'scalar') return;
+                    const paramNode = (instance.parameters ?? [])[paramIndex];
+                    const paramName = paramNode?.name ?? template.parameters?.[paramIndex]?.name;
+                    if (!paramName) return;
+                    const symbol = instance.scope?.lookupCurrent?.(paramName) ?? null;
+                    if (!symbol || symbol.myType?.()?.kind !== 'array') return;
+                    symbol.arrayParamRep = (rep === 'memory') ? 'traditional' : 'handle';
+                });
+            }
             this.currentScope = savedScope;
             for (const call of mine) {
                 if (call?.callee?.type !== 'Identifier') continue;
@@ -4599,11 +5375,70 @@ export class SemanticAnalyzer extends ASTVisitor {
             const argType = this.getExpressionType(arg);
             const expectedType = expectedParams[index].type;
             
-            if (argType && expectedType && !this.isTypeCompatible(expectedType, argType)) {
+            /*
+            A POINTER to a template struct and a pointer to the struct it
+            spells out are the same question one level down: compare what they
+            point at.
+            */
+            const peelVariant = (a, e) => {
+                const ra = (typeof a === 'string') ? this.getTypeInfo(a) : a;
+                const re = (typeof e === 'string') ? this.getTypeInfo(e) : e;
+                if (!ra || !re) return false;
+                if (ra.kind === 'pointer' && re.kind === 'pointer') {
+                    return this.isStructVariantOf(ra.pointerTo, re.pointerTo);
+                }
+                return this.isStructVariantOf(ra, re);
+            };
+            const compatible = this.isTypeCompatible(expectedType, argType)
+                || peelVariant(argType, expectedType);
+            if (argType && expectedType && !compatible) {
                 this.addError(
                     `Argument ${index + 1} of '${node.callee.name}' expects '${expectedType}', but got '${argType}'`,
                     arg.location
                 );
+            }
+            /*
+            A struct that is still a pattern was accepted by name and shape
+            alone. Whether its chosen representation really matches is only
+            known once every store into it has been seen, so the check is left
+            for then.
+            */
+            if (argType && expectedType && peelVariant(argType, expectedType)) {
+                const raw = (typeof argType === 'string') ? this.getTypeInfo(argType) : argType;
+                const inner = raw?.kind === 'pointer' ? raw.pointerTo : raw;
+                /*
+                Nothing to check when the parameter is the TEMPLATE itself: the
+                argument settles on a variant, and the variant keeps the name.
+                */
+                /*
+                Only a TEMPLATE that is NOT the parameter's own type has
+                anything left to decide:
+                  - a plain struct was checked in full above;
+                  - a parameter that is itself the pattern is replaced by a
+                    variant once the call sites are known, so comparing the
+                    argument against the undecided pattern would reject every
+                    one of them.
+                */
+                const expectedInner = (() => {
+                    const rawE = (typeof expectedType === 'string')
+                        ? this.getTypeInfo(expectedType) : expectedType;
+                    const innerE = rawE?.kind === 'pointer' ? rawE.pointerTo : rawE;
+                    return this.canonicalStructType(innerE);
+                })();
+                if (this.canonicalStructType(inner)?.isTemplate === true
+                    && expectedInner?.isTemplate !== true) {
+                this.pendingStructConversions = this.pendingStructConversions ?? [];
+                    const rawExpected = (typeof expectedType === 'string')
+                        ? this.getTypeInfo(expectedType) : expectedType;
+                    const innerExpected = rawExpected?.kind === 'pointer'
+                        ? rawExpected.pointerTo : rawExpected;
+                    this.pendingStructConversions.push({
+                        name: arg?.type === 'Identifier' ? arg.name
+                            : (arg?.argument?.type === 'Identifier' ? arg.argument.name : null),
+                        expected: innerExpected?.name ?? null,
+                        location: arg.location ?? null
+                    });
+                }
             }
             /*
             An array argument is NOT decayed into a pointer, so its dimensions

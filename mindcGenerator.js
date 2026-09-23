@@ -22,7 +22,7 @@ import { findRecursiveFunctions } from "./mindcBase.js";
 
 import { ensureMemspHelper, remoteDeviceRegOf, remoteNameRegOf, RemotePointerRet, RemoteArrayRet, RemoteStoredPointerRet, LookupArrayRet, NameStructPointerRet, NameStructDerefRet,
 	RemoteStructPointerRet,
-	NameArrayRet, ArrayHandleRet, ensureArrayHandle, arrayLengthOfType, componentCountOf, isFlatComponentType, CATEGORY_ALIASES, Globals, VariableRet, ImmediateRet, BasicRet, IntRet, BoolRet, FloatRet, ContentRet,
+	NameArrayRet, ArrayHandleRet, ensureArrayHandle, arrayLengthOfType, componentCountOf, isFlatComponentType, CATEGORY_ALIASES, Globals, VariableRet, ImmediateRet, BasicRet, IntRet, BoolRet, FloatRet, ContentRet, packHandle, HANDLE_MASK, HANDLE_FIELD_BITS,
 	TraditionalArrayRet,
 	PointerRet, RefPointerRet, MemPointerRet, VolatilePointerRet, MemoryRefRet, StructRefRet,
 	symbolRef, ExportRet, valueClassOf, readThrough, writeThrough, pointerStep,
@@ -352,6 +352,14 @@ export class CodeGenerator extends ASTVisitor {
 	 */
 	structNamePointerAllowed(type = null) {
 		if (!type || !type.isTypeInfo) return false;
+		/*
+		Only a struct or a union has MEMBERS to carry by name. Without this a
+		pointer to a plain `int` qualified too: `(type.members ?? []).every(...)`
+		is vacuously true for an empty list, so `int *ss = byname(&c)` was given
+		a struct name packet instead of a name pointer -- and writing through it
+		then did nothing at all.
+		*/
+		if (type.kind !== 'struct' && type.kind !== 'union') return false;
 		const version = (this.semantic.targetVersion ?? this.compiler?.config?.getAttribute('targetVersion') ?? 0);
 		if (version < 150) return false;
 		const config = this.compiler?.extraConfig?.getAttribute('optimizeOption') ?? {};
@@ -905,6 +913,17 @@ export class CodeGenerator extends ASTVisitor {
 		if (target instanceof NameStructPointerRet && !(source instanceof VariableRet)) {
 			return target.set(new ImmediateRet(this.glob, String(source), symbol.myType()));
 		}
+		/*
+		A (processor, name) pair cannot be stored in an ordinary pointer: that
+		one is (block, offset), and the block half would be read as a building
+		number that was never assigned.
+		*/
+		if (source instanceof RemotePointerRet && !(target instanceof RemotePointerRet)) {
+			this.addError(`A pointer to a 'remote' variable cannot be stored in an `
+				+ `ordinary pointer: declare it 'remote int *'`,
+				symbol.location ?? null);
+			return new Instruction([]);
+		}
 		if (target instanceof NamePointerRet && !(source instanceof VariableRet)) {
 			/*
 			The value of a name pointer is the NAME of something, i.e. a single
@@ -1405,7 +1424,22 @@ export class CodeGenerator extends ASTVisitor {
 					 * 
 					 * @param {MemberInfo} member 
 					 */
-					member => this.copyObject(`${target}.${member.name}`, `${source}.${member.name}`, member.type, null, false)
+					member => {
+						/*
+						A member that carries a NAME is one word, not a
+						block/offset pair. Copying it as a pointer wrote
+						`target.m_block` / `target.m_pos` -- two registers that
+						were never assigned -- and the copy then read through
+						them, which is why a struct handed over by value lost
+						the representation its members were chosen for.
+						*/
+						if (member.namePointer === true) {
+							return InstructionBuilder.set(`${target}.${member.name}`,
+								`${source}.${member.name}`);
+						}
+						return this.copyObject(`${target}.${member.name}`,
+							`${source}.${member.name}`, member.type, null, false);
+					}
 				)
 			);
 		}
@@ -1439,20 +1473,16 @@ export class CodeGenerator extends ASTVisitor {
 					return [this.copyStruct(sym.getAssemblySymbol(), paramName, sym.type.type)];
 				}
 				/*
-				An array parameter that takes a HANDLE: what arrives is the pair
-				`<param>_get` / `<param>_set`, not a block/offset pair. Copying
-				`_block` / `_pos` (which `writeSymbol` would do) leaves both
-				halves undefined, and the first access then jumps through a
-				register that is still 0 -- an endless loop.
+				An array parameter that takes a HANDLE: what arrives is ONE
+				packed register. Copying `_block` / `_pos` (which `writeSymbol`
+				would do) leaves them undefined, and the first access then jumps
+				through a register that is still 0 -- an endless loop.
 				*/
 				if (sym.myType?.()?.kind === 'array'
 					&& (sym.arrayParamRep === 'handle' || sym.arrayParamRep === 'remote'
 						|| sym.arrayParamRep === 'names')) {
 					const base = sym.getAssemblySymbol();
-					return [
-						InstructionBuilder.set(`${base}_get`, `${paramName}_get`),
-						InstructionBuilder.set(`${base}_set`, `${paramName}_set`)
-					];
+					return [InstructionBuilder.set(base, paramName)];
 				}
 				return [this.writeSymbol(sym, paramName)];
 			})));	// Copy the parameters
@@ -2161,6 +2191,12 @@ export class CodeGenerator extends ASTVisitor {
 				*/
 				const isNamePacket = evaluation instanceof NameStructPointerRet
 					|| evaluation.getAttribute?.('isNameStructPointer') === true;
+				/*
+				`&rs`: the binding is (processor, name). Handing over the bare
+				register name would keep only one half of it, so the value has
+				to be passed as a whole.
+				*/
+				const isRemotePointer = evaluation instanceof RemotePointerRet;
 				if (symbol.accessThroughPointer || noCodeToRename || isNamePacket
 					|| evaluation.getAttribute('disallowReplacement')) {
 					finalize.concat(evaluation);
@@ -2179,7 +2215,8 @@ export class CodeGenerator extends ASTVisitor {
 						were built from.
 						*/
 						finalize.concat(this.writeSymbol(symbol,
-							isNamePacket ? evaluation : (evaluation.instructionReturn ?? 'null')));
+							(isNamePacket || isRemotePointer) ? evaluation
+								: (evaluation.instructionReturn ?? 'null')));
 					}
 				} else {
 					finalize.concat(evaluation.replace_variable(symbol.getAssemblySymbol(), evaluation.instructionReturn));
@@ -3060,10 +3097,32 @@ export class CodeGenerator extends ASTVisitor {
 				result.instructionReturn = temp.getAssemblySymbol();
 				return result;
 				break;
-			case '++': case '--':
+			case '++': case '--': {
 				// Note: this does not have copy because it has actions on its own
 				result = this.visitAndRead(node.argument);	// We have LVal getter there, so this is read-only.
-				let duplicate = this.getTempSymbol(node.dataType);
+					/*
+					What `visitAndRead` gives back is the variable ITSELF only for a plain
+					register. A `remote` variable (or one living in memory) is read into a
+					temporary, so adding 1 to that temporary updates nothing at all: `++rc`
+					quietly did nothing, and `rc++` stored the old value into a temporary
+					that had no binding of its own.
+					*/
+					const target = this.getLValue(node.argument);
+					const readIsTheVariable =
+						String(result.instructionReturn) === String(target.instructionReturn);
+				/*
+				The OLD value of `x++` is saved in a temporary of its own. Its
+				type must not carry `remote`: the temporary would then be a
+				binding (device + name) whose halves nobody assigns, and reading
+				it back hit an undefined device.
+				*/
+				let plainType = node.dataType;
+				if (plainType && (plainType.qualifiers ?? []).includes('remote')
+					&& typeof plainType.duplicate === 'function') {
+					plainType = plainType.duplicate();
+					plainType.qualifiers = (plainType.qualifiers ?? []).filter(q => q !== 'remote');
+				}
+				let duplicate = this.getTempSymbol(plainType);
 				asPointer = node.argument.dataType && node.argument.dataType.isPointerImpl();
 				const shouldDuplicate = (!node.prefix) && (!node.getAttribute('disposeReturn'));
 				if (shouldDuplicate) {
@@ -3080,7 +3139,7 @@ export class CodeGenerator extends ASTVisitor {
 					}	// Otherwise, already modified.
 				} else {
 					result.concat(InstructionBuilder.op(node.operator === '++' ? 'add' : 'sub', result.instructionReturn, result.instructionReturn, '1'));
-					if (node.argument.type !== 'Identifier') {
+						if (node.argument.type !== 'Identifier' || !readIsTheVariable) {
 						result.concat(this.processLValGetter(node.argument).replace('value_entry', result.instructionReturn));
 					}
 				}
@@ -3089,6 +3148,7 @@ export class CodeGenerator extends ASTVisitor {
 				}
 				return result;
 				break;
+					}
 			case '&':
 				// Get address of given symbol (thus should be a LValue - and having 'pointer')
 				// Thus demand some small changes of L-value getting.
@@ -3588,6 +3648,16 @@ export class CodeGenerator extends ASTVisitor {
 
 		// Registry struct: every member is a variable of its own, named `X.member`
 		if (object instanceof RegistryStructRet) {
+			/*
+			`int *byname ptr` as a member: the register `X.ptr` holds a NAME, so
+			the member is a name pointer -- `*s.ptr` is one `read @this`, not a
+			step through a block/offset pair that does not exist.
+			*/
+			if (node.getAttribute('memberByname') === true) {
+				return new NamePointerRet(glob, object.instructions ?? [],
+					`${object.instructionReturn}.${node.children[1].name}`,
+					node.dataType, false);
+			}
 			return object.member(node.children[1].name, node.dataType);
 		}
 		/*
@@ -3595,7 +3665,20 @@ export class CodeGenerator extends ASTVisitor {
 		so `p->m` is one `read @this p.m` and needs no address at all.
 		*/
 		if (object instanceof NameStructPointerRet) {
-			return object.member(node.children[1].name, node.dataType);
+			const member = object.member(node.children[1].name, node.dataType);
+			/*
+			A member that itself carries a NAME: `p->m` reads the name out of
+			the struct, and what it reads IS the name -- one word, not a
+			block/offset pair. Left as a pointer it was dereferenced through
+			`_block` / `_pos`, which for a name are meaningless.
+			*/
+			if (node.getAttribute?.('memberByname') === true
+				|| node.memberInfo?.namePointer === true) {
+				const read = member.get();
+				return new NamePointerRet(glob, read.instructions, read.instructionReturn,
+					node.dataType, true);
+			}
+			return member;
 		}
 		/*
 		`p->m` on a remote struct pointer: one `read`/`write` of the member name
@@ -3667,8 +3750,15 @@ export class CodeGenerator extends ASTVisitor {
 			// Array subscript: evaluate the index first
 			index = this.visitAndRead(node.children[1]);
 			setup.concat(index);
-		} else if (node.hasAttribute('totalSource') && node.hasAttribute('totalMemberOffset')) {
+		} else if (node.hasAttribute('totalSource') && node.hasAttribute('totalMemberOffset')
+			&& node.getAttribute('operator') !== '->') {
 			// The semantic analyzer already folded `a.b.c` into `a` + a total offset
+			/*
+			Only for `.`: `h.p->x` is NOT a walk from `h`. `h.p` is a pointer that
+			has to be DEREFERENCED first, and folding past the arrow made the base
+			`h` itself -- so the member was read at `h_block` / `h_pos`, which do
+			not exist for a struct held in registers.
+			*/
 			objectRoot = node.getAttribute('totalSource');
 			knownTotalOffset = node.getAttribute('totalMemberOffset');
 		}
@@ -3709,6 +3799,21 @@ export class CodeGenerator extends ASTVisitor {
 		}
 
 		// Moving the pointer is the only thing left to do
+		/*
+		A remote struct pointer reaches members by NAME, which needs
+		`#pragma optimize(struct_pointer)`. Without it the pointer carries an
+		address instead -- and stepping an address on another processor is not
+		something the machine can do, so this used to surface as an internal
+		error with no hint about the pragma.
+		*/
+		if (objectAddress instanceof RemotePointerRet && !this.structNamePointerAllowed(
+			objectAddress.pointee ?? objectAddress.type?.pointerTo ?? null)) {
+			this.addError(`A 'remote' pointer to a struct reaches its members by name, `
+				+ `which needs '#pragma optimize(struct_pointer)' (and a flat struct); `
+				+ `without it there is no way to step a member on the other processor`,
+				node.location ?? null);
+			return new MemoryRefRet(glob, [], 'null', node.dataType ?? null, true);
+		}
 		const address = objectAddress.offset(step);
 
 				// Whatever the member is, we now hold its address
@@ -3729,6 +3834,15 @@ export class CodeGenerator extends ASTVisitor {
 			address.name, node.dataType, true);
 		reference.setAttribute('isNearPointer', isNearPointerHere);	// inherit the feature
 		reference.setAttribute('isFromRegStruct', false);
+		/*
+		The same member, but in a struct that lives in memory: the name is READ
+		out of the struct first, and only then is it a name pointer.
+		*/
+		if (node.getAttribute('memberByname') === true) {
+			const read = reference.get();
+			return new NamePointerRet(glob, read.instructions, read.instructionReturn,
+				node.dataType, true);
+		}
 		return reference;
 	}
 
@@ -3817,6 +3931,8 @@ export class CodeGenerator extends ASTVisitor {
 	 * `{value_entry}` / `{pointer_block_entry}` / `{pointer_ptr_entry}` templates.
 	 */
 	processLValGetter(left, returnOnlyPointer = false, traditional = false) {
+
+
 		const lval = this.getLValue(left);
 		if (returnOnlyPointer) {
 			try {
@@ -3832,6 +3948,18 @@ export class CodeGenerator extends ASTVisitor {
 		const name = lval.instructionReturn;
 		const glob = this.glob;
 		let result = new Instruction(lval.instructions ? [...lval.instructions] : []);
+		/*
+		A `remote` variable: writing it is `write <device> <name>`. Falling
+		through to the register case below would `set` into the DEVICE
+		register (`lval.instructionReturn` is the device half), overwriting the
+		binding with the value.
+		*/
+		if (lval.getAttribute?.('isRemoteSlot') === true) {
+			result.concat(InstructionBuilder.write('{value_entry}',
+				lval.deviceReg ?? `${name}`, lval.nameReg ?? `${name}`));
+			result.setAttribute('isAssignment', true);
+			return result;
+		}
 		if (lval instanceof PointerRet) {
 			if (lval instanceof MemPointerRet) {
 				// The pointer itself is in memory: write through its address
@@ -3936,6 +4064,20 @@ export class CodeGenerator extends ASTVisitor {
 			};
 		}
 		const parameter = symbol.owningScope.lookupCurrent(functionType.parameters[index].name);
+		/*
+		A function that is ALSO assigned to a function pointer copies its
+		parameters out of `__param_N` in the prologue -- so a DIRECT call has to
+		deliver into those slots too. Writing straight into the parameter's own
+		register instead (which is what a plain call does) was then overwritten
+		by that copy, from a slot nobody had filled: the value arrived as 0.
+		*/
+		if (symbol?.isAddressed === true) {
+			return {
+				name: `__param_${index}`,
+				type: parameter.type.type,
+				parameter
+			};
+		}
 		return {
 			name: parameter.getAssemblySymbol(),
 			type: parameter.type.type,
@@ -4084,10 +4226,7 @@ export class CodeGenerator extends ASTVisitor {
 			}
 			const length = arrayLengthOfType(slotType) || array.length || 0;
 			const instructions = [value.instructions, handle.instructions,
-				InstructionBuilder.set(`${slotName}_get`, handle.get)];
-			if (handle.set) {
-				instructions.push(InstructionBuilder.set(`${slotName}_set`, handle.set));
-			}
+				packHandle(glob, slotName, { ...handle, length })];
 			return new ArrayHandleRet(glob, slotName, slotType, length, instructions);
 		}
 		/*
@@ -4106,6 +4245,24 @@ export class CodeGenerator extends ASTVisitor {
 				+ `memory layout`, argNode.location);
 		}
 		/*
+		A struct handed over BY VALUE: it is copied member by member, because the
+		members do not all travel the same way -- one carrying a name is a single
+		word, while the rest may be a block/offset pair. A plain `set` copied one
+		word and left everything else behind, which is what lost the
+		representation when the callee was not inlined.
+		*/
+		if (!!slotType && ['struct', 'union'].includes(slotType.kind)
+			&& !(slotType.qualifiers ?? []).includes('remote')) {
+			const srcType = argSymbol?.myType?.() ?? null;
+			const srcName = argSymbol?.getAssemblySymbol?.()
+				?? value.instructionReturn ?? null;
+			if (srcName && srcType && ['struct', 'union'].includes(srcType.kind)) {
+				const copied = this.copyStruct(slotName, srcName, slotType, srcType);
+				return valueClassOf(glob, slotType).create(glob,
+					[value.instructions, copied], slotName, slotType, false);
+			}
+		}
+		/*
 		A name based struct pointer: what travels is the SET OF NAMES, one per
 		member. `rename` would only retarget `X_block` / `X_pos`, which do not
 		exist here, so every member name is copied on its own.
@@ -4117,13 +4274,62 @@ export class CodeGenerator extends ASTVisitor {
 			for (const m of members) instructions.push(InstructionBuilder.set(`${slotName}.${m}`, `${value.name}.${m}`));
 			return new RemoteStructPointerRet(glob, `${slotName}__rdev`, slotName, slotType, instructions);
 		}
+		/*
+		A pointer to a struct that has a NAME member: even when the pointer
+		itself is an address, reading `p->m` yields a name, and the callee has
+		to know that. Without `byname` on the parameter the member was read as
+		a block/offset pair that does not exist, which used to be emitted
+		silently.
+		*/
+		{
+			const inner = slotType?.pointerTo ?? null;
+			if (inner && ['struct', 'union'].includes(inner.kind)
+				&& (inner.members ?? []).some(m => m.namePointer === true)
+				&& paramSymbol && paramSymbol.forcedNamePointer !== true
+				&& paramSymbol.usesNamePointer !== true) {
+				this.addError(`a pointer to '${inner.name}' hands over a member that carries `
+					+ `a NAME, so the parameter has to be declared 'byname' `
+					+ `(as in 'void f(${inner.name} *byname p)')`,
+					argNode?.location ?? null);
+				return new Instruction([]);
+			}
+		}
 		if (value instanceof NameStructPointerRet
 			|| value.getAttribute?.('isNameStructPointer') === true) {
 			const members = (slotType?.pointerTo?.members ?? [])
 				.map(m => m.name ?? m.memberName);
 			const instructions = [value.instructions];
-			for (const m of members) {
-				instructions.push(InstructionBuilder.set(`${slotName}.${m}`, `${value.name}.${m}`));
+			/*
+			`&s` written straight into a call: there is no pointer variable for
+			the names to have been stored in, so the packet the value names is
+			still EMPTY -- copying `s__ptr.x` out of it copied nothing, and the
+			callee then wrote through an unassigned name. Materialise the names
+			from the struct itself when the packet carries no instructions.
+			*/
+			/*
+			The callee has to AGREE that the pointer carries names: it reads
+			`p->x` differently then. That is what `byname` on the parameter
+			says. Without it the pointer is an address, and writing through the
+			block/offset pair that was never assigned used to be emitted
+			silently.
+			*/
+			if (paramSymbol && paramSymbol.forcedNamePointer !== true
+				&& paramSymbol.usesNamePointer !== true) {
+				this.addError(`'&${String(argNode?.argument?.name ?? 'struct')}' hands a struct `
+					+ `pointer that carries member NAMES, so the parameter has to be `
+					+ `declared 'byname' (as in 'void f(struct pt *byname p)')`,
+					argNode?.location ?? null);
+				return new Instruction([]);
+			}
+			const from = value.sourceBase ?? null;
+			if (from) {
+				for (const m of members) {
+					instructions.push(InstructionBuilder.set(`${slotName}.${m}`, `"${from}.${m}"`));
+				}
+			} else {
+				for (const m of members) {
+					instructions.push(InstructionBuilder.set(`${slotName}.${m}`, `${value.name}.${m}`));
+				}
 			}
 			return new NameStructPointerRet(glob, instructions, slotName, slotType, false);
 		}
@@ -4158,6 +4364,21 @@ export class CodeGenerator extends ASTVisitor {
 	 */
 	visitFunctionCall(node) {
 		const glob = this.glob;
+		/*
+		`lenof(s)` where `s` is an array that arrived as a HANDLE: the length
+		rides in the packed register. Folding it at compile time answered 0,
+		because a parameter's type carries no length.
+		*/
+		const handleLen = node.getAttribute?.('lenofOfHandle') ?? null;
+		if (handleLen) {
+			const tmp = glob.tmp(this.semantic.getTypeInfo('int'), 'handle');
+			const tn = tmp?.getAssemblySymbol?.() ?? String(tmp);
+			const instrs = [
+				InstructionBuilder.op('shr', tn, handleLen, String(HANDLE_FIELD_BITS * 2)),
+				InstructionBuilder.op('and', tn, tn, String(HANDLE_MASK))
+			];
+			return new IntRet(glob, instrs, tn, this.semantic.getTypeInfo('int'), true);
+		}
 		const callee = this.resolveCallee(node);
 		let result = new Instruction();
 		// Warning: function pointer does NOT care about this
@@ -4330,6 +4551,21 @@ export class CodeGenerator extends ASTVisitor {
 	 * @remarks In fact, only in this part does the program include interactions
 	 */
 	visitBuiltinCall(node) {
+		/*
+		`lenof(s)` on an array that arrived as a HANDLE: `lenof` is a builtin
+		call, so it lands here rather than in `visitFunctionCall`. See the note
+		there for why it cannot be folded.
+		*/
+		const handleLen = node.getAttribute?.('lenofOfHandle') ?? null;
+		if (handleLen) {
+			const glob = this.glob;
+			const tmp = glob.tmp(null, 'handle');
+			const tn = tmp?.getAssemblySymbol?.() ?? String(tmp);
+			return new IntRet(glob, [
+				InstructionBuilder.op('shr', tn, handleLen, String(HANDLE_FIELD_BITS * 2)),
+				InstructionBuilder.op('and', tn, tn, String(HANDLE_MASK))
+			], tn, this.semantic.getTypeInfo('int') ?? null, true);
+		}
 
 		/**
 		 * 
