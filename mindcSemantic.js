@@ -1685,7 +1685,7 @@ export class SemanticAnalyzer extends ASTVisitor {
         // 进入函数作用域
 		let functionScope = node.scope;
 		if (!functionScope) {
-			node.scope = functionScope = new Scope(this.currentScope, 'f');
+			node.scope = functionScope = new Scope(this.currentScope, 'f', node, node.name);
 			/*
 			The scope has to know which declaration it belongs to: several later
 			passes (the optimizer's function info, for one) look the body up
@@ -1700,7 +1700,14 @@ export class SemanticAnalyzer extends ASTVisitor {
 
         // 添加参数到作用域
         node.parameters.forEach(param => {
-			const gotType = this.getTypeInfo(this.getTypeNameFromTypeNode(param));
+			/*
+			Already resolved: a specialised function had its parameter given a
+			concrete struct VARIANT. Looking it up by name instead found the
+			PATTERN again -- which has no chosen representation -- so the
+			member was read as a block/offset pair that does not exist.
+			*/
+			const gotType = (param.type?.isTypeInfo === true) ? param.type
+				: this.getTypeInfo(this.getTypeNameFromTypeNode(param));
 			const paramSymbol = new SymbolEntry(
                 param.name,
                 { type: gotType },
@@ -2914,6 +2921,12 @@ export class SemanticAnalyzer extends ASTVisitor {
 	 */
     getTypeNameFromTypeNode(typeNode) {
         if (!typeNode) return null;
+		/*
+		Already a resolved type: happens when a function is specialised and its
+		parameter is given the concrete variant. Asking for its syntax node
+		then found nothing, and the parameter was declared with a null type.
+		*/
+		if (typeNode.isTypeInfo === true) return typeNode.name;
         
 		let prefix = "";
 		let ptrSuffix = "*".repeat(typeNode.pointerDepth);
@@ -3580,8 +3593,20 @@ export class SemanticAnalyzer extends ASTVisitor {
 		for (const func of [...list]) {
 			const name = String(func.name ?? '');
 			const paramTypes = (func.parameters ?? []).map(p => {
-				const raw = p?.type ?? null;
-				const t = (typeof raw === 'string') ? this.getTypeInfo(raw) : raw;
+				/*
+				A parameter's type is still the SYNTAX NODE at this point
+				(`TypeSpecifier` with a `typeName`), not a resolved `TypeInfo`
+				-- so asking for `.name` found nothing and no template was ever
+				seen.
+				*/
+				let t = p?.type ?? null;
+				if (t && typeof t === 'object' && !t.isTypeInfo) {
+					const fromNode = this.getTypeNameFromTypeNode(t)
+						?? this.getTypeNameFromDeclarator(p) ?? null;
+					t = fromNode ? this.getTypeInfo(fromNode) : null;
+				} else if (typeof t === 'string') {
+					t = this.getTypeInfo(t);
+				}
 				return this.canonicalStructType(t?.kind === 'pointer' ? t.pointerTo : t);
 			});
 			const templateIndices = paramTypes
@@ -3613,7 +3638,13 @@ export class SemanticAnalyzer extends ASTVisitor {
 			const saved = this.currentScope;
 			this.currentScope = this.globalScope;
 			const made = [];
-			let index = 0;
+			/*
+			Starting at 1: the pattern itself is still declared under the
+			original name, so an instance keeping that name would be a
+			redefinition. The pattern is removed from the function list below;
+			its symbol stays, but nothing is emitted for it.
+			*/
+			let index = 1;
 			for (const signature of groups.keys()) {
 				const copy = this.cloneAstNode(func);
 				copy.name = this.mangleFunctionName(name, index++);
@@ -3635,8 +3666,17 @@ export class SemanticAnalyzer extends ASTVisitor {
 				});
 				this.visit(copy);
 				made.push(copy);
+				const copySymbol = this.symbolByName(copy.name);
 				for (const node of retarget.get(signature) ?? []) {
 					node.name = copy.name;
+					/*
+					The call was resolved while the PATTERN was still the only
+					declaration, so the identifier holds a reference to it. The
+					name alone is not enough: the generator reads the cached
+					symbol, which still pointed at the pattern -- and so handed
+					the argument to the unspecialised parameter.
+					*/
+					if (copySymbol) node.symbol = copySymbol;
 					node.setAttribute('overloadResolved', true);
 				}
 			}
