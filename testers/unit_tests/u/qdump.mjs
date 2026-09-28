@@ -1,6 +1,6 @@
 import fs from 'fs';
-import { Compiler } from '../src/mindc.js';
-import { AttributeClass } from '../src/mindcBase.js';
+import { Compiler } from '../../../mindc.js';
+import { AttributeClass } from '../../../mindcBase.js';
 const cfg = new AttributeClass(); cfg.setAttribute('targetVersion', 154.3);
 const log = console.log; console.log = () => {};
 const c = new Compiler(fs.readFileSync(process.argv[2], 'utf8'), [], cfg);

@@ -1,4 +1,12 @@
 /* EXPECT: 5 7 9 */
+/* The parameter arrives in ONE register (`set g:.f:fill.s __param_0`), which
+   is what a handle is, and every access unpacks it with `shr 12`. There is no
+   `s_block` / `s_pos` pair and no `getlink`, because an array with no address
+   cannot have one. */
+/* EMIT: set g:\.f:fill\.s __param_0 */
+/* EMIT: op shr \S+ g:\.f:fill\.s 12 */
+/* EMIT-NOT: getlink __curb g:\.f:fill */
+/* EMIT-NOT: g:\.f:fill\.s_block */
 /* Arrays that have NO address, handed to a function pointer. Such an array
    cannot become a pointer, so it travels as a HANDLE: two words holding the
    entry points of its get / set helpers. The parameter is written `remote int

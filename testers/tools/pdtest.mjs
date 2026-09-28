@@ -2,9 +2,9 @@
    current array syntax -- on the simulator under the same hand written model
    of the world, then compare what they print. */
 import fs from 'fs';
-import { Compiler } from '../src/mindc.js';
-import { AttributeClass } from '../src/mindcBase.js';
-import { MemoryBlock } from '../src/mindcGeneratorBase.js';
+import { Compiler } from '../../mindc.js';
+import { AttributeClass } from '../../mindcBase.js';
+import { MemoryBlock } from '../../mindcGeneratorBase.js';
 import { runProgram, makeDevice, defaultLinks } from '../sim.mjs';
 
 const blocks = [{ name: 'cell1', size: 64 }, { name: 'cell2', size: 64 }];

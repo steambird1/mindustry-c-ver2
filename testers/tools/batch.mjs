@@ -1,8 +1,8 @@
 import fs from 'fs';
 import path from 'path';
-import { Compiler } from './src/mindc.js';
-import { AttributeClass } from './src/mindcBase.js';
-import { MemoryBlock } from './src/mindcGeneratorBase.js';
+import { Compiler } from '../../mindc.js';
+import { AttributeClass } from '../../mindcBase.js';
+import { MemoryBlock } from '../../mindcGeneratorBase.js';
 
 const dir = process.argv[2] ?? 'baseline';
 const files = fs.readdirSync('tests').filter(f => f.endsWith('.c')).sort();

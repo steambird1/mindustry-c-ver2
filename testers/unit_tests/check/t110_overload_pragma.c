@@ -1,4 +1,7 @@
 /* EXPECT: 1 101 */
+/* EMIT: op add _show @counter 1 */
+/* EMIT: op add _show__ov1 @counter 1 */
+#pragma noinline
 /* `#pragma overload(...)` is accepted, and two functions may share a name when
    their parameters differ (that is what `default` -- the mode in force when
    nothing is written -- allows). */

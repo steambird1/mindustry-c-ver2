@@ -1,4 +1,6 @@
 /* EXPECT: 88 88 */
+/* EMIT: write 88 g:[^ ]*p__rdev  */
+/* EMIT-NOT: getlink __curb */
 /* `&rs` where `rs` is a `remote` variable.
 
    A remote variable is reached as (processor, name), so a pointer to it has to

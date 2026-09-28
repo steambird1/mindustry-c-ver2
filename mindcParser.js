@@ -356,7 +356,14 @@ export class Parser {
         if (this.matchToken(TokenType.LEFT_BRACE)) {
             isDefinition = true;
             this.consumeToken(); // 跳过 '{'
-            
+            /*
+            The name has to be known BEFORE the members are read: a member may
+            point at the struct being defined (`struct node { struct node *next; }`),
+            and a type name that is not registered yet is read as an ordinary
+            identifier -- which then fails as an unknown member type.
+            */
+            if (name) this.addTypeName(name);
+
             // 解析成员列表
             while (!this.matchToken(TokenType.RIGHT_BRACE) && !this.matchToken(TokenType.EOF)) {
                 const member = this.parseStructMember();

@@ -1,5 +1,5 @@
 import fs from 'fs';
-const O = await import('../src/mindcOptimizer.js');
+const O = await import('../../../mindcOptimizer.js');
 const cls = Object.values(O).find(v => typeof v === 'function' && v.prototype?.analyzeForStatement);
 let round = -1;
 const origPass = cls.prototype.optimizationPass;
@@ -15,9 +15,9 @@ cls.prototype.removeUnusedFunctions = function() {
   console.error('  RUF r'+round, 'graph=', [...this.functionCallGraph].map(([k,v])=>k+'->'+[...v].join('+')).join(' | '));
   return origRUF.call(this);
 };
-const { Compiler } = await import('../src/mindc.js');
-const { AttributeClass } = await import('../src/mindcBase.js');
-const { MemoryBlock } = await import('../src/mindcGeneratorBase.js');
+const { Compiler } = await import('../../../mindc.js');
+const { AttributeClass } = await import('../../../mindcBase.js');
+const { MemoryBlock } = await import('../../../mindcGeneratorBase.js');
 const cfg = new AttributeClass(); cfg.setAttribute('targetVersion',154.3);
 const log=console.log; console.log=()=>{};
 try { await new Compiler(fs.readFileSync('example7a.c','utf8'), [new MemoryBlock('cell1',64)], cfg).compile(); } catch(e) {}

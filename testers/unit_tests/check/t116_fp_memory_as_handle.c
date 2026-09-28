@@ -1,4 +1,5 @@
 /* EXPECT: 7 */
+/* EMIT: getlink __arrblk */
 /* A MEMORY array handed to a function pointer whose parameter is a handle.
    Memory arrays normally travel as pointers -- and still do, everywhere else --
    but a handle can be made of one too: the helper works out `base + i * size`,

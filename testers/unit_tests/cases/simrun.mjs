@@ -1,9 +1,9 @@
 /* Compile each case and run it on the simulator with a world that makes
    `ulocate` find something. */
 import fs from 'fs';
-import { Compiler } from '../src/mindc.js';
-import { AttributeClass } from '../src/mindcBase.js';
-import { MemoryBlock } from '../src/mindcGeneratorBase.js';
+import { Compiler } from '../../../mindc.js';
+import { AttributeClass } from '../../../mindcBase.js';
+import { MemoryBlock } from '../../../mindcGeneratorBase.js';
 import { runProgram, makeDevice, defaultLinks } from '../sim.mjs';
 const blocks = [{ name: 'cell1', size: 64 }];
 

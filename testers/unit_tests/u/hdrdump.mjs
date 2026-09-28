@@ -7,9 +7,9 @@ globalThis.fetch = async (url) => {
   if (!fs.existsSync(full)) return { ok: false, status: 404, text: async () => '' };
   return { ok: true, status: 200, text: async () => fs.readFileSync(full, 'utf8') };
 };
-const { Compiler } = await import('../src/mindc.js');
-const { AttributeClass } = await import('../src/mindcBase.js');
-const { MemoryBlock } = await import('../src/mindcGeneratorBase.js');
+const { Compiler } = await import('../../../mindc.js');
+const { AttributeClass } = await import('../../../mindcBase.js');
+const { MemoryBlock } = await import('../../../mindcGeneratorBase.js');
 const cfg = new AttributeClass(); cfg.setAttribute('targetVersion', 154.3);
 const log = console.log; console.log = () => {};
 const blocks = [{ name: 'bank1', size: 64 }];

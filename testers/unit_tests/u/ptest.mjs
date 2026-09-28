@@ -1,6 +1,6 @@
 import fs from 'fs';
-import { Compiler } from '../src/mindc.js';
-import { AttributeClass } from '../src/mindcBase.js';
+import { Compiler } from '../../../mindc.js';
+import { AttributeClass } from '../../../mindcBase.js';
 const cfg = new AttributeClass(); cfg.setAttribute('targetVersion', 154.3);
 const origCompile = Compiler.prototype.compile;
 Compiler.prototype.compile = async function () {

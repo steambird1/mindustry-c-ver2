@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { simulate } from './runsim.mjs';
+import { annotationsOf, annotationWords, hasBareAnnotation, codeOnly } from './annotations.mjs';
 
 const dir = 'check';
 const files = fs.readdirSync(dir).filter(f => f.endsWith('.c') && !f.includes('__INV')).sort();
@@ -15,6 +16,11 @@ Annotations a test file may carry in comments:
                                      a line (repeatable)
   /* NO-INVARIANT *​/                skip the pragma-invariance run below
   /* NO-INVARIANT: optimize(array) *​/   skip only these pragmas
+
+An annotation is read out of the comments by `annotations.mjs`, and its value
+runs to the END OF ITS LINE -- so it may contain `*`, which a regex usually
+does. Nothing is read out of a pattern inside a comment: what a comment says is
+never evidence about the code.
 
 Why shape assertions exist: several bugs produced code that COMPILED and RAN TO
 COMPLETION while being wrong -- a `byname` pointer quietly degrading into an
@@ -39,19 +45,6 @@ const INVARIANCE_PRAGMAS = [
 	'#pragma overload(auto)'
 ];
 
-/** Everything between `MARKER:` and the end of that comment. */
-function annotationsOf(src, marker) {
-	const results = [];
-	const re = new RegExp(`\\/\\*[^]*?\\b${marker}:([^*]*)\\*\\/`, 'g');
-	const bare = new RegExp(`\\/\\*[^]*?\\b${marker}\\b[^*]*\\*\\/`, 'g');
-	for (const m of src.matchAll(re)) results.push(m[1].trim());
-	for (const m of src.matchAll(bare)) {
-		// `NO-INVARIANT` alone means "all"; `NO-INVARIANT: x` is caught above
-		if (!/:/.test(m[0].slice(m[0].indexOf(marker) + marker.length, -2))) results.push('');
-	}
-	return results;
-}
-
 function linesOf(code) {
 	return String(code ?? '').split('\n').map(l => l.trim()).filter(l => l.length > 0);
 }
@@ -62,8 +55,7 @@ let shapeChecked = 0, invarianceChecked = 0;
 for (const f of files) {
 	const full = path.join(dir, f);
 	const src = fs.readFileSync(full, 'utf8');
-	const m = src.match(/EXPECT:\s*([^*]*)\*\//);
-	const expectedList = m ? m[1].trim().split(/\s+/).filter(x => x !== '') : [];
+	const expectedList = annotationWords(src, 'EXPECT');
 	const r = await simulate(full);
 	const problems = [];
 	if (!r.success) { console.log(`FAIL ${f}: compile error: ${r.errors.join(' | ')}`); fail++; continue; }
@@ -91,15 +83,19 @@ for (const f of files) {
 	}
 
 	// ---- pragma invariance ----
-	const skips = annotationsOf(src, 'NO-INVARIANT');
-	const skipAll = skips.some(s => s === '');
-	const skipSet = new Set(skips.filter(s => s !== ''));
+	const skipSet = new Set(annotationsOf(src, 'NO-INVARIANT'));
+	// A bare `NO-INVARIANT` means "all"; `NO-INVARIANT: x` is in the set above.
+	const skipAll = hasBareAnnotation(src, 'NO-INVARIANT');
+	// The file is asked about its CODE: a comment that explains a pragma must
+	// not be mistaken for the file using it, or the run below is skipped for
+	// exactly the files that talk about the pragma most.
+	const code = codeOnly(src);
 	if (!skipAll) {
 		for (const pragma of INVARIANCE_PRAGMAS) {
 			if (skipSet.has(pragma)) continue;
 			// Do not contradict what the file already says
 			const kind = pragma.slice('#pragma '.length).split('(')[0];
-			if (new RegExp(`#pragma\\s+${kind}\\b`).test(src)) continue;
+			if (new RegExp(`#pragma\\s+${kind}\\b`).test(code)) continue;
 			invarianceChecked++;
 			/*
 			Written to a real file next to the original, because `simulate`

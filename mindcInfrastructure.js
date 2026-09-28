@@ -802,6 +802,15 @@ export class BasicRet extends VariableRet {
 
 	/**
 	 * Whether `&x` may be taken as the name of x.
+	 *
+	 * The name pointer analysis (`SemanticOptimizer.analyzeNamePointers`) marks
+	 * every such variable `namePointersOnly`, and it is the only place allowed
+	 * to: it is where the two ends of a `byname` request are put together, and
+	 * where a program that asks for something impossible is refused. Asking
+	 * again here -- as this used to, by asking the generator whether name
+	 * pointers were on -- meant a `*byname` pointer and a plain one could reach
+	 * opposite answers about the same variable.
+	 *
 	 * @returns {boolean}
 	 */
 	get isNameAddressable() {
@@ -822,8 +831,13 @@ export class BasicRet extends VariableRet {
 		if (!uses || uses.other !== 0) return false;
 		if (uses.builtin > 0 && uses.pointers.size === 0) return true;
 		if (uses.pointers.size === 0) return false;
-		// Stored into a pointer: only a name pointer can hold a name
-		return generator?.namePointerAllowed?.() === true;
+		/*
+		Stored into a pointer: only a pointer that really holds a name can take
+		one. The flag is the analysis's verdict, so no option is consulted here.
+		*/
+		const takers = [...uses.pointers].map(name => symbol.scope?.lookup?.(name)
+			?? generator?.semantic?.globalScope?.lookup?.(name) ?? null);
+		return takers.length > 0 && takers.every(p => p !== null && p.usesNamePointer === true);
 	}
 }
 
@@ -1533,7 +1547,28 @@ export class NamePointerRet extends PointerRet {
 	 */
 	set(other) {
 		const glob = this.glob;
+		/*
+		Only a NAME can be stored here. A traditional pointer is a block and an
+		offset -- `X.__pointer` is the address of a block, not a register name --
+		and a value living in memory has to be read out before it is anything at
+		all. Copying either into a name pointer compiled fine and produced a
+		program that wrote to a register nothing had ever written, so refuse:
+		the two representations have to be decided together, upstream.
+		*/
+		if ((other instanceof MemoryRefRet) || (other instanceof MemPointerRet)
+			|| (other instanceof RefPointerRet) || (other instanceof VolatilePointerRet)) {
+			throw new InfrastructureNotImplementedExpection(
+				'a name pointer cannot be given the memory address ' + other.name
+				+ ': the variable it names has to stay in a register for its name to exist'
+				+ ' (use a pointer that keeps a real address, or ask for the name representation)');
+		}
 		const value = other.get();
+		if (value instanceof MemoryRefRet) {
+			throw new InfrastructureNotImplementedExpection(
+				'a name pointer cannot be given the memory address ' + value.name
+				+ ': the variable it names has to stay in a register for its name to exist'
+				+ ' (use a pointer that keeps a real address, or ask for the name representation)');
+		}
 		if (value instanceof NamePointerRet) {
 			return new NamePointerRet(glob, [this.instructions, value.instructions,
 				InstructionBuilder.set(this.name, value.name)],
@@ -3380,8 +3415,55 @@ export function ensureArrayHandle(glob, array) {
 	return {
 		instructions: array.instructions ?? [],
 		get: helperAddressOf(build('get')),
-		set: helperAddressOf(build('set'))
+		set: helperAddressOf(build('set')),
+		length: shape.length ?? 0,
+		size: shape.size ?? 1
 	};
+}
+
+/**
+ * The bit layout of a packed handle.
+ * @see ArrayHandleRet
+ */
+export const HANDLE_FIELD_BITS = 12;
+export const HANDLE_MASK = (1 << HANDLE_FIELD_BITS) - 1;	// 4095
+
+/** The constant `len << 24 | size << 36`, folded at compile time. */
+export function handleTailOf(length = 0, size = 1) {
+	/*
+	NOT `<<`: JavaScript's shift truncates to 32 bits, so `1 << 36` came out
+	as 16 -- the size field silently landed on top of the length one. BigInt
+	keeps the full width, which is what the machine's own 64-bit numbers do.
+	*/
+	return Number((BigInt(Math.trunc(Number(length) || 0)) << BigInt(HANDLE_FIELD_BITS * 2))
+		| (BigInt(Math.trunc(Number(size) || 0)) << BigInt(HANDLE_FIELD_BITS * 3)));
+}
+
+/**
+ * Instructions that build the packed handle in `target`.
+ *
+ * @param {Globals} glob
+ * @param {string} target the register to hold the handle
+ * @param {{get: string, set: string?, length: number, size: number}} handle
+ * @returns {any[]}
+ */
+export function packHandle(glob, target, handle) {
+	const out = [];
+	const tail = handleTailOf(handle.length, handle.size);
+	/*
+	The get helper is already in the low bits, so it is copied straight in; the
+	set helper is shifted up. The two constant fields are OR'd in as one
+	literal -- which is what keeps this to three instructions instead of five.
+	*/
+	out.push(InstructionBuilder.set(target, handle.get));
+	if (handle.set) {
+		const shifted = glob?.tmp?.(null, 'handle') ?? `${target}__shl`;
+		const name = typeof shifted === 'string' ? shifted : nameOf(shifted);
+		out.push(InstructionBuilder.op('shl', name, handle.set, String(HANDLE_FIELD_BITS)));
+		out.push(InstructionBuilder.op('or', target, target, name));
+	}
+	if (tail) out.push(InstructionBuilder.op('or', target, target, String(tail)));
+	return out;
 }
 
 /**
@@ -3405,8 +3487,20 @@ export class ArrayHandleRet extends ArrayRet {
 		this.setAttribute('disallowReplacement', true);
 	}
 
+	/*
+	ONE register. Four fields are packed into it (see `packHandle`):
+
+	    bits  0..11  the get helper's line number
+	    bits 12..23  the set helper's line number
+	    bits 24..35  lenof, i.e. the element count
+	    bits 36..47  sizeof, i.e. the size of one element
+
+	Two registers would be simpler, but a function pointer carries its
+	arguments in fixed `__param_N` slots and cannot know anything about the
+	call site -- so what travels has to be a single value.
+	*/
 	get width() {
-		return 2;
+		return 1;
 	}
 
 	/** The address of the get helper. */
@@ -3442,6 +3536,26 @@ class ArrayHandleSlotRet extends VariableRet {
 		this.operand = operand;
 	}
 
+	/** `op and <tmp> <handle> 4095` -- the get helper sits in the low bits. */
+	extractGet() {
+		const glob = this.glob;
+		const tmp = glob.tmp(null, 'handle');
+		const tn = nameOf(tmp);
+		return { name: tn, instruction: InstructionBuilder.op('and', tn, this.array.name,
+			String(HANDLE_MASK)) };
+	}
+
+	/** `op shr` + `op and` -- the set helper sits one field up. */
+	extractSet() {
+		const glob = this.glob;
+		const tmp = glob.tmp(null, 'handle');
+		const tn = nameOf(tmp);
+		return { name: tn, instructions: [
+			InstructionBuilder.op('shr', tn, this.array.name, String(HANDLE_FIELD_BITS)),
+			InstructionBuilder.op('and', tn, tn, String(HANDLE_MASK))
+		] };
+	}
+
 	get() {
 		const glob = this.glob;
 		const target = glob.tmp(this.type);
@@ -3451,8 +3565,12 @@ class ArrayHandleSlotRet extends VariableRet {
 		name known at compile time. That is the whole point of a handle -- the
 		function does not know which array it was handed.
 		*/
-		const call = glob.funcReg.getRawFunctionCall(this.array.getReg,
+		const got = this.extractGet();
+		const call = glob.funcReg.getRawFunctionCall(got.name,
 			new Map([['__arridx', this.operand.name]]), false, null);
+		return valueClassOf(glob, this.type).create(glob,
+			[this.instructions, got.instruction, call, InstructionBuilder.set(tn, '__arrret')],
+			tn, this.type, true);
 		return valueClassOf(glob, this.type).create(glob,
 			[this.instructions, call, InstructionBuilder.set(tn, '__arrret')],
 			tn, this.type, true);
@@ -3461,10 +3579,12 @@ class ArrayHandleSlotRet extends VariableRet {
 	set(other) {
 		const glob = this.glob;
 		const value = other.get().convertTo(this.type ?? other.type);
-		const call = glob.funcReg.getRawFunctionCall(this.array.setReg,
+		const got = this.extractSet();
+		const call = glob.funcReg.getRawFunctionCall(got.name,
 			new Map([['__arridx', this.operand.name], ['__arrval', value.name]]), false, null);
 		return valueClassOf(glob, this.type).create(glob,
-			[this.instructions, value.instructions, call], value.name, this.type, false);
+			[this.instructions, got.instructions, value.instructions, call],
+			value.name, this.type, false);
 	}
 }
 

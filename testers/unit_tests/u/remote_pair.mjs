@@ -1,9 +1,9 @@
 /* Run two programs: one exports a variable, the other reaches it with `remote`. */
 import fs from 'fs';
-import { Compiler } from '../src/mindc.js';
-import { AttributeClass } from '../src/mindcBase.js';
+import { Compiler } from '../../../mindc.js';
+import { AttributeClass } from '../../../mindcBase.js';
 import { runProgram, makeDevice } from '../sim.mjs';
-import { MemoryBlock } from '../src/mindcGeneratorBase.js';
+import { MemoryBlock } from '../../../mindcGeneratorBase.js';
 
 const cfg = new AttributeClass(); cfg.setAttribute('targetVersion', 154.3);
 const log = console.log; console.log = () => {};

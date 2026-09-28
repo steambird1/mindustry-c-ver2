@@ -1,4 +1,20 @@
 /* EXPECT: 1 4 1 4 1 4 */
+#pragma noinline
+/* EMIT: op add _fill @counter 1 */
+/* EMIT: op add _fill__ov1 @counter 1 */
+/* A HANDLE is one register holding the two entry points of the get / set
+   helpers, so a version that received one shows it: the value is OR-ed
+   together (`op or`), the getter is a link to `___arrget_*`, and each element
+   access unpacks it with `shr 12`. The POINTER version must be told apart from
+   it, which is what the `_ov1` lines and the two `EMIT-NOT`s do: a handle has
+   no `s_block` / `s_pos` pair at all. */
+/* EMIT: set g:\.f:fill\.s ___arrget_ */
+/* EMIT: op or g:\.f:fill\.s g:\.f:fill\.s \d+ */
+/* EMIT: op shr \S+ g:\.f:fill\.s 12 */
+/* EMIT-NOT: g:\.f:fill\.s_block */
+/* EMIT-NOT: g:\.f:fill\.s_pos */
+/* EMIT: set g:\.f:fill__ov1\.s_block g:\.f:main\.b:2\.b_block */
+/* EMIT: set g:\.f:fill__ov1\.s_pos g:\.f:main\.b:2\.b_pos */
 /* One `auto` function, three different arrays:
      - `a` is held in registers (array("embedded_divided")), so it has no
        address and travels as a HANDLE;
