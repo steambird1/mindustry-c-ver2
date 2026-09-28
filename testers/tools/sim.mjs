@@ -379,7 +379,17 @@ export class Processor {
 			}
 			case 'sensor': {
 				const target = this.nameOfToken(args[0]);
-				const what = args[2] ? args[2].raw : '';
+				/*
+				The property may be a VARIABLE, not only a literal `@name`:
+				`sensor(r, dev, target)` passes `content_t` around, and the
+				generated code is then `sensor r dev g:.f:work.target`. Taking
+				the operand's text gave the register's NAME, which no property
+				matches -- so every such read came back `null`. Read the register
+				when it is one.
+				*/
+				const propToken = args[2] ? this.nameOfToken(args[2]) : '';
+				const what = this.regs.has(propToken)
+					? this.regs.get(propToken) : (args[2] ? args[2].raw : '');
 				this.writeRegister(target, this.sense(a(1), what));
 				next(); return;
 			}
@@ -500,6 +510,37 @@ export class Processor {
 			case 'setflag': {
 				(this.flags ??= new Map());
 				this.flags.set(args[0].raw, Math.trunc(this.toNumber(a(1))) !== 0);
+				next(); return;
+			}
+			/*
+			The world-editing instructions (`setblock`, `spawnwave`, ...): nothing
+			of the map is modelled, so they are recorded and forgotten. The two
+			that hand a value BACK (`getblock`, `weathersense`) still have to
+			write their output register -- otherwise the program reads a register
+			that was never set.
+			*/
+			case 'getblock': {
+				// getblock <type> <out> x y
+				this.writeRegister(this.nameOfToken(args[1]), null);
+				(this.effects ??= []).push(ins.text);
+				next(); return;
+			}
+			case 'weathersense': {
+				// weathersense <out> <weather>
+				this.writeRegister(this.nameOfToken(args[0]), 0);
+				(this.effects ??= []).push(ins.text);
+				next(); return;
+			}
+			case 'setblock':
+			case 'weatherset':
+			case 'spawnwave':
+			case 'playsound':
+			case 'makemarker':
+			case 'setmarker':
+			case 'minimap':
+			case 'fetch':
+			case 'localeprint': {
+				(this.effects ??= []).push(ins.text);
 				next(); return;
 			}
 			case 'getflag': {
@@ -742,7 +783,14 @@ export function runProcessors(sources, options = {}) {
 	output matters, and it must not read registers that do not exist yet --
 	`int *remote` reads `q_block` / `q_pos` straight out of the peer.
 	*/
-	const initBudget = options.initSteps ?? 20000;
+	/*
+	`interleave`: every program steps from the very beginning, round robin.
+	That is the only way to exercise something that needs the processors to
+	CONTEND -- a mutual exclusion algorithm, for instance. Running the peers to
+	completion first would let each of them finish before the next one starts,
+	so nothing would ever contend at all.
+	*/
+	const initBudget = (options.interleave === true) ? 0 : (options.initSteps ?? 20000);
 	for (let i = 0; i < procs.length - 1; i++) {
 		while (!procs[i].halted && procs[i].steps < initBudget) {
 			if (!procs[i].stepOne()) break;

@@ -352,6 +352,14 @@ export class CodeGenerator extends ASTVisitor {
 	 */
 	structNamePointerAllowed(type = null) {
 		if (!type || !type.isTypeInfo) return false;
+		/*
+		Only a struct or a union has MEMBERS to carry by name. Without this a
+		pointer to a plain `int` qualified too: `(type.members ?? []).every(...)`
+		is vacuously true for an empty list, so `int *ss = byname(&c)` was given
+		a struct name packet instead of a name pointer -- and writing through it
+		then did nothing at all.
+		*/
+		if (type.kind !== 'struct' && type.kind !== 'union') return false;
 		const version = (this.semantic.targetVersion ?? this.compiler?.config?.getAttribute('targetVersion') ?? 0);
 		if (version < 150) return false;
 		const config = this.compiler?.extraConfig?.getAttribute('optimizeOption') ?? {};
@@ -3835,6 +3843,8 @@ export class CodeGenerator extends ASTVisitor {
 	 * `{value_entry}` / `{pointer_block_entry}` / `{pointer_ptr_entry}` templates.
 	 */
 	processLValGetter(left, returnOnlyPointer = false, traditional = false) {
+
+
 		const lval = this.getLValue(left);
 		if (returnOnlyPointer) {
 			try {

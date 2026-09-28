@@ -7,7 +7,8 @@
 
 import fs from 'fs';
 import path from 'path';
-import { Compiler } from './src/mindc.js';
+import { pathToFileURL } from 'url';
+import { Compiler, defaultExtensions } from './src/mindc.js';
 import { AttributeClass } from './src/mindcBase.js';
 import { MemoryBlock, } from './src/mindcGeneratorBase.js';
 import { runProgram, runProcessors, makeDevice, defaultLinks } from './sim.mjs';
@@ -32,11 +33,48 @@ globalThis.fetch = async (url, options) => {
 	return nodeFetch ? nodeFetch(url, options) : Promise.reject(new Error(`fetch is not available (${text})`));
 };
 
+/*
+`#include "something.js"` pulls in a COMPILER EXTENSION (a set of extra types,
+functions and code generators). In the browser the lexer does
+`import('/include/something.js')`; there is no server here, so the extension is
+loaded from `src/ext/` instead and handed to the Compiler directly -- and the
+`#include` line is commented out, so the lexer does not try the import and fail.
+*/
+const EXT_ROOT = path.resolve(import.meta.dirname ?? '.', 'src', 'ext');
+const extensionCache = new Map();
+async function loadNamedExtension(name) {
+	if (extensionCache.has(name)) return extensionCache.get(name);
+	const file = path.join(EXT_ROOT, name);
+	if (!fs.existsSync(file)) return null;
+	const module = await import(pathToFileURL(file).href);
+	extensionCache.set(name, module?.extension ?? null);
+	return module?.extension ?? null;
+}
+
+/**
+ * @param {string} source
+ * @returns {Promise<{source: string, extensions: any[]}>}
+ */
+async function collectExtensions(source) {
+	const extensions = [];
+	let text = String(source ?? '');
+	for (const m of text.matchAll(/^[ \t]*#[ \t]*include[ \t]+"([^"]+\.js)"[ \t]*$/gm)) {
+		const ext = await loadNamedExtension(m[1]);
+		if (!ext) continue;
+		extensions.push(ext);
+		// Keep the line (line numbers matter) but stop it being an include
+		text = text.replace(m[0], `// (extension ${m[1]} loaded by the test runner)`);
+	}
+	return { source: text, extensions };
+}
+
 export async function compileAndRun(source, memoryBlocks = [{ name: 'bank1', size: 64 }, { name: 'bank2', size: 64 }], extraAttributes = {}) {
 	const config = new AttributeClass();
 	config.setAttribute('targetVersion', 154.3);
 	for (const [k, v] of Object.entries(extraAttributes)) config.setAttribute(k, v);
-	const compiler = new Compiler(source, memoryBlocks.map(b => new MemoryBlock(b.name, b.size)), config);
+	const { source: prepared, extensions } = await collectExtensions(source);
+	const compiler = new Compiler(prepared, memoryBlocks.map(b => new MemoryBlock(b.name, b.size)), config,
+		extensions.length ? [...defaultExtensions, ...extensions] : undefined);
 	const log = console.log; console.log = () => {};
 	const result = await compiler.compile();
 	console.log = log;
@@ -188,8 +226,21 @@ export async function simulate(pathOrSource, memoryBlocks, extraAttributes = {})
 		ucontrolProvider: () => true
 	};
 	if (peerSources.length) {
+		/*
+		`// INTERLEAVE:` says the peers must run CONCURRENTLY with the main
+		program instead of finishing first -- needed by anything that has to
+		CONTEND with them (mutual exclusion, handshaking).
+		*/
+		if (/\/\/\s*INTERLEAVE\b/.test(source)) worldOptions.interleave = true;
 		const sources = peerSources.map(p => ({ name: p.name, deviceName: p.deviceName, code: p.code }));
-		sources.push({ name: '__main__', code: String(result.code ?? '') });
+		/*
+		`// SELF: name` is the name the PEERS know this program's processor by,
+		so that they can reach back into it -- two processors that contend have
+		to talk in both directions.
+		*/
+		const selfMatch = source.match(/\/\/\s*SELF:\s*([A-Za-z_][A-Za-z0-9_]*)/);
+		sources.push({ name: '__main__', deviceName: selfMatch ? selfMatch[1] : undefined,
+			code: String(result.code ?? '') });
 		const world = runProcessors(sources, {
 			memoryBlocks: blocks, devices, maxSteps: 5_000_000, ...worldOptions
 		});
