@@ -465,6 +465,20 @@ export class Optimizer extends ASTVisitor {
 	 *
 	 * Pointers that are assigned to one another share a verdict, so a pointer
 	 * can never end up holding a name while a related one holds an address.
+	 *
+	 * The representation is never chosen on the compiler's own: a pointer only
+	 * becomes a name pointer because the program asked for it, either with
+	 * `#pragma optimize(pointer)` (which asks for all of them) or explicitly
+	 * with `int *byname p`, `p = byname(&x)` or a `byname` parameter. An
+	 * explicit request that cannot be honoured is an ERROR, never a silent
+	 * fall back to a `block`/`pos` pair -- a pointer carrying an address where
+	 * a name is expected reads and writes whatever register happens to be
+	 * named that, and nothing else.
+	 *
+	 * This pass is therefore the only place that decides the representation.
+	 * It writes `usesNamePointer` on the pointer and `namePointersOnly` on the
+	 * target; the generator and the infrastructure read those flags instead of
+	 * working the question out a second time.
 	 */
 	/**
 	 * Find every variable whose address is only ever taken by a builtin that
@@ -627,17 +641,64 @@ export class Optimizer extends ASTVisitor {
 
 	analyzeNamePointers() {
 		const config = this.optimizeConfig ?? {};
-		if (config.doPointerOptimize !== true) return;
 		const version = this.compiler?.config?.getAttribute('targetVersion') ?? 0;
-		if (version < 150) return;
+		const pragmaOn = config.doPointerOptimize === true;
+		/*
+		The pointers the program explicitly asked to be name pointers:
+		`int *byname p`, a `byname` parameter, and the target of `byname(&x)`.
+		The first two are what the PASS is for, so it has to run for them even
+		without the pragma; the target is not a pointer and is never registered.
+		*/
+		const requests = this.namePointerRequests();
+		/*
+		`byname(&x)` also asks for a name when the pointer that receives it is
+		only named there -- `q = byname(&x);` marks the TARGET, not the pointer,
+		so the pointer has to be found by looking at the call. The semantic
+		records every target it accepted, which is exactly "this program used
+		byname()", and is what makes the pass run for that form.
+		*/
+		const bynameUsed = (this.semantic?.forcedNamePointers?.size ?? 0) > 0;
+		/*
+		With no memory block there is nowhere for a `block`/`pos` pair to point
+		at, so every pointer use has to be answered: the pass has to run even
+		when the program asked for nothing, to say what is missing.
+		*/
+		const noMemory = this.hasNoMemoryBlock();
+		if (!pragmaOn && requests.size === 0 && !bynameUsed && !noMemory) return;
+		/*
+		`read`/`write @this <name>` arrived in v150. Below that a name pointer
+		does not exist, so asking for one cannot be satisfied -- say so instead
+		of emitting a `block`/`pos` pair into a register the program reads as a
+		name.
+		*/
+		if (version < 150) {
+			if (pragmaOn) {
+				this.reportNamePointerProblem('pointer',
+					'#pragma optimize(pointer) needs target version 150 or newer, but this program targets v'
+					+ version);
+			} else {
+				if (requests.size === 0) {
+					this.reportNamePointerProblem('byname',
+						'byname(&x) holds a register NAME, which needs target version 150 or newer,'
+						+ ' but this program targets v' + version);
+				}
+				[...requests.values()].forEach(symbol => this.reportNamePointerProblem(symbol,
+					`'${symbol.name}' holds a register NAME ('int *byname' / 'byname(&x)'),`
+					+ ' which needs target version 150 or newer, but this program targets v' + version));
+			}
+			return;
+		}
 		// Which functions call themselves (directly or not)? Nothing local to
 		// one can be kept in a register.
 		this.recursiveFunctions = this.findRecursiveFunctions?.(this.functionCallGraph) ?? new Set();
+
 
 		/** @type {Map<string, any>} */
 		const pointers = new Map();
 		/** @type {Map<string, Set<string>>} */
 		const addressTaken = new Map();
+		/** @type {Map<string, any>} the variable each address belongs to */
+		const targetOf = new Map();
 
 		/**
 		 * Does a value of this type fit in a single register?
@@ -695,6 +756,26 @@ export class Optimizer extends ASTVisitor {
 		};
 
 		/**
+		 * Whether the pointer itself lives in ANOTHER processor.
+		 *
+		 * `remote int *p = &rs;` and `int *byname remote q = remote(@this,
+		 * "g:.qq")` reach the other side the same way, but only the second form
+		 * is consumed by `consumeRemoteDirective`, so the flag is not always on
+		 * the symbol. It is never on the pointer's own type either: `remote`
+		 * qualifies what is POINTED AT (the pointee type carries it), and the
+		 * `remote()` form adds it as a flag. Reading all three is what keeps the
+		 * answer independent of which of them happened to be recorded.
+		 *
+		 * @param {any} symbol
+		 * @returns {boolean}
+		 */
+		const isRemotePointerSymbol = symbol => {
+			if (symbol?.isRemote === true || symbol?.remoteStored === true) return true;
+			const type = typeOfSymbol(symbol);
+			return (type?.isRemote?.() === true) || (type?.pointerTo?.isRemote?.() === true);
+		};
+
+		/**
 		 * @param {any} symbol
 		 * @returns {any} the entry describing this pointer
 		 */
@@ -706,11 +787,42 @@ export class Optimizer extends ASTVisitor {
 					key, symbol,
 					sources: new Set(),	// what may be stored into it
 					peers: new Set(),	// pointers assigned to / from it
-					bad: false
+					bad: false,
+					/*
+					`used` is "the program does something with this pointer", as
+					opposed to merely declaring it: a pointer nothing ever stores
+					into or dereferences is not a program that needs an address.
+					*/
+					used: false,
+					/*
+					`requested` is "the program asked for a name": either the
+					declaration said `*byname`, or a `byname(&x)` reaches it.
+					`byname(&x)` is a request wherever it appears, so this is not
+					only read off the declaration.
+					*/
+					requested: requests.has(key),
+					/*
+					Why a name pointer is not possible, in words. `bad` alone only
+					says that it is not, and "not" is not something a user can act
+					on.
+					*/
+					reason: null
 				});
 			}
 			return pointers.get(key);
 		};
+
+		/**
+		 * Record why a name pointer is out of reach for this pointer.
+		 * @param {any} entry
+		 * @param {string} why
+		 */
+		const disqualify = (entry, why) => {
+			if (!entry || entry.bad) return;
+			entry.bad = true;
+			entry.reason = why;
+		};
+
 
 		/**
 		 * Classify `&expr`, i.e. whether the target is a single register whose
@@ -734,7 +846,15 @@ export class Optimizer extends ASTVisitor {
 				}
 				if (isArraySymbol(symbol)) return { kind: 'invalid', target: null, targetSymbol: symbol };
 				volatileGuard(symbol);
-				if (symbol.isVolatile || symbol.isExtern || symbol.isStatic) {
+				/*
+				An `extern` GLOBAL keeps its own register name (`g:.c`) even when
+				this program does not define it, and a name pointer stores nothing
+				but that name: what an address of it would mean is a separate
+				question, and refusing the name here only broke a program that
+				worked. A local `extern` has no such name, so it stays out.
+				*/
+				const nameable = symbol.isExtern && !symbol.isGlobal;
+				if (symbol.isVolatile || nameable || symbol.isStatic) {
 					return { kind: 'invalid', target: null, targetSymbol: symbol };
 				}
 				if (!isSingleRegister(typeOfSymbol(symbol))) {
@@ -762,13 +882,51 @@ export class Optimizer extends ASTVisitor {
 		};
 
 		/**
+		 * Whether this call is `byname(...)`.
+		 * @param {any} expr
+		 * @returns {boolean}
+		 */
+		const isByNameCall = expr => {
+			if (!expr) return false;
+			/*
+			`byname(&x)` is a BUILTIN call: the parser makes a `BuiltinCall` node
+			(`functionName`, no `callee`), while a call to a function the program
+			declares is a `FunctionCall` (`callee.name`). Looking only for the
+			latter is what made this form invisible: the three ways of asking for
+			a name pointer took three different paths, and this one had none.
+			*/
+			if (expr.type !== 'FunctionCall' && expr.type !== 'BuiltinCall') return false;
+			const callee = expr.functionName ?? expr.callee?.name ?? null;
+			return callee === 'byname';
+		};
+
+		/**
 		 * Classify a value that is stored into a pointer.
 		 * @param {any} expr
 		 * @param {any} scope
-		 * @returns {{kind: string, target: string?, targetSymbol: any?}}
+		 * @returns {{kind: string, target: string?, targetSymbol: any?, explicit: boolean?}}
 		 */
 		const classify = (expr, scope) => {
 			if (!expr) return { kind: 'invalid', target: null, targetSymbol: null };
+			/*
+			`byname(&x)` IS the name of x, so storing one into a pointer asks for
+			the name representation. Recognising it here rather than in each
+			place a pointer is declared is what makes the three ways of writing
+			it -- `int *byname p`, `int *p = byname(&x)`, `p = byname(&x)` -- the
+			same case, and it is a request for THAT pointer: `explicit` marks it.
+			*/
+			if (isByNameCall(expr)) {
+				const argument = expr.arguments?.[0] ?? null;
+				const inner = classifyAddress(argument?.type === 'UnaryExpression'
+					&& argument.operator === '&' ? argument.argument : null, scope);
+				if (inner.kind !== 'register') {
+					return {
+						kind: 'invalid', target: null, targetSymbol: inner.targetSymbol,
+						explicit: true, byname: true
+					};
+				}
+				return { ...inner, explicit: true, byname: true };
+			}
 			switch (expr.type) {
 				case 'UnaryExpression':
 					if (expr.operator !== '&') return { kind: 'invalid', target: null, targetSymbol: null };
@@ -785,6 +943,7 @@ export class Optimizer extends ASTVisitor {
 				case 'BinaryExpression':
 				case 'MemberExpression':
 				case 'FunctionCall':
+				case 'BuiltinCall':
 				case 'CastExpression':
 				default:
 					// Arithmetic on a pointer walks an array; anything unknown is
@@ -792,6 +951,7 @@ export class Optimizer extends ASTVisitor {
 					return { kind: 'invalid', target: null, targetSymbol: null };
 			}
 		};
+
 
 		const volatileGuard = symbol => { };
 
@@ -801,28 +961,68 @@ export class Optimizer extends ASTVisitor {
 		 * @param {any} expr
 		 * @param {any} scope
 		 * @param {boolean} [extraBad]
+		 * @param {string} [extraWhy]
 		 */
-		const note = (pointerSymbol, expr, scope, extraBad = false) => {
+		const note = (pointerSymbol, expr, scope, extraBad = false, extraWhy = null) => {
 			const entry = register(pointerSymbol);
 			if (!entry) return;
-			if (extraBad) entry.bad = true;
+			entry.used = true;
+			if (extraBad) disqualify(entry, extraWhy ?? 'it is not a plain assignment');
 			// Anything inside a recursive function must live in memory
-			if (this.isRecursiveSymbol?.(pointerSymbol)) entry.bad = true;
+			if (this.isRecursiveSymbol?.(pointerSymbol)) {
+				disqualify(entry, 'it is a local of a recursive function, where a register would not survive the nested call');
+			}
 			const info = classify(expr, scope);
+			if (info.explicit === true) entry.requested = true;
 			entry.sources.add(info.kind);
 			if (info.kind === 'pointer' && info.target) {
 				entry.peers.add(info.target);
 			} else if (info.kind !== 'register') {
-				entry.bad = true;
+				if (info.byname === true) {
+					disqualify(entry, describeBadByName(info.targetSymbol));
+				} else if (info.targetSymbol) {
+					disqualify(entry, describeBadTarget(info.targetSymbol));
+				} else {
+					disqualify(entry, 'what is stored into it is not the address of a plain register variable');
+				}
 			}
 			if (info.kind === 'register' && info.target) {
 				if (!addressTaken.has(info.target)) addressTaken.set(info.target, new Set());
 				addressTaken.get(info.target).add(entry.key);
+				if (info.targetSymbol) targetOf.set(info.target, info.targetSymbol);
 			}
 			if (info.kind === 'register' && info.targetSymbol && this.isRecursiveSymbol?.(info.targetSymbol)) {
 				// The target itself lives in a recursive function: not a register
-				entry.bad = true;
+				disqualify(entry, `it points at '${info.targetSymbol.name}', a local of a recursive function`);
 			}
+		};
+
+		/**
+		 * Why `&x` cannot be a name.
+		 * @param {any} symbol
+		 * @returns {string}
+		 */
+		const describeBadTarget = symbol => {
+			if (!symbol) return 'what it points at is not a single register';
+			if (symbol.isVolatile) return `'${symbol.name}' is volatile`;
+			if (symbol.isExtern && !symbol.isGlobal) return `'${symbol.name}' is declared extern`;
+			if (symbol.isStatic) return `'${symbol.name}' is static`;
+			if (isArraySymbol(symbol)) return `'${symbol.name}' is an array, which has no single register to name`;
+			if (!isSingleRegister(typeOfSymbol(symbol))) {
+				return `'${symbol.name}' is not a single register`
+					+ ((symbol.myType?.()?.kind === 'pointer') ? ' (a pointer takes a block and an offset)' : '');
+			}
+			return `the address of '${symbol.name}' is not available`;
+		};
+
+		/**
+		 * Why `byname(&x)` could not be a name.
+		 * @param {any} symbol
+		 * @returns {string}
+		 */
+		const describeBadByName = symbol => {
+			if (symbol) return `byname(&${symbol.name}) cannot store a name`;
+			return 'byname() needs the address of a single register variable';
 		};
 
 		/**
@@ -838,16 +1038,31 @@ export class Optimizer extends ASTVisitor {
 					if (left && left.type === 'Identifier') {
 						const symbol = scope?.lookup(left.name) ?? null;
 						if (isPointerSymbol(symbol)) {
-							note(symbol, node.right, scope, node.operator !== '=');
+							note(symbol, node.right, scope, node.operator !== '=',
+								node.operator !== '=' ? 'it is ' + node.operator + '=, which needs a real address' : null);
 						} else if (isArraySymbol(symbol)) {
 							// `arr = p` : the pointer has to be a real address
 							const source = scope?.lookup(node.right?.name ?? '') ?? null;
-							if (isPointerSymbol(source)) register(source).bad = true;
+							const entry = isPointerSymbol(source) ? register(source) : null;
+							if (entry) disqualify(entry, 'it is stored into an array, which needs a real address');
 						}
 					}
 					break;
 				}
-				case 'VariableDeclarator': {
+				case 'VariableDeclarator':
+				/*
+				There are two declarator nodes and the parser picks between
+				them by which path it took: `int *p = &x` gives a
+				`VariableDeclarator`, while a declaration that starts with
+				`extern` / `static` / `register` / `remote` (which `parseStatement`
+				does not recognise as a type) goes down the fallback and gives a
+				plain `Declarator`. Both carry the same `name` and
+				`initializer`, so both have to be read here -- matching only the
+				first one left every `remote int *p = &rs;` invisible, and the
+				program was then judged as if nothing had ever been stored into
+				`p`.
+				*/
+				case 'Declarator': {
 					if (node.name && node.initializer) {
 						const symbol = scope?.lookup(node.name) ?? null;
 						if (isPointerSymbol(symbol)) note(symbol, node.initializer, scope);
@@ -887,7 +1102,11 @@ export class Optimizer extends ASTVisitor {
 						for (const side of [node.left, node.right]) {
 							if (!side || side.type !== 'Identifier') continue;
 							const symbol = scope?.lookup(side.name) ?? null;
-							if (isPointerSymbol(symbol)) register(symbol).bad = true;
+							if (!isPointerSymbol(symbol)) continue;
+							const entry = register(symbol);
+							entry.used = true;
+							disqualify(entry, 'it takes part in pointer arithmetic ('
+								+ side.name + ' ' + op + ' ...), which walks memory');
 						}
 					}
 					break;
@@ -900,24 +1119,56 @@ export class Optimizer extends ASTVisitor {
 						const left = node.left;
 						if (left && left.type === 'Identifier') {
 							const symbol = scope?.lookup(left.name) ?? null;
-							if (isPointerSymbol(symbol)) register(symbol).bad = true;
+							if (isPointerSymbol(symbol)) {
+								const entry = register(symbol);
+								entry.used = true;
+								disqualify(entry, 'it is ' + node.operator + ', which walks memory');
+							}
 						}
 					}
 					break;
 				}
 				case 'MemberExpression': {
-					// `p[i]` is pointer arithmetic
+					// `p[i]` is pointer arithmetic, and so is `p->m`
 					const object = node.children?.[0] ?? node.object ?? null;
 					if (object && object.type === 'Identifier') {
 						const symbol = scope?.lookup(object.name) ?? null;
-						if (isPointerSymbol(symbol)) register(symbol).bad = true;
+						if (isPointerSymbol(symbol)) {
+							const entry = register(symbol);
+							entry.used = true;
+							disqualify(entry, 'it is indexed or dereferenced with `->`, which needs a real address');
+						}
 					}
 					break;
 				}
 				case 'UnaryExpression': {
+					if (node.operator === '*' && node.argument) {
+						/*
+						`*p` on its own says nothing about the representation: a name
+						pointer dereferences perfectly well (`read/write @this`).
+						It is registered so that `int *w; *w = 5;` is visible as a use
+						of a pointer, which is what makes the no-memory diagnostic
+						fire for a pointer that is never given a target.
+						*/
+						const argument = node.argument;
+						const name = argument?.type === 'Identifier' ? argument.name : null;
+						if (name) {
+							const symbol = scope?.lookup(name) ?? null;
+							if (isPointerSymbol(symbol)) {
+								const entry = register(symbol);
+								entry.used = true;
+								entry.dereferenced = true;
+							}
+						}
+						break;
+					}
 					if ((node.operator === '++' || node.operator === '--') && node.argument) {
 						const symbol = scope?.lookup(node.argument.name) ?? null;
-						if (isPointerSymbol(symbol)) register(symbol).bad = true;
+						if (isPointerSymbol(symbol)) {
+							const entry = register(symbol);
+							entry.used = true;
+							disqualify(entry, 'it is incremented, which walks memory');
+						}
 					}
 					break;
 				}
@@ -939,12 +1190,7 @@ export class Optimizer extends ASTVisitor {
 		};
 		walkScope(this.globalScope);
 
-		/*
-		`&x` handed straight to a builtin that writes through it (`ulocate`,
-		`ucontrol "within"`). The processor can write into the register a name
-		pointer names, so x may stay a register -- as long as EVERY `&x` in the
-		program is such an output parameter.
-		*/
+		/* Nothing to decide: no pointer is used at all, so there is no verdict. */
 		if (pointers.size === 0) return;
 
 		/* Group pointers that are assigned to one another: they share a verdict. */
@@ -990,7 +1236,11 @@ export class Optimizer extends ASTVisitor {
 					the name representation, even if every call site would allow
 					it -- the body may move the pointer.
 					*/
-					if (entry?.symbol?.noNamePointer === true) { ok = false; break; }
+					if (entry?.symbol?.noNamePointer === true) {
+						ok = false;
+						if (entry) disqualify(entry, 'its declaration forbids the name representation');
+						break;
+					}
 					if (!entry || entry.bad) { ok = false; break; }
 					for (const source of entry.sources) {
 						if (source !== 'register' && source !== 'pointer') { ok = false; break; }
@@ -1014,9 +1264,67 @@ export class Optimizer extends ASTVisitor {
 			}
 		}
 
-		for (const key of eligible) {
-			const entry = pointers.get(key);
-			if (entry) entry.symbol.usesNamePointer = true;
+		/*
+		Now the decision itself.
+
+		`eligible` only says a name pointer is POSSIBLE. It may not be USED
+		unless the program asked for it: `#pragma optimize(pointer)` asks for
+		all of them, an explicit `int *byname p` / `byname(&x)` / `byname`
+		parameter asks for that one. Everything else keeps the traditional
+		`block` / `pos` pair, and with no memory to hold the target in that is an
+		error naming the pointer -- never a silent change of representation,
+		which is what turned a `*byname` pointer into a `getlink` of a register
+		that never got assigned.
+		*/
+		for (const group of groups) {
+			/*
+			A request anywhere in the group applies to the whole group: the
+			members hold one another, so they cannot differ.
+			*/
+			const requested = [...group].some(k => pointers.get(k)?.requested === true);
+			const canBeNames = [...group].every(k => eligible.has(k));
+			for (const key of group) {
+				const entry = pointers.get(key);
+				if (!entry) continue;
+				const name = entry.symbol?.name ?? key;
+				if (canBeNames && (pragmaOn || requested)) {
+					entry.symbol.usesNamePointer = true;
+					continue;
+				}
+				if (requested) {
+					this.reportNamePointerProblem(entry.symbol,
+						`Pointer '${name}' was declared to hold a register NAME`
+						+ ' (int *byname / byname(&x)), which is not possible here:'
+						+ (entry.reason ? ' ' + entry.reason : ' it is used in a way a name does not support')
+						+ `. Either drop the byname and link a memory block,`
+						+ ' or use #pragma optimize(pointer) for the pointers that fit.');
+					continue;
+				}
+				/*
+				Not asked for, so it stays a block/pos pair -- which is fine as
+				long as there is memory to hold the target. Without any, there is
+				nothing for `getlink <p>_block` to find.
+				*/
+				if (noMemory && entry.used === true) {
+					/*
+					A `remote` pointer is a different matter: it does not live
+					HERE. Its words are read out of the other processor (`read
+					... @p "g:.q_block"`), so the block it names is that
+					processor's cell and `getlink` on it is legitimate -- a
+					program that only reaches into a peer needs no memory of its
+					own. Reporting it as missing memory refused a program that
+					was already correct.
+					*/
+					if (isRemotePointerSymbol(entry.symbol)) continue;
+					this.reportNamePointerProblem(entry.symbol,
+						`Pointer '${name}' needs a real address`
+						+ (entry.reason ? ' (' + entry.reason + ')' : '')
+						+ ', but this program has no memory block linked, so there is nowhere to keep it.'
+						+ ' Link a memory cell, or use the name representation instead:'
+						+ ` #pragma optimize(pointer), int *byname ${name}, or byname(&x)`
+						+ ' (needs target version 150 or newer).');
+				}
+			}
 		}
 
 		/*
@@ -1025,9 +1333,109 @@ export class Optimizer extends ASTVisitor {
 		*/
 		for (const [target, takers] of addressTaken) {
 			if (takers.size === 0) continue;
-			const allNames = [...takers].every(t => eligible.has(t));
-			if (allNames) this.markNameOnlyTarget(target);
+			const entries = [...takers].map(t => pointers.get(t)).filter(e => !!e);
+			const allNames = entries.length > 0
+				&& entries.every(e => e.symbol?.usesNamePointer === true);
+			if (allNames) {
+				this.markNameOnlyTarget(target);
+				continue;
+			}
+			/*
+			The same holds for a variable only ever reached by a `remote`
+			pointer: that pointer is a (processor, name) pair, so nothing local
+			is ever addressed -- `remote int *p = &rs;` writes over there through
+			`rs`'s name, and asking for memory here made a program that needs
+			none fail to build.
+			*/
+			if (entries.length > 0 && entries.every(e => isRemotePointerSymbol(e.symbol))) {
+				this.markNameOnlyTarget(target);
+				continue;
+			}
+			/*
+			Some pointer asked for the NAME of this variable, and another one
+			needs its real address: a register cannot be both. The name request
+			is the one that cannot be satisfied, so it is the one that is
+			refused -- silently doing either produced a program that wrote to a
+			register nothing had ever written.
+			*/
+			const targetName = targetOf.get(target)?.name ?? target;
+			const others = entries.filter(e => e.symbol?.usesNamePointer !== true)
+				.map(e => e.symbol?.name ?? e.key);
+			entries.filter(e => e.requested === true).forEach(e => this.reportNamePointerProblem(e.symbol,
+				`Pointer '${e.symbol?.name ?? e.key}' was asked to hold the name of`
+				+ ` '${targetName}', but that variable also has to be reachable at a real`
+				+ ' address, because ' + others.join(', ') + ' point'
+				+ (others.length === 1 ? 's' : '') + ' at it as an ordinary pointer.'
+				+ ' A register has no address, so the two cannot both be done:'
+				+ ' let every pointer at that variable use the same representation'
+				+ ' (name pointers, or real addresses with a memory block linked).'));
 		}
+	}
+
+	/**
+	 * Every pointer the program explicitly asked to be a name pointer, keyed by
+	 * assembly name.
+	 *
+	 * `int *byname p`, a `byname` parameter, and the variable `byname(&x)` names
+	 * all set `forcedNamePointer`. The last of those is a target rather than a
+	 * pointer, so it never reaches the analysis and asking for it here is
+	 * harmless.
+	 *
+	 * @returns {Map<string, any>}
+	 */
+	namePointerRequests() {
+		/** @type {Map<string, any>} */
+		const found = new Map();
+		const visitScope = scope => {
+			if (!scope) return;
+			scope.symbols?.forEach(symbol => {
+				if (symbol?.forcedNamePointer !== true) return;
+				const type = symbol.myType?.() ?? null;
+				if (type?.kind !== 'pointer') return;
+				/*
+				`struct pt *byname p` is the NAME PACKET representation
+				(#pragma optimize(struct_pointer)): the pointer carries the name
+				of every member, which is a different mechanism with its own
+				eligibility rules, and asking the name pointer analysis about it
+				refused a program that was working.
+				*/
+				const pointee = type.pointerTo ?? null;
+				if (pointee && (pointee.kind === 'struct' || pointee.kind === 'union')) return;
+				/*
+				`struct pt *p = &st` on a register struct is the name packet too,
+				recorded on the pointer itself.
+				*/
+				if (symbol.addressedByName === true) return;
+				found.set(symbol.getAssemblySymbol?.() ?? symbol.name, symbol);
+			});
+			scope.children?.forEach(visitScope);
+		};
+		visitScope(this.globalScope);
+		return found;
+	}
+
+	/**
+	 * Whether this program was given no memory block at all.
+	 * @returns {boolean}
+	 */
+	hasNoMemoryBlock() {
+		return (this.compiler?.memoryInfo?.length ?? 0) === 0;
+	}
+
+	/**
+	 * Say once that a pointer cannot hold a name.
+	 *
+	 * The analysis runs once per optimization round, so the same complaint
+	 * would otherwise be repeated up to ten times.
+	 *
+	 * @param {any} symbol
+	 * @param {string} message
+	 */
+	reportNamePointerProblem(symbol, message) {
+		this.reportedNamePointerProblems ??= new Set();
+		if (this.reportedNamePointerProblems.has(message)) return;
+		this.reportedNamePointerProblems.add(message);
+		this.addError(message, symbol?.location ?? null);
 	}
 
 	/**

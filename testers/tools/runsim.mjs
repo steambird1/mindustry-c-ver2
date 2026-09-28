@@ -7,9 +7,9 @@
 
 import fs from 'fs';
 import path from 'path';
-import { Compiler } from './src/mindc.js';
-import { AttributeClass } from './src/mindcBase.js';
-import { MemoryBlock, } from './src/mindcGeneratorBase.js';
+import { Compiler } from '../../mindc.js';
+import { AttributeClass } from '../../mindcBase.js';
+import { MemoryBlock, } from '../../mindcGeneratorBase.js';
 import { runProgram, runProcessors, makeDevice, defaultLinks } from './sim.mjs';
 
 /*

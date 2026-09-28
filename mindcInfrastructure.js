@@ -802,6 +802,15 @@ export class BasicRet extends VariableRet {
 
 	/**
 	 * Whether `&x` may be taken as the name of x.
+	 *
+	 * The name pointer analysis (`SemanticOptimizer.analyzeNamePointers`) marks
+	 * every such variable `namePointersOnly`, and it is the only place allowed
+	 * to: it is where the two ends of a `byname` request are put together, and
+	 * where a program that asks for something impossible is refused. Asking
+	 * again here -- as this used to, by asking the generator whether name
+	 * pointers were on -- meant a `*byname` pointer and a plain one could reach
+	 * opposite answers about the same variable.
+	 *
 	 * @returns {boolean}
 	 */
 	get isNameAddressable() {
@@ -822,8 +831,13 @@ export class BasicRet extends VariableRet {
 		if (!uses || uses.other !== 0) return false;
 		if (uses.builtin > 0 && uses.pointers.size === 0) return true;
 		if (uses.pointers.size === 0) return false;
-		// Stored into a pointer: only a name pointer can hold a name
-		return generator?.namePointerAllowed?.() === true;
+		/*
+		Stored into a pointer: only a pointer that really holds a name can take
+		one. The flag is the analysis's verdict, so no option is consulted here.
+		*/
+		const takers = [...uses.pointers].map(name => symbol.scope?.lookup?.(name)
+			?? generator?.semantic?.globalScope?.lookup?.(name) ?? null);
+		return takers.length > 0 && takers.every(p => p !== null && p.usesNamePointer === true);
 	}
 }
 
@@ -1533,7 +1547,28 @@ export class NamePointerRet extends PointerRet {
 	 */
 	set(other) {
 		const glob = this.glob;
+		/*
+		Only a NAME can be stored here. A traditional pointer is a block and an
+		offset -- `X.__pointer` is the address of a block, not a register name --
+		and a value living in memory has to be read out before it is anything at
+		all. Copying either into a name pointer compiled fine and produced a
+		program that wrote to a register nothing had ever written, so refuse:
+		the two representations have to be decided together, upstream.
+		*/
+		if ((other instanceof MemoryRefRet) || (other instanceof MemPointerRet)
+			|| (other instanceof RefPointerRet) || (other instanceof VolatilePointerRet)) {
+			throw new InfrastructureNotImplementedExpection(
+				'a name pointer cannot be given the memory address ' + other.name
+				+ ': the variable it names has to stay in a register for its name to exist'
+				+ ' (use a pointer that keeps a real address, or ask for the name representation)');
+		}
 		const value = other.get();
+		if (value instanceof MemoryRefRet) {
+			throw new InfrastructureNotImplementedExpection(
+				'a name pointer cannot be given the memory address ' + value.name
+				+ ': the variable it names has to stay in a register for its name to exist'
+				+ ' (use a pointer that keeps a real address, or ask for the name representation)');
+		}
 		if (value instanceof NamePointerRet) {
 			return new NamePointerRet(glob, [this.instructions, value.instructions,
 				InstructionBuilder.set(this.name, value.name)],

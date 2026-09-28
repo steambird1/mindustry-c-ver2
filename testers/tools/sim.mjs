@@ -9,7 +9,7 @@
  */
 
 import fs from 'fs';
-import { objectList, liquidList, unitList, buildingList } from './src/mindcBase.js';
+import { objectList, liquidList, unitList, buildingList } from '../../mindcBase.js';
 
 /* ------------------------------------------------------------------ *
  * Content tables (the @constants the processor knows about)

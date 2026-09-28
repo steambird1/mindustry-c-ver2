@@ -225,8 +225,12 @@ export class CodeGenerator extends ASTVisitor {
 			does not exist, so refuse instead.
 			*/
 			if (noMemory && this.heapMemoryRequired) {
-				this.addError('This program needs at least one memory block: '
-					+ 'some variables have to be stored in memory (volatile, arrays in recursive functions, ...)');
+				this.addError('This program needs at least one memory block: some variables have to be'
+					+ ' stored in memory (volatile, arrays in recursive functions, a variable whose'
+					+ ' address is taken by an ordinary pointer, ...). Link a memory cell, or keep'
+					+ ' such a variable out of memory: with no block linked a pointer has to hold the'
+					+ ' NAME of its target, which you can ask for with #pragma optimize(pointer),'
+					+ ' int *byname p, or byname(&x) (the name representation needs target v150+).');
 			}
 			const programBody = this.visit(ast);
 			const mainSymbol = programBody.getAttribute('mainSymbol');
@@ -337,12 +341,6 @@ export class CodeGenerator extends ASTVisitor {
 	}
 
 	/**
-	 * Whether pointers that store the NAME of their target are in use. They need
-	 * `read`/`write @this <name>`, which only exists from v150 on, and they are
-	 * off unless `#pragma optimize(pointer)` asks for them.
-	 * @returns {boolean}
-	 */
-	/**
 	 * Whether a pointer to this struct may carry member NAMES rather than an
 	 * address. Enabled by `#pragma optimize(struct_pointer[, n])`; `n` limits
 	 * how many registers the packet may take.
@@ -380,12 +378,22 @@ export class CodeGenerator extends ASTVisitor {
 		return count <= limit;
 	}
 
+	/*
+	Whether pointers that store the NAME of their target are in use.
+
+	They need `read`/`write @this <name>`, which only exists from v150 on, and
+	they are never used implicitly: the user has to ask for them, either with
+	`#pragma optimize(pointer)` (which makes every eligible pointer a name
+	pointer) or explicitly, per pointer, with `int *byname p`, `p = byname(&x)`
+	or a `byname` parameter.
+
+	`symbol` is the pointer when the question is about one particular pointer.
+	`forcedNamePointer` is set on the two ends of an explicit request -- on the
+	pointer that is declared `*byname`, and on the target of `byname(&x)` -- so
+	passing either of them answers "yes, the user asked".
+	*/
 	namePointerAllowed(symbol = null) {
 		const version = (this.semantic.targetVersion ?? this.compiler?.config?.getAttribute('targetVersion') ?? 0);
-		/*
-		`byname(&c)` is an explicit request, so it only needs the version.
-		Automatic name pointers are opt-in.
-		*/
 		if (symbol && symbol.forcedNamePointer === true) return version >= 150;
 		const config = this.compiler?.extraConfig?.getAttribute('optimizeOption') ?? {};
 		if (config.doPointerOptimize !== true) return false;
@@ -426,8 +434,16 @@ export class CodeGenerator extends ASTVisitor {
 		where it is. (Not in a recursive function: the register is gone by the
 		time the nested call returns.)
 		*/
-		let addressedByName = ((symbol.namePointersOnly === true || symbol.forcedNamePointer === true)
-			&& this.namePointerAllowed(symbol));
+		/*
+		`namePointersOnly` is written by the name pointer analysis, which is the
+		one place that decides the representation: it has already refused a
+		program that asks for a name it cannot have, and it needs v150, so it is
+		read here rather than re-derived. `forcedNamePointer` covers a target
+		named by an explicit `byname(&x)` whose pointer is not a variable of this
+		scope.
+		*/
+		let addressedByName = symbol.namePointersOnly === true
+			|| (symbol.forcedNamePointer === true && this.namePointerAllowed(symbol));
 		/*
 		A `register` struct reached through a name packet: the pointer holds
 		member names, so the struct itself never needs an address. If the
@@ -453,7 +469,8 @@ export class CodeGenerator extends ASTVisitor {
 		  - only by `ulocate` / `ucontrol`, which take register NAMES: no memory
 		    needed, at any version;
 		  - also by a pointer: memory is needed unless every such pointer keeps
-		    names (or is never used), which requires the name pointer option.
+		    names (or is never used), which the analysis records on the pointer
+		    itself -- asking again here is what let the two disagree.
 		*/
 		const addressUses = this.semantic?.addressUseTable?.get(symbol.getAssemblySymbol?.() ?? symbol.name) ?? null;
 		const pointerTakers = [...(addressUses?.pointers ?? [])]
@@ -468,7 +485,7 @@ export class CodeGenerator extends ASTVisitor {
 		pair of block/offset registers that were never assigned.
 		*/
 		const takenByNamePointers = !!addressUses && addressUses.other === 0
-			&& addressUses.pointers.size > 0 && this.namePointerAllowed()
+			&& addressUses.pointers.size > 0
 			&& pointerTakers.length > 0
 			&& pointerTakers.every(p => p !== null && p.usesNamePointer === true);
 		const addressedAsOutput = symbol.addressedAsBuiltinOutput === true
@@ -709,7 +726,14 @@ export class CodeGenerator extends ASTVisitor {
 	}
 
 	/**
-	 * Whether an array may be kept in registers when there is no memory left.
+	 * Whether this symbol may be held in registers when there is no memory left.
+	 *
+	 * Only an array has such a form: its elements become registers of their own
+	 * (see `arrayStyleFor`). For anything else "no memory" means the program
+	 * cannot be represented at all, and the caller has to say so. Answering
+	 * `true` for every ordinary value here is what hid the problem -- a `&x`
+	 * that had nowhere to live was quietly treated as a name, and the emitted
+	 * `getlink <p>_block` read a register nothing had ever written.
 	 *
 	 * Not for a `volatile` array (it has to be in memory by definition), and not
 	 * inside a recursive function (a register would be overwritten by the nested
@@ -719,6 +743,17 @@ export class CodeGenerator extends ASTVisitor {
 	 * @returns {boolean}
 	 */
 	canDegradeToRegisters(symbol) {
+		/*
+		A variable whose address is never formed does not need memory, whatever
+		its type. The name pointer analysis works that out: it is the only place
+		that knows who takes the address of what, and it marks such a variable
+		`namePointersOnly`. `remote int *p = &rs;` is the case that matters --
+		the pointer is a (processor, name) pair, so `rs` is never addressed here
+		and refusing to build a program that needs no memory was wrong.
+		*/
+		if (symbol?.namePointersOnly === true) return true;
+		const kind = (symbol.myType?.() ?? null)?.kind ?? null;
+		if (kind !== 'array') return false;
 		return this.forcedTraditionalReason(symbol) === null;
 	}
 
@@ -3260,16 +3295,6 @@ export class CodeGenerator extends ASTVisitor {
 	 * may instead be held as a set of registers, as a name lookup, or -- for a
 	 * constant array -- as a string. See mindcInfrastructure.js.
 	 * ------------------------------------------------------------------ */
-
-	/**
-	 * Whether pointers may store the NAME of what they point at.
-	 * @returns {boolean}
-	 */
-	namePointerAllowed() {
-		const config = this.compiler?.extraConfig?.getAttribute('optimizeOption') ?? {};
-		if (config.doPointerOptimize !== true) return false;
-		return (this.semantic.targetVersion ?? this.compiler?.config?.getAttribute('targetVersion') ?? 0) >= 150;
-	}
 
 	/**
 	 * How many elements an array symbol has.

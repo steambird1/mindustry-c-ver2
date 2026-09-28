@@ -1,7 +1,7 @@
 import fs from 'fs';
-import { Compiler } from '../src/mindc.js';
-import { AttributeClass } from '../src/mindcBase.js';
-import { MemoryBlock } from '../src/mindcGeneratorBase.js';
+import { Compiler } from '../../../mindc.js';
+import { AttributeClass } from '../../../mindcBase.js';
+import { MemoryBlock } from '../../../mindcGeneratorBase.js';
 const blocks = [{ name: 'cell1', size: 64 }];
 export function compile(src, version = 154.3) {
 	const cfg = new AttributeClass(); cfg.setAttribute('targetVersion', version);

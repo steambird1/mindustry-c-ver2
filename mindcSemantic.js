@@ -1725,6 +1725,12 @@ export class SemanticAnalyzer extends ASTVisitor {
             if (this.hasByNameQualifier(param)) {
 				paramSymbol.usesNamePointer = true;
 				paramSymbol.forcedNamePointer = true;
+				/*
+				A `byname` parameter asks for the representation here; the
+				variable it will name belongs to the CALLER, so the parameter is
+				what this program knows about.
+				*/
+				this.noteNamePointerRequest(paramSymbol);
 			}
 			/*
 			An `auto` parameter of an instantiated version: the representation
@@ -1984,6 +1990,22 @@ export class SemanticAnalyzer extends ASTVisitor {
 				&& this.hasByNameQualifier(declarator)) {
 				varSymbol.usesNamePointer = true;
 				varSymbol.forcedNamePointer = true;
+				/*
+				`int *byname p = &x` names a variable without going through
+				`byname()`, so nothing else would remember that this program
+				asked for a name. The target is recorded when the initializer
+				names one; otherwise the pointer stands in for the request.
+				*/
+				const init = declarator.initializer;
+				const target = (init?.type === 'UnaryExpression' && init.operator === '&'
+					&& init.argument?.type === 'Identifier')
+					? (this.currentScope?.lookup?.(init.argument.name) ?? null) : null;
+				if (target) {
+					target.forcedNamePointer = true;
+					this.noteNamePointerRequest(target);
+				} else {
+					this.noteNamePointerRequest(varSymbol);
+				}
 			}
 			/*
 			`int *remote p` -- a pointer that ITSELF lives in another processor.
@@ -2783,12 +2805,32 @@ export class SemanticAnalyzer extends ASTVisitor {
 		variable out of memory, and it normally refuses without the pragma.
 		*/
 		symbol.forcedNamePointer = true;
-		if (!this.forcedNamePointers) this.forcedNamePointers = new Set();
-		this.forcedNamePointers.add(symbol.getAssemblySymbol());
+		this.noteNamePointerRequest(symbol);
 		node.setAttribute('bynameTarget', symbol.getAssemblySymbol());
 		node.setAttribute('bynameSymbol', symbol);
 		node.dataType = this.getTypeInfo('void*');
 		return true;
+	}
+
+	/**
+	 * Record that this program asked for a name pointer.
+	 *
+	 * Every way of asking ends up here, so "does this program use name
+	 * pointers at all" has one answer instead of three:
+	 *   - `byname(&x)`            -> the TARGET, `x`
+	 *   - `int *byname p = &x`    -> the target when the initializer names one
+	 *   - `void f(int *byname p)` -> the parameter, whose target is the CALLER's
+	 * The optimizer's name pointer analysis reads this to know that a program
+	 * which asked for a name has to be looked at, and the `auto` resolution
+	 * reads it because the representation exists in this program.
+	 *
+	 * @param {SymbolEntry?} [symbol] the variable involved, when known
+	 */
+	noteNamePointerRequest(symbol = null) {
+		if (!this.forcedNamePointers) this.forcedNamePointers = new Set();
+		const name = symbol?.getAssemblySymbol?.() ?? symbol?.name ?? null;
+		if (name) this.forcedNamePointers.add(name);
+		return this.forcedNamePointers;
 	}
 
 	/**
@@ -4336,22 +4378,43 @@ export class SemanticAnalyzer extends ASTVisitor {
 
     /**
      * Whether a pointer that only ever holds register names is allowed here.
+     *
+     * Two ways of asking for it, and the same two the generator counts:
+     * `#pragma optimize(pointer)` for all pointers, and an explicit request for
+     * one of them (`int *byname p`, `p = byname(&x)`, a `byname` parameter).
+     * Both need v150, since `read`/`write @this <name>` arrived there.
+     *
+     * @param {SymbolEntry?} [symbol] the variable being pointed at, if known
      * @returns {boolean}
      */
-    namePointersEnabled() {
+    namePointersEnabled(symbol = null) {
+        const version = this.targetVersion ?? this.compiler?.config?.getAttribute('targetVersion') ?? 0;
+        if (version < 150) return false;
         /*
         The pragma lands in `extraConfig.optimizeOption` -- the same place the
         generator reads it (`namePointerAllowed`). The two `optimizerConfig`
-        objects probed here do not exist, so this always answered false: an
-        `auto` parameter could never be given the 'name' representation, and
-        `#pragma optimize(pointer)` looked like it had no effect here at all.
+        objects probed below do not exist, so those probes always answered
+        false; they are kept only so that a caller that passes the pragma
+        through another channel keeps working.
         */
         const config = this.compiler?.extraConfig?.getAttribute?.('optimizeOption') ?? null;
         if (config?.doPointerOptimize === true) return true;
         const fallback = this.compiler?.optimizerConfig ?? null;
         if (fallback?.getAttribute?.('doPointerOptimize') === true) return true;
         if (fallback?.doPointerOptimize === true) return true;
-        return (this.compiler?.config?.getAttribute?.('doPointerOptimize') === true);
+        if (this.compiler?.config?.getAttribute?.('doPointerOptimize') === true) return true;
+        // The program named the target itself: `int *byname p; p = &x;`
+        if (symbol && (symbol.forcedNamePointer === true || symbol.namePointersOnly === true)) return true;
+        /*
+        Otherwise: the program asked for a name SOMEWHERE. Whether this very
+        `&x` may be one is the optimizer's decision -- it runs later and owns
+        the question -- but the answer has to be the same in both places, and
+        for a call site the optimizer cannot see (the target is a local of a
+        body it walks per round) the only thing that says a name is even
+        possible here is that the program uses them.
+        */
+        if ((this.forcedNamePointers?.size ?? 0) > 0) return true;
+        return false;
     }
 
     /**
@@ -4893,7 +4956,7 @@ export class SemanticAnalyzer extends ASTVisitor {
                     */
                     const movable = !symbol.isVolatile && !symbol.isExtern && !symbol.isStatic
                         && !symbol.needMemoryAllocation;
-                    if (oneRegister && movable && this.namePointersEnabled()) return 'name';
+                    if (oneRegister && movable && this.namePointersEnabled(symbol)) return 'name';
                     return 'memory';
                 }
                 /*
