@@ -2122,10 +2122,7 @@ export class SemanticAnalyzer extends ASTVisitor {
                 pattern, the other an instantiation of it -- so they must not be
                 compared as they stand.
                 */
-                const paramQuals = p => {
-                    const t = (typeof p?.type === 'string') ? this.getTypeInfo(p.type) : (p?.type ?? p);
-                    return [...(t?.qualifiers ?? []), ...((t?.pointerQualifiers ?? []).flat?.() ?? [])];
-                };
+                const paramQuals = p => this.qualifiersOfTypeInfo(this.parameterTypeInfo(p));
                 const fpAcceptsAutoVersion = (fp, fn) => {
                     const fpParams = this.functionPointerParametersOf(fp);
                     const fnParams = this.functionPointerParametersOf(fn);
@@ -4843,6 +4840,36 @@ export class SemanticAnalyzer extends ASTVisitor {
     }
 
     /**
+     * The type a parameter descriptor names.
+     *
+     * A parameter of a function POINTER reached through a `typedef` keeps its
+     * type as a name (`{ name, type: 'int*' }`), while a function DECLARATION's
+     * parameter has the type already resolved. Both have to be readable here.
+     *
+     * @param {any} p A parameter descriptor
+     * @returns {TypeInfo?}
+     */
+    parameterTypeInfo(p) {
+        if (!p) return null;
+        if (p.isTypeInfo === true) return p;
+        if (typeof p.type === 'string') return this.getTypeInfo(p.type) ?? null;
+        return p.type ?? p;
+    }
+
+    /**
+     * The qualifiers written on a type, wherever they were written.
+     *
+     * @param {TypeInfo?} t
+     * @returns {string[]}
+     */
+    qualifiersOfTypeInfo(t) {
+        return [
+            ...(t?.qualifiers ?? []),
+            ...((t?.pointerQualifiers ?? []).flat?.() ?? []),
+        ];
+    }
+
+    /**
      * Tell a parameter symbol which representation its argument travels as.
      *
      * One place, because two callers have to mean exactly the same thing: the
@@ -5413,13 +5440,21 @@ export class SemanticAnalyzer extends ASTVisitor {
      * the parameter was whatever `__param_0` happened to hold (zero), and the
      * program printed 0 instead of the value it had just been given.
      *
+     * What the pointer's type can say is limited, and what it cannot say is
+     * refused rather than guessed at. Its parameters travel as type NAMES, and
+     * no type name carries a pointer qualifier: `void (*)(int *byname)` reads
+     * back as `int*`. So where a qualifier decides the representation -- the
+     * NAME a `byname` pointer carries -- there is nothing here to read it from,
+     * and the address is all this pass can see. Pinning that would answer a
+     * question the pointer type never got asked.
+     *
      * @param {any} ast
      * @returns {void}
      */
     pinValueTakenRepresentations(ast) {
         const valueUses = this.functionValueUses(ast);
         if (!valueUses.length) return;
-        const functions = (ast?.functions ?? []).filter(f => !f?.getAttribute?.('autoTemplate'));
+        const functions = ast?.functions ?? [];
         if (!functions.length) return;
 
         for (const use of valueUses) {
@@ -5431,13 +5466,49 @@ export class SemanticAnalyzer extends ASTVisitor {
             /*
             The pointer's own type is the only place the representation is
             written down: `cb f = test;` where `cb` is `void (*)(int *)` says
-            the parameter travels as an ADDRESS, and `void (*)(int *byname)`
-            says it travels as a NAME.
+            the parameter travels as an ADDRESS.
             */
             const fpType = use.owner?.scope?.lookup?.(holder)?.myType?.() ?? null;
             const fpParams = this.functionPointerParametersOf(fpType);
             if (!fpParams) continue;
             if (this.rejectTemplateInFunctionPointer(fpType, use.node.location ?? null)) continue;
+
+            /*
+            An `auto` parameter is not settled here at all: it has one version
+            per representation, and which one applies is decided by the
+            argument. `expandAutoTemplates` has already made the version a
+            function pointer names.
+            */
+            if ((fnNode.parameters ?? []).some(param => this.hasAutoQualifier(param))) continue;
+
+            /*
+            A qualifier the pointer's own type cannot spell out.
+            A function pointer's parameters travel as type NAMES, and no type
+            name carries a pointer qualifier: `void (*)(int *byname)` reads
+            back as `int*`. So where the declaration asks for a representation
+            by that means -- the NAME a `byname` pointer carries -- there is
+            nothing here to read it from, and the address is the only thing
+            this pass can see. The two sides would then disagree about the
+            argument, silently: the callee reads a name, the call site sends
+            an address. Saying so beats shipping that.
+            */
+            const spelledOut = (fnNode.parameters ?? []).some((param, i) => {
+                const asked = [
+                    ...(param?.pointerQualifiers ?? []),
+                    ...(param?.type?.pointerQualifiers ?? []),
+                ].flat().filter(q => q === 'byname' || q === 'remote');
+                if (!asked.length) return false;
+                const said = this.qualifiersOfTypeInfo(this.parameterTypeInfo(fpParams[i]));
+                return !said.some(q => asked.includes(q));
+            });
+            if (spelledOut) {
+                this.addError(`'${originalName}' is given to a function pointer, and a function `
+                    + `pointer's parameter type cannot say 'byname' or 'remote': the two reach the `
+                    + `compiler as plain type names, which carry neither. The parameter would be `
+                    + `handed one representation and read as the other. Write the parameter without `
+                    + `the qualifier`, use.node?.location ?? null);
+                continue;
+            }
 
             /*
             All of it, or none of it. Pinning the parameters we can make out
