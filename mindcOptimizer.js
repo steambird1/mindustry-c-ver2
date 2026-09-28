@@ -7236,6 +7236,22 @@ export class Optimizer extends ASTVisitor {
 							symbolTarget.arrayAliasOf = aliased;
 							// It is no longer a slot that gets a handle delivered
 							symbolTarget.arrayParamRep = null;
+							/*
+							The alias IS the caller's array, so it has to take the
+							caller's TYPE as well. `duplicateVariable` copied the
+							PARAMETER's symbol, and a parameter written `int s[]` has
+							no length: its size comes out NaN, and a stack frame
+							advanced by NaN never finishes -- `___stackframe_forward`
+							compares against it, every comparison is false, and the
+							program hangs. The caller's `int r[5]` does have a
+							length, and that is the one that is true here.
+							*/
+							const aliasedType = aliased.myType?.() ?? null;
+							if (aliasedType) {
+								const wrapper = symbolTarget.type;
+								symbolTarget.type = (wrapper && typeof wrapper === 'object' && 'type' in wrapper)
+									? { ...wrapper, type: aliasedType } : aliasedType;
+							}
 						}
 					}
 				}
