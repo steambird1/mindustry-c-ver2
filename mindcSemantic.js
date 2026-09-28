@@ -3693,6 +3693,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 				copy.scope = null;
 				copy.setAttribute('autoInstance', true);
 				copy.setAttribute('autoReps', signature);
+				this.ownParameterNodes(copy);
 				templateIndices.forEach((paramIndex, a) => {
 					const param = copy.parameters?.[paramIndex];
 					if (!param) return;
@@ -4451,6 +4452,41 @@ export class SemanticAnalyzer extends ASTVisitor {
     }
 
     /**
+     * Give a copied function parameter nodes that belong to THAT copy.
+     *
+     * The parser builds a parameter by SPREADING an `ASTNode` into a plain
+     * object (`parseParameter`), so a parameter is not an `ASTNode` and its
+     * `type` is a type-specifier NODE rather than a node-type string.
+     * `cloneAstNode` tests for a string `type` and, finding none, hands the very
+     * same parameter object to every version made from a template.
+     *
+     * Writing a version's own choice onto it -- which representation its
+     * parameter travels as, which struct variant it settles on -- therefore
+     * wrote it onto all of them, and the version created LAST decided for the
+     * others. Two versions of one `auto` function came out with the same
+     * representation, so the one that should have taken a register NAME took an
+     * address instead and wrote to a cell nobody had assigned.
+     *
+     * `type` itself is shared: a resolved type is replaced wholesale by a
+     * variant rather than edited, and `cloneAstNode` shares it for the same
+     * reason. The attribute map is not shared, since it is the one place a copy
+     * could otherwise still write through to the version it was copied from.
+     *
+     * @param {any} copy The cloned function
+     */
+    ownParameterNodes(copy) {
+        if (!Array.isArray(copy?.parameters)) return;
+        copy.parameters = copy.parameters.map(param => {
+            if (param === null || typeof param !== 'object') return param;
+            // A parameter that really is an `ASTNode` is already the copy's own.
+            if (param instanceof ASTNode) return param;
+            const own = { ...param };
+            if (param._attributes instanceof Map) own._attributes = new Map(param._attributes);
+            return own;
+        });
+    }
+
+    /**
      * The parameter type list of a function declaration, as type names.
      * @param {any} node
      * @returns {string[]}
@@ -5160,11 +5196,17 @@ export class SemanticAnalyzer extends ASTVisitor {
                 copy.scope = null;
                 copy.setAttribute('autoInstance', true);
                 copy.setAttribute('autoReps', signature);
+                this.ownParameterNodes(copy);
                 autoIndices.forEach((paramIndex, a) => {
                     const param = copy.parameters?.[paramIndex];
                     /*
-                    A parameter node is a plain object (it is built by spreading
-                    an ASTNode), so the representation goes on it directly.
+                    The representation goes on the parameter node rather than on
+                    the function, because the signature is written per parameter.
+                    It only means anything now that the copy owns its parameter
+                    nodes: a parameter is a plain object, so before that every
+                    version shared one and the last version created decided for
+                    all of them -- which is how a version meant to take a NAME
+                    came out taking an address.
                     */
                     if (param) param.autoRep = reps[a];
                 });
