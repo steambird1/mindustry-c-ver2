@@ -3925,6 +3925,59 @@ export class SemanticAnalyzer extends ASTVisitor {
 		}
 	}
 
+    /**
+     * Refuse an assignment that hands one array to another.
+     *
+     * Two arrays are only interchangeable when they are stored the same way.
+     * A memory array and an array in registers share no representation, and a
+     * handle is a description of an array rather than one, so `int s[4]` and an
+     * `int s[]` are not the same type either. Comparing the type NAMES cannot
+     * see any of this -- they all print as `int[...]` -- which is why the check
+     * is made here rather than left to `isTypeCompatible`.
+     *
+     * A remote array is refused on its own account, and always: a handle names
+     * the get / set helpers by LINE NUMBER in this program, so it does not
+     * survive the trip to another processor even when both arrays are
+     * perfectly local there. Sharing the elements means sharing the code that
+     * reaches them, which is code generation rather than a value.
+     *
+     * @param {any} node
+     * @param {TypeInfo} leftType
+     * @param {TypeInfo} rightType
+     * @returns {boolean} true when the assignment was refused
+     */
+    refuseIncompatibleArrayAssignment(node, leftType, rightType) {
+        if (leftType?.kind !== 'array' || rightType?.kind !== 'array') return false;
+        const nameOf = side => {
+            const symbol = this.symbolOfArrayExpression?.(side) ?? null;
+            return symbol?.name ?? 'an array';
+        };
+        const leftImpl = this.arrayImplementationOf(this.symbolOfArrayExpression?.(node.left));
+        const rightImpl = this.arrayImplementationOf(this.symbolOfArrayExpression?.(node.right));
+        const saidAs = impl => ({
+            memory: 'an array in memory',
+            register: 'an array in registers',
+            handle: 'an array handle',
+            remote: 'a remote array'
+        })[impl] ?? 'an array in an undecided layout';
+        if (leftImpl === rightImpl) return false;
+        this.addError(
+            `Cannot assign ${saidAs(rightImpl)} to ${saidAs(leftImpl)}: `
+            + `'${nameOf(node.right)}' and '${nameOf(node.left)}' are not the same type, `
+            + `because they are not stored the same way`,
+            node.location);
+        return true;
+    }
+
+    /** The symbol an array-typed expression denotes, when it is a plain name. */
+    symbolOfArrayExpression(node) {
+        if (!node || node.type !== 'Identifier') return null;
+        return node.symbol
+            ?? this.currentScope?.lookup?.(node.name)
+            ?? this.globalScope?.lookup?.(node.name)
+            ?? null;
+    }
+
     visitAssignmentExpression(node) {
         this.visit(node.left);
         this.visit(node.right, {
@@ -3942,6 +3995,16 @@ export class SemanticAnalyzer extends ASTVisitor {
 		let compatible = false;
 		let resultType = leftType;
 		if (node.operator === '=') {
+			/*
+			An array is judged by how it is STORED, not by what it is called:
+			`int[4]` names a memory array, an array in registers and a handle all
+			under the same spelling. So this has to be settled before the type
+			names are compared, or the comparison agrees with itself and nothing
+			is caught.
+			*/
+			if (this.refuseIncompatibleArrayAssignment(node, leftType, rightType)) {
+				return;
+			}
 			compatible = this.isTypeCompatible(leftType, rightType);
 		} else {
 			const operation = node.operator.slice(null, -1);
@@ -5549,6 +5612,51 @@ export class SemanticAnalyzer extends ASTVisitor {
             current = current.pointerTo ?? null;
         }
         return false;
+    }
+
+    /**
+     * How an array is really stored, which is what decides whether two arrays
+     * are the same thing at all.
+     *
+     * The layout is the point. An array in memory and an array in registers
+     * share no representation: there is no single instruction that turns one
+     * into the other, so nothing that is true of one is true of the other. A
+     * HANDLE is a third kind of thing again -- it is a description of an array
+     * rather than one, which is why `int s[]` may travel as a handle while
+     * `int s[4]` cannot.
+     *
+     * A handle is also the one representation that cannot leave the processor.
+     * The two helper entry points it packs are LINE NUMBERS in this program
+     * (`helperAddressOf`), so the same number means something else entirely on
+     * another one, and a remote array is not reachable by a handle at all.
+     * That is why a remote array is its own kind here rather than one of the
+     * local ones.
+     *
+     * `null` when the layout has not been settled: `#pragma optimize(array)`
+     * leaves the choice to the generator, and it is not visible from here.
+     * Guessing would refuse -- or admit -- the wrong programs.
+     *
+     * @param {SymbolEntry?} symbol
+     * @returns {'memory' | 'register' | 'handle' | 'remote' | null}
+     */
+    arrayImplementationOf(symbol) {
+        if (!symbol) return null;
+        if (symbol.isRemote === true || this.typeHasRemoteQualifier(symbol.myType?.())) {
+            return 'remote';
+        }
+        /*
+        A parameter that was handed a non-memory array takes over the shape it
+        was given (`finalizeArrayParameters`), and a handle-parameter is
+        declared `remote` even when the arrays are perfectly local. Both mean
+        the same thing here: the array is described, not stored.
+        */
+        const rep = symbol.arrayParamRep ?? null;
+        if (rep === 'handle' || rep === 'remote' || rep === 'names') return 'handle';
+        if (rep === 'traditional') return 'memory';
+        const requested = symbol.requestedArrayImplementation ?? null;
+        if (requested) return (requested === 'traditional') ? 'memory' : 'register';
+        if (this.compiler?.arrayOptimize === true) return null;
+        return 'memory';
     }
 
     /**
