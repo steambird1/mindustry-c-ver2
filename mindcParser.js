@@ -1135,33 +1135,7 @@ export class Parser {
             }
             declarator.parent = varDecl;
             // 创建变量声明符节点
-            const varDeclarator = ASTBuilder.variableDeclarator(declarator.name);
-            varDeclarator.location = declarator.location;
-            varDeclarator.pointerDepth = declarator.pointerDepth;
-            varDeclarator.pointerQualifiers = declarator.pointerQualifiers;
-            varDeclarator.arrayDimensions = declarator.arrayDimensions;
-			varDeclarator.initializer = declarator.initializer;
-            if (varDeclarator.initializer) {
-                varDeclarator.initializer.parent = varDeclarator;
-            }
-			
-			if (type.pointerDepth > 0) {
-				// Only for the first
-				varDeclarator.pointerDepth += type.pointerDepth;
-				type.pointerDepth = 0;
-				varDeclarator.pointerQualifiers = varDeclarator.pointerQualifiers.concat(type.pointerQualifiers);
-				type.pointerQualifiers = [];
-			}
-            
-			// This is a little bit different from pure C89
-            // 处理初始化
-			/*
-            if (this.matchToken(TokenType.ASSIGN)) {
-                this.consumeToken();
-                varDeclarator.initializer = this.parseExpression();
-				varDeclarator.initializer.parent = varDeclarator;
-            }
-            */
+            const varDeclarator = this.variableDeclaratorFrom(declarator, type, true);
             declarators.push(varDeclarator);
 			varDeclarator.parent = varDecl;
         } while (this.matchToken(TokenType.COMMA) && this.consumeToken());
@@ -1172,6 +1146,51 @@ export class Parser {
 		varDecl.declarators = declarators;
 		type.parent = varDecl;
         return varDecl;
+    }
+
+    /**
+     * Turn the raw declarator `parseDeclarator` returns into the
+     * `VariableDeclarator` a variable declaration is made of.
+     *
+     * A declaration is built one of two ways, and they have to agree: a
+     * built-in type goes through `parseVariableDeclaration`, and a type named
+     * by the user (`cb f = handler;`, where `cb` is a `typedef`) is first
+     * TRIED as a declaration by `tryParseVariableDeclaration` before the
+     * statement can be read as an expression. The second path used to keep the
+     * raw `Declarator`, so the same source produced two different node types
+     * depending only on how the type was spelled.
+     *
+     * Every later pass looks for `VariableDeclarator`, so a declaration of a
+     * named type was invisible to all of them: a function stored into a
+     * function pointer was never seen to be stored anywhere, and the `auto`
+     * version it needed was never made.
+     *
+     * The pointer levels the TYPE owns move onto the first declarator, so
+     * `extern int *byname r` inside a function keeps both the `*` and the
+     * qualifier written after it.
+     *
+     * @param {any} declarator The node `parseDeclarator` returned
+     * @param {any} type The type specifier the declarator belongs to
+     * @param {boolean} first Whether this is the declaration's first declarator
+     * @returns {any} a `VariableDeclarator`
+     */
+    variableDeclaratorFrom(declarator, type, first) {
+        const varDeclarator = ASTBuilder.variableDeclarator(declarator.name);
+        varDeclarator.location = declarator.location;
+        varDeclarator.pointerDepth = declarator.pointerDepth;
+        varDeclarator.pointerQualifiers = declarator.pointerQualifiers;
+        varDeclarator.arrayDimensions = declarator.arrayDimensions;
+        varDeclarator.initializer = declarator.initializer;
+        if (varDeclarator.initializer) {
+            varDeclarator.initializer.parent = varDeclarator;
+        }
+        if (first && type && type.pointerDepth > 0) {
+            varDeclarator.pointerDepth += type.pointerDepth;
+            type.pointerDepth = 0;
+            varDeclarator.pointerQualifiers = varDeclarator.pointerQualifiers.concat(type.pointerQualifiers);
+            type.pointerQualifiers = [];
+        }
+        return varDeclarator;
     }
 
     parseVariableDeclarator() {
@@ -1320,26 +1339,19 @@ export class Parser {
             }
             
             /*
-            `static` / `extern` / `register` / `auto` start a statement that
-            `parseStatement` does not recognise as a type, so it lands here
-            instead of in `parseVariableDeclaration`. That path merges the
-            pointer levels the TYPE owns into the first declarator -- without
-            the same here, `extern int *byname r` inside a function lost both
-            the `*` and the qualifier written after it.
+            The same conversion `parseVariableDeclaration` does, so that a
+            declaration reads the same whichever way it was parsed. The pointer
+            levels the TYPE owns move onto the first declarator, so
+            `extern int *byname r` inside a function keeps both the `*` and the
+            qualifier written after it.
             */
-			if (type.pointerDepth > 0) {
-				firstDeclarator.pointerDepth += type.pointerDepth;
-				firstDeclarator.pointerQualifiers =
-					firstDeclarator.pointerQualifiers.concat(type.pointerQualifiers);
-				type.pointerDepth = 0;
-				type.pointerQualifiers = [];
-			}
-            declarators.push(firstDeclarator);
+            const varDeclarator = this.variableDeclaratorFrom(firstDeclarator, type, true);
+            declarators.push(varDeclarator);
 			const varDecl = ASTBuilder.variableDeclaration(type, []);
-			
-			firstDeclarator.parent = varDecl;
+
+			varDeclarator.parent = varDecl;
 			type.parent = varDecl;
-            
+
             // 检查是否有更多声明符
             while (this.matchToken(TokenType.COMMA) && !hadError) {
                 this.consumeToken();
@@ -1347,8 +1359,9 @@ export class Parser {
                 if (!declarator || !declarator.name) {
                     break;
                 }
-				declarator.parent = varDecl;
-                declarators.push(declarator);
+                const more = this.variableDeclaratorFrom(declarator, type, false);
+                more.parent = varDecl;
+                declarators.push(more);
             }
             
             // 检查分号

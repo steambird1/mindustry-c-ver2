@@ -1639,6 +1639,12 @@ export class SemanticAnalyzer extends ASTVisitor {
 		*/
         node.functions.forEach(func => this.visit(func));
 		if (this.overloadMode() !== 'none') this.expandAutoTemplates(node);
+		/*
+		After the versions exist: an `auto` function reached through a pointer
+		is pinned by the version that was made for it, so what is left are the
+		functions that have only themselves.
+		*/
+		this.pinValueTakenRepresentations(node);
     }
 
     visitFunctionDeclaration(node) {
@@ -1752,14 +1758,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 						if (at >= 0 && at < repsAll.length) autoRep = repsAll[at];
 					}
 				}
-			if (autoRep === 'name') {
-				paramSymbol.usesNamePointer = true;
-				paramSymbol.forcedNamePointer = true;
-			} else if (autoRep === 'memory' || autoRep === 'handle') {
-				paramSymbol.noNamePointer = true;
-				paramSymbol.arrayParamRep = (autoRep === 'handle' && gotType.kind === 'array')
-					? 'handle' : (gotType.kind === 'array' ? 'traditional' : null);
-			}
+			if (autoRep) this.applyAutoRepToParamSymbol(paramSymbol, gotType, autoRep);
             this.currentScope.addSymbol(paramSymbol);
         });
 
@@ -2087,8 +2086,8 @@ export class SemanticAnalyzer extends ASTVisitor {
                 `specializeStructTemplateFunctions`).
                 */
                 const fpAcceptsTemplate = (fp, fn) => {
-                    const fpParams = fp?.parameters ?? fp?.functionTo?.parameters ?? null;
-                    const fnParams = fn?.parameters ?? fn?.functionTo?.parameters ?? null;
+                    const fpParams = this.functionPointerParametersOf(fp);
+                    const fnParams = this.functionPointerParametersOf(fn);
                     if (!fpParams || !fnParams) return false;
                     if (fpParams.length !== fnParams.length) return false;
                     return fpParams.every((p, i) => {
@@ -2115,8 +2114,33 @@ export class SemanticAnalyzer extends ASTVisitor {
                             && (m.namePointer === true) === (wm[k].namePointer === true));
                     });
                 };
+                /*
+                A function pointer may equally be given a function with an
+                `auto` parameter: the version the pointer's own type picks is
+                emitted, and the pointer takes that version's line number. The
+                two sides then do not have the same parameter types -- one is a
+                pattern, the other an instantiation of it -- so they must not be
+                compared as they stand.
+                */
+                const paramQuals = p => {
+                    const t = (typeof p?.type === 'string') ? this.getTypeInfo(p.type) : (p?.type ?? p);
+                    return [...(t?.qualifiers ?? []), ...((t?.pointerQualifiers ?? []).flat?.() ?? [])];
+                };
+                const fpAcceptsAutoVersion = (fp, fn) => {
+                    const fpParams = this.functionPointerParametersOf(fp);
+                    const fnParams = this.functionPointerParametersOf(fn);
+                    if (!fpParams || !fnParams) return false;
+                    if (fpParams.length !== fnParams.length) return false;
+                    // The pointer is what picks the version, so it has to be concrete.
+                    if (fpParams.some(p => paramQuals(p).includes('auto'))) return false;
+                    // And the function has to be a pattern there is something to specialise.
+                    if (!fnParams.some(p => paramQuals(p).includes('auto'))) return false;
+                    // Every parameter has to name a representation a version can be made for.
+                    return fpParams.every(p => !!this.autoRepFromExpectedType(p?.type ?? p));
+                };
                 if (initType && !this.isTypeCompatible(finalType, initType)
-                    && !fpAcceptsTemplate(finalType, initType)) {
+                    && !fpAcceptsTemplate(finalType, initType)
+                    && !fpAcceptsAutoVersion(finalType, initType)) {
                     this.addError(
                         `Cannot initialize '${this.typeToString(finalType)}' with '${this.typeToString(initType)}'`,
                         declarator.initializer.location
@@ -4819,6 +4843,63 @@ export class SemanticAnalyzer extends ASTVisitor {
     }
 
     /**
+     * Tell a parameter symbol which representation its argument travels as.
+     *
+     * One place, because two callers have to mean exactly the same thing: the
+     * `auto` versions, whose representation was worked out from the argument
+     * each call site hands over, and a function reached through a FUNCTION
+     * POINTER, whose representation is the one the pointer's own type spells
+     * out. They set flags the code generator reads, and the two sides of a
+     * call only agree if both are set the same way.
+     *
+     * @param {SymbolEntry?} paramSymbol
+     * @param {TypeInfo?} gotType What the parameter turns out to be
+     * @param {'name' | 'memory' | 'handle' | 'traditional' | 'scalar' | null} rep
+     * @returns {void}
+     */
+    applyAutoRepToParamSymbol(paramSymbol, gotType, rep) {
+        if (!paramSymbol || !rep) return;
+        if (rep === 'name') {
+            paramSymbol.usesNamePointer = true;
+            paramSymbol.forcedNamePointer = true;
+            return;
+        }
+        if (rep !== 'memory' && rep !== 'handle') return;
+        paramSymbol.noNamePointer = true;
+        paramSymbol.arrayParamRep = (rep === 'handle' && gotType?.kind === 'array')
+            ? 'handle' : (gotType?.kind === 'array' ? 'traditional' : null);
+    }
+
+    /**
+     * The parameter list of a function POINTER type.
+     *
+     * The two ways a function pointer reaches the compiler keep the signature
+     * in different places. One written out in place (`void (*f)(int *);`) has
+     * it on the type itself; one reached through a `typedef` keeps it one level
+     * down, on the symbol the type points at, because the type IS the
+     * function's -- `kind` is `function`, and the parameters are on
+     * `functionTo.type.parameters`.
+     *
+     * Asking only the outer type therefore found nothing at all for a
+     * typedef'd pointer, and everything that reads a function pointer's
+     * signature quietly did nothing: the `auto` version such a pointer needs
+     * was never made, and an `auto` written in such a signature was never
+     * rejected.
+     *
+     * @param {TypeInfo?} type
+     * @returns {any[]?} the parameters, or null if this is not a function pointer
+     */
+    functionPointerParametersOf(type) {
+        if (!type) return null;
+        if (Array.isArray(type.parameters)) return type.parameters;
+        const to = type.functionTo ?? null;
+        if (Array.isArray(to?.type?.parameters)) return to.type.parameters;
+        if (Array.isArray(to?.parameters)) return to.parameters;
+        if (Array.isArray(to?.myType?.()?.parameters)) return to.myType().parameters;
+        return null;
+    }
+
+    /**
      * A function pointer may not name a template: it would need a choice that
      * only exists at run time.
      *
@@ -4827,7 +4908,7 @@ export class SemanticAnalyzer extends ASTVisitor {
      * @returns {boolean} whether it was rejected
      */
     rejectTemplateInFunctionPointer(functionPointerType, location) {
-        const params = functionPointerType?.parameters ?? null;
+        const params = this.functionPointerParametersOf(functionPointerType);
         if (!params) return false;
         for (const p of params) {
             const raw = p?.type ?? p;
@@ -5095,14 +5176,7 @@ export class SemanticAnalyzer extends ASTVisitor {
         Value uses: `fptr z = handler;` -- the function is named, not called.
         The pointer's own parameter types say which version is wanted.
         */
-        const valueUses = [];
-        this.deepWalk(ast, n => {
-            if (n.type === 'VariableDeclarator' && n.initializer?.type === 'Identifier') {
-                valueUses.push({ node: n.initializer, owner: n, holder: n.name });
-            } else if (n.type === 'AssignmentExpression' && n.right?.type === 'Identifier') {
-                valueUses.push({ node: n.right, owner: n, holder: n.left?.name });
-            }
-        });
+        const valueUses = this.functionValueUses(ast);
 
         for (const template of templates) {
             const originalName = String(template.name ?? '');
@@ -5137,11 +5211,11 @@ export class SemanticAnalyzer extends ASTVisitor {
                 const sym = use.owner?.scope?.lookup?.(holder)
                     ?? this.globalScope?.lookup?.(holder) ?? null;
                 const fpType = sym?.myType?.() ?? null;
-                if (!fpType || !fpType.parameters) continue;
+                const fpParams = this.functionPointerParametersOf(fpType);
+                if (!fpParams) continue;
                 if (this.rejectTemplateInFunctionPointer(fpType, use.node.location ?? null)) continue;
                 const signature = autoIndices
-                    .map(i => this.autoRepFromExpectedType(fpType.parameters[i]?.type
-                        ?? fpType.parameters[i]))
+                    .map(i => this.autoRepFromExpectedType(fpParams[i]?.type ?? fpParams[i]))
                     .join('|');
                 if (!signature || signature.split('|').some(r => !r)) {
                     this.addError(`'${originalName}' has an 'auto' parameter, and '${holder}' `
@@ -5271,6 +5345,22 @@ export class SemanticAnalyzer extends ASTVisitor {
                 });
             }
             this.currentScope = savedScope;
+            /*
+            A function stored into a function pointer was named while the
+            PATTERN was still the only declaration, so the identifier holds a
+            reference to it. The name alone is not enough: the generator reads
+            the cached symbol, and so does the check that the value being stored
+            fits the pointer's type -- which is how storing a version was
+            refused against the pattern's `auto int *` even though the version
+            the pointer names is an ordinary `int *`.
+            */
+            for (const [signature, idents] of retarget) {
+                const instance = instances.find(i => i.getAttribute?.('autoReps') === signature);
+                if (!instance) continue;
+                const copySymbol = this.symbolByName(instance.name);
+                if (!copySymbol) continue;
+                for (const ident of idents) ident.symbol = copySymbol;
+            }
             for (const call of mine) {
                 if (call?.callee?.type !== 'Identifier') continue;
                 call.callee.symbol = this.globalScope?.lookup?.(call.callee.name) ?? call.callee.symbol;
@@ -5282,6 +5372,94 @@ export class SemanticAnalyzer extends ASTVisitor {
             */
             this.overloadSets?.set(originalName,
                 instances.map(node => ({ node, paramTypes: this.parameterTypeNamesOf(node) })));
+        }
+    }
+
+    /**
+     * The places a function is NAMED rather than called: its value is stored.
+     *
+     * @param {any} ast
+     * @returns {any[]} `{ node, owner, holder }` per stored function
+     */
+    functionValueUses(ast) {
+        /** @type {any[]} */
+        const valueUses = [];
+        this.deepWalk(ast, n => {
+            if (n.type === 'VariableDeclarator' && n.initializer?.type === 'Identifier') {
+                valueUses.push({ node: n.initializer, owner: n, holder: n.name });
+            } else if (n.type === 'AssignmentExpression' && n.right?.type === 'Identifier') {
+                valueUses.push({ node: n.right, owner: n, holder: n.left?.name });
+            }
+        });
+        return valueUses;
+    }
+
+    /**
+     * Pin the representation of a NON-template function that is reached through
+     * a function pointer.
+     *
+     * `expandAutoTemplates` does this for an `auto` function, by making one
+     * version per representation. A function with no `auto` parameter has only
+     * ONE version, so the representation has to be settled here instead of
+     * being discovered at each call -- and the only thing that can settle it is
+     * the type the function pointer spells out.
+     *
+     * It has to be settled HERE, before anything else decides. An indirect call
+     * carries no information about the callee: at run time the pointer is a
+     * line number, and the call site can only hand over what the callee's
+     * parameter was compiled to expect. Left to itself the analysis picked a
+     * representation from the callee alone, and the call site disagreed --
+     * the callee read a register NAME while the call site sent an address, so
+     * the parameter was whatever `__param_0` happened to hold (zero), and the
+     * program printed 0 instead of the value it had just been given.
+     *
+     * @param {any} ast
+     * @returns {void}
+     */
+    pinValueTakenRepresentations(ast) {
+        const valueUses = this.functionValueUses(ast);
+        if (!valueUses.length) return;
+        const functions = (ast?.functions ?? []).filter(f => !f?.getAttribute?.('autoTemplate'));
+        if (!functions.length) return;
+
+        for (const use of valueUses) {
+            const originalName = String(use.node?.name ?? '');
+            const holder = use.holder ?? null;
+            if (!originalName || !holder) continue;
+            const fnNode = functions.find(f => String(f?.name ?? '') === originalName);
+            if (!fnNode) continue;
+            /*
+            The pointer's own type is the only place the representation is
+            written down: `cb f = test;` where `cb` is `void (*)(int *)` says
+            the parameter travels as an ADDRESS, and `void (*)(int *byname)`
+            says it travels as a NAME.
+            */
+            const fpType = use.owner?.scope?.lookup?.(holder)?.myType?.() ?? null;
+            const fpParams = this.functionPointerParametersOf(fpType);
+            if (!fpParams) continue;
+            if (this.rejectTemplateInFunctionPointer(fpType, use.node.location ?? null)) continue;
+
+            /*
+            All of it, or none of it. Pinning the parameters we can make out
+            while leaving the rest to be discovered would leave the function
+            able to answer to two representations at once, which is the failure
+            this exists to remove.
+            */
+            const reps = [];
+            for (let i = 0; i < (fnNode.parameters ?? []).length; i++) {
+                const rep = this.autoRepFromExpectedType(fpParams[i]?.type ?? fpParams[i]);
+                if (!rep) { reps.length = 0; break; }
+                reps.push(rep);
+            }
+            if (reps.length !== (fnNode.parameters ?? []).length) continue;
+
+            (fnNode.parameters ?? []).forEach((param, i) => {
+                const paramName = param?.name;
+                if (!paramName) return;
+                const symbol = fnNode.scope?.lookupCurrent?.(paramName) ?? null;
+                if (!symbol) return;
+                this.applyAutoRepToParamSymbol(symbol, symbol.myType?.() ?? null, reps[i]);
+            });
         }
     }
 
