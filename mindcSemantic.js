@@ -1001,6 +1001,12 @@ export class SemanticAnalyzer extends ASTVisitor {
         this.specializeStructTemplates(ast);
         this.specializeStructTemplateFunctions(ast);
         this.verifyStructConversions();
+        /*
+        Only now is every statement of every function seen, so only now can an
+        unbound handle (`int a[];`) be judged: it is provably unreadable before
+        its first binding, and one that is never bound at all is an error.
+        */
+        this.checkUnboundHandles(ast);
 
         return {
             success: this.errors.length === 0,
@@ -1940,7 +1946,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 			makes it obvious.
 			*/
 			this.deduceRemoteArrayDimensions(declarator);
-			this.deduceArrayDimensions(declarator);
+			this.deduceArrayDimensions(declarator, baseType);
             if (declarator.arrayDimensions && declarator.arrayDimensions.length > 0) {
                 let arrayType = finalType;
                 for (const dim of declarator.arrayDimensions.reverse()) {
@@ -2056,6 +2062,27 @@ export class SemanticAnalyzer extends ASTVisitor {
 			declarator.dataType = varSymbol.extractType();
 
             this.currentScope.addSymbol(varSymbol);
+			/*
+			`int a[];` with no initializer: an UNBOUND HANDLE. It is ONE register
+			-- the cell that will hold a packed handle once `a = b;` binds it -- so
+			the whole handle machinery (delivery, indexing, `lenof`) is reused for
+			it, exactly as if it were a handle parameter. (The `remote` no-size
+			case was already refused in `deduceArrayDimensions`; this is a guard
+			for anything that slipped past.)
+			*/
+			if (declarator.getAttribute?.('unboundHandle') === true) {
+				if (this.typeHasRemoteQualifier(finalType)) {
+					this.addError(
+						`The size of array '${declarator.name}' is neither given nor deducible: ` +
+						`a remote array has to be bound to one already, as in ` +
+						`'remote int s[] = remote(p, u)'`,
+						declarator.location);
+				} else {
+					varSymbol.isUnboundHandle = true;
+					/* The one representation this cell can have. */
+					varSymbol.arrayParamRep = 'handle';
+				}
+			}
 
 			/*
 			`int a[10] = array("embedded_divided", {3, 4});`
@@ -2357,7 +2384,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 	 * @param {ASTNode} declarator
 	 * @returns {void}
 	 */
-	deduceArrayDimensions(declarator) {
+	deduceArrayDimensions(declarator, baseType) {
 		const dims = declarator.arrayDimensions;
 		if (!Array.isArray(dims) || dims.length === 0) return;
 		if (!dims.some(d => !d)) return;	// Nothing left out
@@ -2377,14 +2404,40 @@ export class SemanticAnalyzer extends ASTVisitor {
 				declarator.setAttribute('openDimensionBinding', true);
 				return;
 			}
-			// Same reason as below: do not leave `null` behind
-			this.addError(
-				`The size of array '${declarator.name}' is neither given nor deducible: ` +
-				`write a size, or an initializer list to count`,
-				declarator.location);
-			for (let i = 0; i < dims.length; i++) {
-				if (!dims[i]) dims[i] = ASTBuilder.numericLiteral(1);
+			/*
+			`int a[];` with no initializer is an UNBOUND HANDLE: the cell exists
+			(one register) but holds no handle until a binding writes one in --
+			`a = b;` (or, later, `vecalias(&a, b);`). The length stays NaN: it is
+			genuinely unknown until then. An unbound handle is PROVABLY unreadable
+			-- reading it before any binding, and leaving it never bound at all,
+			are compile errors (checked once the whole program has been seen) --
+			and one that escapes unbound traps at run time.
+			*/
+			if (baseType && this.typeHasRemoteQualifier(baseType)) {
+				/*
+				A REMOTE array can only ever be bound by `remote(p, u)`. There is
+				nothing LOCAL to bind it to, and an unbound handle cannot cross
+				processors, so this stays the refusal it always was.
+				*/
+				this.addError(
+					`The size of array '${declarator.name}' is neither given nor deducible: ` +
+					`a remote array has to name its other-processor target, as in ` +
+					`'remote int s[] = remote(p, u)'`,
+					declarator.location);
+				for (let i = 0; i < dims.length; i++) {
+					if (!dims[i]) dims[i] = ASTBuilder.numericLiteral(1);
+				}
+				return;
 			}
+			/*
+			The handle keeps its own single cell; the array's "size" is NaN only
+			while it is open, and `symbol.size` is fixed by the generator (one
+			register). Binding later writes the packed handle into the cell.
+			*/
+			for (let i = 0; i < dims.length; i++) {
+				if (!dims[i]) dims[i] = ASTBuilder.numericLiteral(NaN);
+			}
+			declarator.setAttribute('unboundHandle', true);
 			return;
 		}
 		let level = list;
@@ -4194,6 +4247,25 @@ export class SemanticAnalyzer extends ASTVisitor {
             handle: 'an array handle',
             remote: 'a remote array'
         })[impl] ?? 'an array in an undecided layout';
+        /*
+        An UNBOUND handle (`int a[];` declared, not yet bound) is the one array
+        that may be ASSIGNED a value: `a = b;` BINDS it -- the cell starts empty
+        and the assignment is what fills it. That is not a copy, so the two
+        implementations do not have to match. The one thing that cannot be bound
+        to a local cell is a REMOTE array: a handle packs the helper entry points
+        of THIS processor, and they mean nothing on another one, so the same
+        refusal as every other remote-to-local handle copy applies.
+        */
+        if (left?.isUnboundHandle === true) {
+            if (rightImpl === 'remote') {
+                this.addError(
+                    `Cannot bind a remote array to '${nameOf(left)}': a handle packs helper `
+                    + `entry points of THIS processor, which mean nothing there. Copy the `
+                    + `elements instead`, node.location);
+                return true;
+            }
+            return false;    // binding: the implementations may differ
+        }
         if (leftImpl === rightImpl) return false;
         this.addError(
             `Cannot assign ${saidAs(rightImpl)} to ${saidAs(leftImpl)}: `
@@ -5961,6 +6033,162 @@ export class SemanticAnalyzer extends ASTVisitor {
         if (requested) return (requested === 'traditional') ? 'memory' : 'register';
         if (this.compiler?.arrayOptimize === true) return null;
         return 'memory';
+    }
+
+    /**
+     * Enforce the two rules that keep an UNBOUND handle (`int a[];` declared
+     * with no initializer) honest:
+     *
+     *   - it is PROVABLY unreadable: a read (a subscript, `lenof`, `sizeof`, or
+     *     the right side of an assignment) that sits textually before its first
+     *     binding IN THE SAME FUNCTION is a compile error;
+     *   - binding it is `a = b;` (or, later, `vecalias(&a, b);`) -- and a handle
+     *     that is never bound anywhere is a compile error too.
+     *
+     * A read in a function that never binds the handle is allowed to stand: the
+     * binding may live in the caller, and only run time can tell. A handle that
+     * ESCAPES unbound (handed to a function, or a binding whose branch was not
+     * taken) is likewise left to run time: the cell starts at 0, and extracting
+     * a 0-packed handle jumps to line 0, the same trap an uninitialised pointer
+     * sets off.
+     *
+     * @param {any} ast
+     * @returns {void}
+     */
+    checkUnboundHandles(ast) {
+        /*
+        Every unbound handle in the program, by identity: two functions may each
+        have an `int a[];`, and only the one that is never bound is the error.
+        */
+        const unbound = new Set();
+        const walkScopes = scope => {
+            scope?.symbols?.forEach(sym => {
+                if (sym?.isUnboundHandle === true) unbound.add(sym);
+            });
+            (scope?.children ?? []).forEach(walkScopes);
+        };
+        walkScopes(this.globalScope);
+        if (unbound.size === 0) return;
+
+        /** All bindings seen anywhere, for the never-bound rule. */
+        const boundEverywhere = new Set();
+        const symbolOf = node => (node && node.type === 'Identifier')
+            ? (node.symbol ?? null) : null;
+        const isUnboundSymbol = node => {
+            const s = symbolOf(node);
+            return s?.isUnboundHandle === true ? s : null;
+        };
+        /*
+        Reads are found by a small walker that knows where a name is a READ and
+        where it is something else. The modes are:
+          - `read`: an ordinary value use (subscript object, right of an `=`, ...);
+          - `lvalue`: written, not read (the left of an assignment, `&a`, the
+            first argument of `vecalias`) -- an element WRITE such as `a[i] = x`
+            is still caught, because the OBJECT of a subscript is read whatever
+            the outer mode is;
+          - `escape`: a bare name handed to a function, which may be passed on
+            unbound and traps at run time instead of failing here.
+        The descent is `further`, the one level walk every other analysis uses:
+        the sub-nodes of an expression live in NAMED fields (`left`, `right`,
+        `test`, `arguments`, ...) and not in `children`, so a walk of `children`
+        alone never even sees the arguments of a call -- `print(a[1])` is a BUILTIN
+        call, whose arguments are not children at all -- and a read would slip
+        through unchallenged.
+        In `collect` phase only the bindings are gathered; in `check` phase the
+        same walk applies the same-function-before-bind rule against the set the
+        collect phase found.
+        */
+        /*
+        The two bindings there are: a plain `a = b;`, and `vecalias(&a, b)`, whose
+        first argument is an address rather than a name.
+        */
+        const boundBy = node => {
+            if (node.type === 'AssignmentExpression' && node.operator === '=') {
+                return isUnboundSymbol(node.left);
+            }
+            if (node.type === 'FunctionCall' || node.type === 'BuiltinCall') {
+                if ((node.callee?.name ?? node.functionName ?? null) !== 'vecalias') return null;
+                const first_ = node.arguments?.[0] ?? null;
+                return isUnboundSymbol(first_ && first_.type === 'UnaryExpression'
+                    && first_.operator === '&' ? first_.argument : null);
+            }
+            return null;
+        };
+        const scan = (node, mode, bound, boundInFunction, phase) => {
+            if (!node) return;
+            if (node.type === 'Identifier') {
+                if (phase === 'check' && mode === 'read') {
+                    const sym = isUnboundSymbol(node);
+                    if (sym && boundInFunction.has(sym.name) && !bound.has(sym.name)) {
+                        this.addError(
+                            `Array '${sym.name}' is an unbound handle: it is read before anything `
+                            + `bound it here (write '${sym.name} = someArray;' first)`, node.location);
+                    }
+                }
+                return;
+            }
+            /*
+            What a child MEANS is decided by its parent: an assignment writes its
+            left side, `&` names one, and a call hands a bare name over rather
+            than using it. The rest is an ordinary value use.
+            */
+            const modeFor = child => {
+                if (child === node.callee) return 'callee';
+                if (node.type === 'AssignmentExpression' && child === node.left) return 'lvalue';
+                if (node.type === 'UnaryExpression' && child === node.argument
+                    && node.operator === '&') return 'lvalue';
+                if ((node.type === 'FunctionCall' || node.type === 'BuiltinCall')
+                    && child === (node.arguments ?? [])[1]
+                    && (node.callee?.name ?? node.functionName ?? null) === 'vecalias') {
+                    /* the array being bound TO is read here, not handed over */
+                    return 'read';
+                }
+                if ((node.type === 'FunctionCall' || node.type === 'BuiltinCall')
+                    && (node.arguments ?? []).includes(child)) return 'escape';
+                return 'read';
+            };
+            this.further(node, child =>
+                scan(child, modeFor(child), bound, boundInFunction, phase));
+            /*
+            A binding counts only after its operands have been read, so the
+            right-hand side of `a = a;` is still asked about.
+            */
+            const bound_ = boundBy(node);
+            if (bound_) { bound.add(bound_.name); boundEverywhere.add(bound_); }
+        };
+
+        const walk = node => {
+            if (!node) return;
+            if (node.type === 'FunctionDeclaration') {
+                const body = node.body ?? null;
+                if (!body) return;
+                const collect = new Set();
+                scan(body, 'read', collect, collect, 'collect');
+                if (collect.size === 0) return;
+                const bound = new Set();
+                scan(body, 'read', bound, collect, 'check');
+                return;
+            }
+            if (node.type === 'Program') {
+                /*
+                The parser keeps functions in `program.functions`, not in `children`;
+                global declarations have no function to order reads against, so only
+                the function bodies are walked.
+                */
+                (node.functions ?? []).forEach(walk);
+                return;
+            }
+            (node.children ?? []).forEach(walk);
+        };
+        walk(ast);
+
+        for (const sym of unbound) {
+            if (!boundEverywhere.has(sym)) {
+                this.addError(
+                    `Array '${sym.name}' is an unbound handle that is never bound: write `
+                    + `'${sym.name} = someArray;' somewhere before using it`, sym.location);
+            }
+        }
     }
 
     /**

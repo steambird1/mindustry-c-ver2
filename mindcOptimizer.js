@@ -2433,6 +2433,27 @@ export class Optimizer extends ASTVisitor {
 	}
 
 	/**
+	 * `a = mem;` where `a` is an unbound handle (`int a[];`): the array now
+	 * answers to a second name, and every write through `a[i]` is a write to
+	 * `mem` that this pass never sees. Its contents stop being known from here
+	 * on -- the same reason an array handed to a pointer, or to a function,
+	 * does. Without this a constant array would be turned into an encoded
+	 * table (a value, not storage) while a handle to it was live, and every
+	 * write through that handle would have nowhere to go.
+	 *
+	 * @param {ASTNode} left
+	 * @param {ASTNode} right
+	 * @returns {void}
+	 */
+	discardArrayBoundToHandle(left, right) {
+		if (left?.type !== 'Identifier') return;
+		const target = this.currentScope.lookup(left.name);
+		if (target?.isUnboundHandle !== true) return;
+		const source = this.baseSymbolOf(right);
+		if (this.isFoldableArray(source)) this.invalidateConstantArray(source);
+	}
+
+	/**
 	 * Apply the effect of an assignment on a constant array: update one element
 	 * when both subscript and value are known, forget everything otherwise.
 	 *
@@ -2476,10 +2497,13 @@ export class Optimizer extends ASTVisitor {
 	// !! This has manual changes !!
     analyzeAssignmentExpression(node, info = null) {
 		/*
-		An array handed to a pointer escapes our tracking: from now on the
-		array can be written through `p[anything]`, so its contents are unknown.
+		Two ways an array stops being ours alone. Handed to a POINTER, it can
+		be written through `p[anything]`. Bound to an UNBOUND HANDLE, every
+		`a[i] = x` is a write to it under another name. Either way its contents
+		are unknown from here on.
 		*/
 		this.discardArrayGivenToPointer(node.left, node.right);
+		this.discardArrayBoundToHandle(node.left, node.right);
 
 		/*
 		Writing into an array. When BOTH the subscript and the value are known
@@ -7202,7 +7226,27 @@ export class Optimizer extends ASTVisitor {
 			if (!arg) continue;
 			const type = arg.dataType ?? null;
 			if (!type || type.kind !== 'array') continue;
-			if (this.arrayArgumentSymbolOf(arg)) continue;
+			const aliased = this.arrayArgumentSymbolOf(arg);
+			if (aliased) {
+				/*
+				A handle whose length is NOT known at this call site -- a handle
+				parameter, or an unbound handle that has been bound -- has no array
+				for the alias to be: its length lives in the packed value, and its
+				storage is ONE register, not an address. Aliasing the parameter to it
+				hands the body a block/position pair in a frame of `NaN` words:
+				neither the value nor a size, and a frame that never finishes. Keep
+				the real call, which passes the handle and stays correct.
+
+				A handle of KNOWN length is a different case and is left alone: an
+				`auto` parameter is bound to a size at the declaration, and the whole
+				reason `auto` exists is that the call site picks the version, not the
+				inliner.
+				*/
+				if (aliased.arrayParamRep === 'handle' && this.arrayLengthOf(aliased) === 0) {
+					return false;
+				}
+				continue;
+			}
 			/*
 			Not a plain array name -- there is nothing to alias to, so the
 			parameter would have to become an array of its own. Keep the real

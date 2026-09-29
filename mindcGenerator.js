@@ -602,6 +602,29 @@ export class CodeGenerator extends ASTVisitor {
 					symbol.implementAsPointer = true;	// There's no need to give them memory space
 					break;
 				case 'array':
+					/*
+					An unbound handle (`int a[];` with no initializer) is ONE
+					register: the cell that will hold a packed handle once `a = b;`
+					binds it. `type.size` is NaN while the length is open, and the
+					cell has no address -- so keep it as the single register it
+					takes, with no memory allocation. Only a forced memory context
+					(recursive function, `volatile`, or an address that cannot be
+					taken by name) could not represent that, so it is refused
+					instead of emitting code that reads a register nobody fills.
+					*/
+					if (symbol.isUnboundHandle === true) {
+						if (forced || selfVolatile) {
+							this.addError(
+								`An unbound handle lives in one register: it cannot survive a ` +
+								`recursive call or a volatile block. Bind '${symbol.name}' before ` +
+								`the recursion instead`, symbol.location);
+							break;
+						}
+						symbol.size = 1;
+						symbol.implementAsPointer = true;
+						symbol.needMemoryAllocation = false;
+						break;
+					}
 					symbol.size = type ? type.size : symbol.size;
 					symbol.implementAsPointer = true;
 					symbol.needMemoryAllocation = true;
@@ -3001,6 +3024,17 @@ export class CodeGenerator extends ASTVisitor {
 		}
 
 		/* ---------------- plain assignment ---------------- */
+		/*
+		`a = b;` where `a` is an UNBOUND handle (`int a[];` declared with no
+		initializer) BINDS a to b: b's packed handle is written into a's cell.
+		That must not fall through to the ordinary lvalue machinery, which
+		would read a's block/offset pair -- an unbound handle has neither.
+		*/
+		const leftSymbol = (node.left.type === 'Identifier')
+			? (this.currentScope.lookup(node.left.name) ?? null) : null;
+		if (node.operator === '=' && leftSymbol?.isUnboundHandle === true) {
+			return this.emitArrayHandleBind(leftSymbol, node.right);
+		}
 		const lval = this.getLValue(node.left);
 
 		// Structs and unions are copied (never "by reference")
@@ -3027,6 +3061,84 @@ export class CodeGenerator extends ASTVisitor {
 			}
 		}
 		return lval.set(value);
+	}
+
+	/**
+	 * `a = b;` where `a` is an unbound handle (`int a[];` declared with no
+	 * initializer): BIND a to b.
+	 *
+	 * The binding writes b's PACKED HANDLE into a's ONE cell -- the get / set
+	 * helper entry points plus the length, exactly what `packHandle` builds for
+	 * a call site. That is what makes the feature cost one register plus
+	 * packHandle and nothing else: after the binding, a and b reach the same
+	 * array through the same helpers.
+	 *
+	 * The right side is materialised the way a function argument is: an array
+	 * outside memory has an ArrayRet view, and a memory array's value IS its
+	 * address, from which a traditional view is built. The result is packed
+	 * straight into the cell, like a callee's slot.
+	 *
+	 * @param {SymbolEntry} leftSymbol
+	 * @param {ASTNode} rightNode
+	 * @returns {Instruction}
+	 */
+	emitArrayHandleBind(leftSymbol, rightNode) {
+		const glob = this.glob;
+		/* The ONE cell this handle is: what `a = b;` writes into, and what
+		`&a` names. */
+		const cell = leftSymbol.getAssemblySymbol();
+		const argSym = (rightNode.type === 'Identifier')
+			? (this.currentScope?.lookup?.(rightNode.name)
+				?? this.semantic?.globalScope?.lookup?.(rightNode.name) ?? null)
+			: null;
+		/*
+		`arrayViewOf` cannot describe a MEMORY array (it builds the view from a
+		pointer it is never given), so one is built from the value just
+		materialised -- for a memory array that value IS its address. The same
+		split as `deliverArgument`.
+		*/
+		let array = null;
+		if (argSym && argSym.myType?.()?.kind === 'array'
+			&& this.arrayStyleFor(argSym)?.type !== 'traditional') {
+			array = this.arrayViewOf(argSym);
+		}
+		/*
+		A HANDLE-backed source -- a handle parameter, or another unbound handle --
+		has nothing to pack: its cell already holds a packed handle, length and
+		all, so the binding is one store from one cell to the other.
+		*/
+		if (array instanceof ArrayHandleRet) {
+			return new Instruction([InstructionBuilder.set(cell, array.name)],
+				cell, new Map([['disallowReplacement', true]]));
+		}
+		if (!array) {
+			const value = ExportRet(glob, this.visit(rightNode), rightNode.dataType);
+			if (value instanceof PointerRet) {
+				array = new TraditionalArrayRet(glob, value,
+					argSym?.myType?.() ?? rightNode.dataType,
+					this.arrayLengthOf(argSym) || 0);
+			}
+		}
+		if (!array) {
+			this.addError(
+				`Cannot bind '${leftSymbol.name}': '${rightNode.name ?? 'the right side'}' is ` +
+				`not an array reachable here`, rightNode.location);
+			return new Instruction([], 'null', new Map([['disallowReplacement', true]]));
+		}
+		const handle = ensureArrayHandle(glob, array);
+		if (!handle) {
+			this.addError(`Cannot bind '${leftSymbol.name}': its target has no handle form`,
+				rightNode.location);
+			return new Instruction([], 'null', new Map([['disallowReplacement', true]]));
+		}
+		/*
+		The packed handle is built straight INTO the cell -- one register, no
+		extra store. (Binding through `&a` costs exactly the same: packHandle is
+		paid either way, only the store's destination differs.)
+		*/
+		const length = array.length || 0;
+		const instrs = [handle.instructions, ...packHandle(glob, cell, { ...handle, length })];
+		return new Instruction(instrs, cell, new Map());
 	}
 
 	/**
@@ -4273,6 +4385,21 @@ export class CodeGenerator extends ASTVisitor {
 				const length = arrayLengthOfType(slotType) || this.arrayLengthOf(argSymbol) || 0;
 				array = new TraditionalArrayRet(glob, value, slotType ?? argSymbol.myType?.(), length);
 			}
+
+			/*
+			A handle as the argument of a handle: a handle PARAMETER, or an unbound
+			handle that has already been bound. The view in hand is the packed
+			handle -- the helper entry points, the length and the element size --
+			so it travels as itself, and there is nothing left to pack. Packing it
+			again is not merely wasteful: the helpers are line numbers of THIS
+			program, and there is no array behind the value to ask about.
+			*/
+			if (array instanceof ArrayHandleRet) {
+				return new ArrayHandleRet(glob, slotName, slotType, array.length,
+					[value.instructions, array.instructions,
+						InstructionBuilder.set(slotName, array.name)]);
+			}
+
 			const handle = array ? ensureArrayHandle(glob, array) : null;
 			if (!handle) {
 				throw new InternalGenerationFailure(
