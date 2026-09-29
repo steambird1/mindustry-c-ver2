@@ -4292,6 +4292,27 @@ export class SemanticAnalyzer extends ASTVisitor {
 	}
 
 	/**
+	 * Whether an array type leaves its outermost dimension open, as `int s[]`
+	 * does.
+	 *
+	 * This is not a variable length array. Nothing here is computed at run time:
+	 * the length is CARRIED, which is the whole point of a handle -- it packs
+	 * the length and the element size beside the two helpers that reach the
+	 * elements (see `handleTailOf`). So an array with an open dimension has to
+	 * arrive as a handle, because a pointer cannot say how far it goes, and
+	 * `lenof` and `sizeof` both have to work on it.
+	 *
+	 * @param {TypeInfo?} type
+	 * @returns {boolean}
+	 */
+	hasOpenDimension(type) {
+		if (!type || type.kind !== 'array') return false;
+		const outer = (this.dimensionListOf(type) ?? [])[0];
+		return outer === undefined || outer === null
+			|| !Number.isFinite(Number(outer)) || Number(outer) <= 0;
+	}
+
+	/**
 	 * How many memory cells one value of this type occupies.
 	 *
 	 * @param {TypeInfo} type
@@ -5701,6 +5722,24 @@ export class SemanticAnalyzer extends ASTVisitor {
                             + `but is also passed an ordinary array: the elements cannot be `
                             + `in another processor and in memory at the same time`, symbol.location);
                     }
+                    continue;
+                }
+                /*
+                `int s[]` leaves its length open, so the callee cannot be handed a
+                pointer: nothing in a block and an offset says how many elements
+                lie behind the offset, and `lenof` / `sizeof` on such a parameter
+                would answer 0. A handle CAN carry it -- it packs the length and
+                the element size beside the helpers -- so an array with an open
+                dimension always arrives as one, whatever it is given, a memory
+                array included (see `ensureArrayHandle`'s `kind: 'memory'` shape).
+
+                Decided from the declaration, like the `remote` case above: the
+                parameter has to agree on its form before any call site is known,
+                and a call through a function pointer gives no call-site
+                information at all.
+                */
+                if (this.hasOpenDimension(symbol.myType?.())) {
+                    symbol.arrayParamRep = 'handle';
                     continue;
                 }
                 if (!notes) continue;

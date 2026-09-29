@@ -7120,6 +7120,59 @@ export class Optimizer extends ASTVisitor {
 	}
 
 	/**
+	 * Replace `lenof(p)` inside an inlined body with the length of the array
+	 * that `p` was bound to.
+	 *
+	 * A parameter written `int s[]` leaves its length open, and the semantic
+	 * pass has already turned `lenof(s)` into a read out of the HANDLE it
+	 * expects to be given -- that was decided before anything knew the
+	 * parameter would be inlined, and so before there was a length to fold.
+	 *
+	 * In an inlined body there is no handle to read. The alias is the caller's
+	 * array itself, with the caller's length. Left alone the query keeps the
+	 * register name of the *parameter*, which the inlined body never
+	 * materialises, and every `lenof` on an inlined array answers 0 -- while a
+	 * call that was not inlined answers correctly, which makes the two paths
+	 * disagree on the same source.
+	 *
+	 * The query is matched by that register name rather than by the symbol,
+	 * because the scopes in an inlined body have been duplicated and the
+	 * symbol there is a copy; the name is the one thing both agree on.
+	 *
+	 * @param {any} clonedBody The body about to be inserted
+	 * @param {any} funcNode The function being inlined
+	 * @param {any} param One of its parameters
+	 * @param {TypeInfo} aliasedType The caller's type for that parameter
+	 * @returns {number} how many queries were folded
+	 */
+	foldInlinedLenofQueries(clonedBody, funcNode, param, aliasedType) {
+		const outer = (this.semantic?.dimensionListOf?.(aliasedType) ?? [])[0];
+		const length = Number(outer);
+		if (!Number.isFinite(length) || length <= 0) return 0;
+		const queryName = funcNode.scope?.lookup?.(param.name)?.getAssemblySymbol?.() ?? null;
+		if (!queryName) return 0;
+		/* Collected first: swapping a node out from under the walk would be
+		   walking a list that is being edited. `further` descends one level, so
+		   the visitor has to do the descending itself -- see `symbolRelinker`. */
+		const queries = [];
+		const collector = node => {
+			if (node.getAttribute?.('lenofOfHandle') === queryName) {
+				queries.push(node);
+				return;
+			}
+			this.further(node, collector);
+		};
+		this.further(clonedBody, collector);
+		const intType = this.semantic?.getTypeInfo?.('int') ?? null;
+		for (const query of queries) {
+			const literal = ASTBuilder.numericLiteral(length);
+			literal.dataType = intType;
+			this.replaceNode(query, literal);
+		}
+		return queries.length;
+	}
+
+	/**
 	 * Whether this call may be inlined given the arrays it hands over.
 	 *
 	 * @param {any} funcNode
@@ -7251,6 +7304,13 @@ export class Optimizer extends ASTVisitor {
 								const wrapper = symbolTarget.type;
 								symbolTarget.type = (wrapper && typeof wrapper === 'object' && 'type' in wrapper)
 									? { ...wrapper, type: aliasedType } : aliasedType;
+								/*
+								Now that the alias is known to be the caller's
+								array, `lenof` on it can be answered from the
+								caller's length instead of from a handle that
+								this body does not have.
+								*/
+								this.foldInlinedLenofQueries(clonedBody, funcNode, param, aliasedType);
 							}
 						}
 					}

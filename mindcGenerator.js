@@ -4221,9 +4221,21 @@ export class CodeGenerator extends ASTVisitor {
 		const slotWantsHandle = !!slotType
 			&& ((slotType.qualifiers ?? []).includes('remote')
 				|| (slotType.pointerTo?.qualifiers ?? []).includes('remote'));
+		/*
+		`int s[]` carries no length of its own, so a pointer handed into that slot
+		cannot say how many elements lie behind the offset -- and `lenof` on it
+		would answer 0. The handle is the one form that keeps the length, so a
+		slot with an open dimension wants one whatever else it looks like.
+
+		This is the same thing `finalizeArrayParameters` decides from the
+		declaration, and it has to be repeated here: through a function pointer
+		`paramSymbol` is null and the slot's own type is all there is to go on.
+		*/
+		const slotHasOpenDimension = slotType?.kind === 'array'
+			&& !Number.isFinite(Number(arrayLengthOfType(slotType)));
 		const wantsHandle = argIsArray && !!slotType && slotType.kind === 'array'
 			&& (representation === 'handle' || representation === 'remote'
-				|| representation === 'names' || (!paramSymbol && slotWantsHandle));
+				|| representation === 'names' || slotWantsHandle || slotHasOpenDimension);
 
 		if (wantsHandle) {
 			/*
