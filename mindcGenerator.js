@@ -3185,9 +3185,29 @@ export class CodeGenerator extends ASTVisitor {
 				break;
 					}
 			case '&':
-				// Get address of given symbol (thus should be a LValue - and having 'pointer')
-				// Thus demand some small changes of L-value getting.
-				return this.processLValGetter(node.argument, true);	// -- Notice: this is not 'traditional' because we really want something to MODIFY IT
+				const argAddr = node.argument;
+				/*
+				An array's "address" belongs to its LAYOUT, not its symbol: a
+				memory array is a block/offset pair (addressable as it stands), while
+				a handle or remote array is ONE register holding the binding -- so
+				&a for those is the NAME of that register (1 word). The layout
+				machinery alone knows which is which, so width-1 arrays are routed
+				through it. Everything else keeps the old lvalue path.
+				*/
+				if (argAddr && argAddr.dataType && argAddr.dataType.isTypeInfo
+					&& argAddr.dataType.kind === 'array'
+					&& widthOfType(argAddr.dataType) === 1) {
+					const arraySym = (argAddr.type === 'Identifier')
+						? (this.currentScope.lookup(argAddr.name) ?? null)
+						: (argAddr.type === 'MemberExpression')
+							? (this.currentScope.lookup(argAddr.children?.[0]?.name ?? '') ?? null)
+							: null;
+					if (arraySym) {
+						const view = this.arrayViewOf(arraySym) ?? this.arrayRetFor(arraySym, null);
+						if (view) return view.address();
+					}
+				}
+				return this.processLValGetter(node.argument, true);
 				break;
 			case '*': {
 				// Get value from given address (variable address).

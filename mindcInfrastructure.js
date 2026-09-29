@@ -1052,6 +1052,16 @@ export class PointerRet extends VariableRet {
 	}
 
 	address() {
+		/*
+		A MEMORY array's block/offset pair IS the address of its first
+		element, so `&a` is just the array's own pointer. A handle or remote
+		array is a one-register cell and reaches its address as a name
+		pointer through its own classes; a pointer VARIABLE's pair is the
+		pointer's own storage, which a block/offset pointer cannot describe.
+		*/
+		if (this.type && this.type.kind === 'array' && widthOfType(this.type) >= 2) {
+			return this;
+		}
 		throw new InfrastructureNotImplementedExpection('address of a pointer');
 	}
 }
@@ -2798,6 +2808,25 @@ export class RemoteArrayRet extends VariableRet {
 	element(index) {
 		return this.subscript(index);
 	}
+
+	/*
+	The local binding of a remote array is ONE register -- the one holding
+	the other processor. (The element names are compile-time constants, so
+	nothing else has to travel.) Its address is therefore the NAME of that
+	register: a one-word name pointer. This is what makes `&x` for a
+	`remote int x[4]` differ from `&y` for a memory array, which is a
+	block/offset pair.
+	*/
+	address() {
+		const glob = this.glob;
+		const pointer = new TypeInfo('', 'pointer', 2);
+		pointer.pointerTo = this.type;
+		pointer.qualifiers = ['byname'];
+		const target = glob.tmp(pointer, 'pointer');
+		return new NamePointerRet(glob,
+			[NamePointerRet.pointAt(glob, target, this.name)],
+			target, pointer, true, this.name);
+	}
 }
 
 /**
@@ -3590,6 +3619,23 @@ export class ArrayHandleRet extends ArrayRet {
 	 */
 	element(index) {
 		return new ArrayHandleSlotRet(this.glob, this, operandOf(this.glob, index));
+	}
+
+	/*
+	The handle is ONE register (the cell holding the packed helper entry
+	points), so its address is the NAME of that register -- a one-word name
+	pointer, not a block/offset pair. `vecalias(&a, b)` stores a handle
+	into it with a single `write @this <the name>`.
+	*/
+	address() {
+		const glob = this.glob;
+		const pointer = new TypeInfo('', 'pointer', 2);
+		pointer.pointerTo = this.type;
+		pointer.qualifiers = ['byname'];
+		const target = glob.tmp(pointer, 'pointer');
+		return new NamePointerRet(glob,
+			[NamePointerRet.pointAt(glob, target, this.name)],
+			target, pointer, true, this.name);
 	}
 }
 

@@ -11,6 +11,7 @@ import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 import { InstructionBuilder } from "./mindcGeneratorBase.js";
 
 import { SymbolEntry, Scope, TypeInfo, MemberInfo, SemanticAnalyzer, VariableLinker } from "./mindcSemantic.js";
+import { widthOfType } from "./mindcInfrastructure.js";
 
 // Auxiliary type to handle break/continue
 class BreakException {
@@ -844,7 +845,22 @@ export class Optimizer extends ASTVisitor {
 					// Pointing at a pointer: only allowed if that one is a name pointer
 					return { kind: 'pointer', target: keyOf(symbol), targetSymbol: symbol };
 				}
-				if (isArraySymbol(symbol)) return { kind: 'invalid', target: null, targetSymbol: symbol };
+				if (isArraySymbol(symbol)) {
+					/*
+					A HANDLE array (an open dimension, or a remote array) is ONE
+					register -- the cell holding the handle -- so its address is the
+					NAME of that register, just like a scalar. A memory array has a
+					block/offset pair and no single register to name.
+					*/
+					if (widthOfType(typeOfSymbol(symbol)) === 1) {
+						if (symbol.isVolatile || symbol.isStatic
+							|| (symbol.isExtern && !symbol.isGlobal)) {
+							return { kind: 'invalid', target: null, targetSymbol: symbol };
+						}
+						return { kind: 'register', target: keyOf(symbol), targetSymbol: symbol };
+					}
+					return { kind: 'invalid', target: null, targetSymbol: symbol };
+				}
 				volatileGuard(symbol);
 				/*
 				An `extern` GLOBAL keeps its own register name (`g:.c`) even when

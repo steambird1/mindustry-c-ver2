@@ -1,4 +1,4 @@
-/* EXPECT: 5 7 7 5 7 7 */
+/* EXPECT: 5 7 1 7 5 7 1 7 */
 /* An array written `int s[]` leaves its length open, so it is a HANDLE: that
    is the one form that carries the length (and the element size) beside the two
    helpers that reach the elements. It used to be handed over as a pointer, and
@@ -15,12 +15,20 @@
    `#pragma noinline` is one of the pragmas check.mjs re-runs every test under,
    so the kept-call path is checked by the same expected output: a handle built
    at the call site and one folded into an alias must agree, which is the whole
-   reason the model is worth having. */
+   reason the model is worth having.
+
+   THE HANDLE ROW OF THE `&` MATRIX: `&s` takes the address of the handle CELL
+   -- the one register that names the array -- so it is ONE word. Before the
+   `&` resolution was tiered, `&` on an unsized array parameter was refused
+   (a pointer into storage that has no address). `widthof(&s)` prints 1, the
+   same width `widthof(s)` would, because a handle is one register and its
+   address is a name pointer to that register. */
 auto device message1;
 void put(int s[]) {
     s[1] = 7;
     print(lenof(s));
     print(s[1]);
+    print(widthof(&s));
 }
 void main() {
     int mem[5];

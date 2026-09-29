@@ -3414,6 +3414,17 @@ export class SemanticAnalyzer extends ASTVisitor {
 				// 创建指针类型
 				const ptrType = new TypeInfo('', 'pointer', 2);
 				ptrType.pointerTo = argType;
+				/*
+				A HANDLE array (an open dimension, or a remote array) is ONE
+				register, so &a is a NAME pointer to that register -- 1 word,
+				not a block/offset pair. The type has to say so, or widthOfType
+				(the same fact the code generator works from) would disagree with
+				what is actually emitted.
+				*/
+				if (argType && argType.isTypeInfo && argType.kind === 'array'
+						&& widthOfType(argType) === 1) {
+					ptrType.qualifiers = ['byname'];
+				}
 				node.dataType = ptrType;
 				break;
 				
@@ -4065,6 +4076,13 @@ export class SemanticAnalyzer extends ASTVisitor {
 							symbol.type = variant;
 						}
 					}
+				} else if (symbolType && symbolType.kind === 'array' && widthOfType(symbolType) === 1) {
+					/*
+					A HANDLE array (an open dimension, or a remote array) is ONE
+					register, so its address is the NAME of that register. Nothing
+					here needs memory: keep the layout.
+					*/
+					symbol.addressedByName = true;
 				}
 				if (symbol.kind === 'variable') {
 					symbol.accessThroughPointer = true;
