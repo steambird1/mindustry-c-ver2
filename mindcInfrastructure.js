@@ -66,7 +66,15 @@ first one. `materialize()` does exactly that, and it is free when the value alre
 sits in a temporary symbol (it just renames, emitting no instruction).
 */
 
-import { Instruction, InstructionBuilder, InstructionReferrer, MEMORY_RESERVE_SIZE } from "./mindcGeneratorBase.js";
+// `Instruction` is the one binding in this file read while the module body runs
+// (`class VariableRet extends Instruction`), so it comes from the leaf module
+// rather than from `mindcGeneratorBase.js` -- that one and `mindcSemantic.js`
+// import each other, and a browser that starts from either can reach this file
+// while the other is still mid-body, which is what put `Instruction` in the
+// temporal dead zone. `MEMORY_RESERVE_SIZE` is only read inside a constructor
+// below, so it can stay where it is defined.
+import { Instruction, InstructionBuilder, InstructionReferrer } from "./mindcInstruction.js";
+import { MEMORY_RESERVE_SIZE } from "./mindcGeneratorBase.js";
 import { SemanticAnalyzer, TypeInfo } from "./mindcSemantic.js";
 
 /* ------------------------------------------------------------------ *

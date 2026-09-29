@@ -7,7 +7,10 @@ import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 	DeclaratorNode,
 	ASTBuilder
  } from "./mindcBase.js";
-import { Instruction, MemoryBlockInfo } from "./mindcGeneratorBase.js";
+// `Instruction` used to be imported here and was never used; the entry needed
+// at run time is `MemoryBlockInfo`, and it is a type name, so nothing here
+// reads a binding from `mindcGeneratorBase.js` while this module's body runs.
+import { MemoryBlockInfo } from "./mindcGeneratorBase.js";
 import { widthOfType } from "./mindcInfrastructure.js";
 
 export class VariableLinker {
