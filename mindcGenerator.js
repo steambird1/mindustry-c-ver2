@@ -3142,6 +3142,182 @@ export class CodeGenerator extends ASTVisitor {
 	}
 
 	/**
+	 * `vecalias(&a, b)`: the same binding as `a = b;`, reached through a NAME
+	 * pointer instead of a symbol.
+	 *
+	 * The front end has already refused everything that is not a handle cell
+	 * (see `checkVecAlias`), so what is left here is the ordinary array: turned
+	 * into a view, packed, and stored into the register the pointer names. The
+	 * `&` costs nothing over the plain form -- `packHandle` is paid either way,
+	 * and only the destination of the store differs.
+	 *
+	 * @param {ASTNode} node A `vecalias` BuiltinCall
+	 * @returns {Instruction}
+	 */
+	emitVecAlias(node) {
+		const glob = this.glob;
+		const args = node.arguments ?? [];
+		const pointer = ExportRet(glob, this.visit(args[0]), args[0]?.dataType);
+		/*
+		`&a` on a width-1 array is a NAME pointer, which is exactly the case
+		`NamePointerRet` was built for: it holds the NAME of the cell rather than
+		a block/offset pair. `targetName` is that name -- known at compile time,
+		which is the whole point of a name pointer -- while `name` is the register
+		that HOLDS the name, and writing the handle there would bind nothing.
+		The instructions that stored the name are dropped with it: the handle is
+		written to the cell itself, and nothing ever reads that copy.
+		*/
+		const cell = (pointer instanceof NamePointerRet)
+			? (pointer.targetName ?? null) : null;
+		if (!cell) {
+			this.addError(
+				`vecalias: the first argument is not the name of a handle cell, so there is `
+				+ `nowhere to put the handle`, node.location);
+			return new Instruction();
+		}
+		const view = this.arrayViewForArgument(args[1]);
+		if (!view) {
+			this.addError(`vecalias: the second argument is not an array`, args[1]?.location ?? node.location);
+			return new Instruction();
+		}
+		if (view instanceof ArrayHandleRet) {
+			/*
+			A handle as the source: the cell already holds a packed handle, length
+			and all, so the alias is one store and there is nothing to pack.
+			*/
+			return new Instruction([InstructionBuilder.set(cell, view.name)], cell,
+				new Map([['disallowReplacement', true]]));
+		}
+		const handle = ensureArrayHandle(glob, view);
+		if (!handle) {
+			this.addError(`vecalias: this array has no handle form`, args[1]?.location ?? node.location);
+			return new Instruction();
+		}
+		return new Instruction([handle.instructions,
+			...packHandle(glob, cell, { ...handle, length: view.length || 0 })], cell, new Map());
+	}
+
+	/**
+	 * The `ArrayRet` an array-typed ARGUMENT denotes, with the same split the
+	 * argument delivery uses: a layout that is not in memory describes itself,
+	 * while a memory array's value IS its address, from which the traditional
+	 * view is built.
+	 *
+	 * @param {ASTNode?} node
+	 * @returns {import('./mindcInfrastructure.js').ArrayRet?}
+	 */
+	arrayViewForArgument(node) {
+		if (!node) return null;
+		const symbol = (node.type === 'Identifier')
+			? (this.currentScope?.lookup?.(node.name)
+				?? this.semantic?.globalScope?.lookup?.(node.name) ?? null)
+			: null;
+		if (symbol && symbol.myType?.()?.kind === 'array'
+			&& this.arrayStyleFor(symbol)?.type !== 'traditional') {
+			return this.arrayViewOf(symbol);
+		}
+		const value = ExportRet(this.glob, this.visit(node), node.dataType);
+		if (value instanceof PointerRet) {
+			return new TraditionalArrayRet(this.glob, value,
+				symbol?.myType?.() ?? node.dataType, this.arrayLengthOf(symbol) || 0);
+		}
+		return null;
+	}
+
+	/**
+	 * `veccpy(a, b)`: copy the elements of `b` into `a`.
+	 *
+	 * Both sides go through `element(i)`, which is the same machinery `a[i]`
+	 * uses, so the loop is short and works the same whatever the two layouts
+	 * are -- a loop written per layout would be two loops to keep in step, and
+	 * one of them would rot.
+	 *
+	 * The bound is the SMALLER of the two lengths. When both are written down
+	 * the front end has already refused `M > N` (`checkVecCpy`), so it is a
+	 * literal; when the count lives in a packed handle it is a run time
+	 * question, and the destination's worth is the only bound that cannot run
+	 * past the end.
+	 *
+	 * @param {ASTNode} node A `veccpy` BuiltinCall
+	 * @returns {Instruction}
+	 */
+	emitVecCopy(node) {
+		const glob = this.glob;
+		const args = node.arguments ?? [];
+		const destination = this.arrayViewForArgument(args[0]);
+		const source = this.arrayViewForArgument(args[1]);
+		if (!destination || !source) {
+			this.addError(`veccpy: both arguments must be arrays`, node.location);
+			return new Instruction();
+		}
+		const index = this.getTempSymbol();
+		const indexName = index.getAssemblySymbol();
+		const lengthOf = view => {
+			const value = Number(view.length);
+			return Number.isFinite(value) && value > 0 ? value : 0;
+		};
+		const destinationLength = lengthOf(destination);
+		const result = new Instruction();
+		/*
+		A HANDLE's length is whatever the binding put in it, so it is a run time
+		question and the bound has to be a register. Every other layout carries a
+		count that was written down in the program -- and the front end has
+		refused `M > N` for those (`checkVecCpy`), so the smaller of the two is
+		simply the source's. Taking the smaller either way is also what keeps a
+		front end that MISSED that check from running the copy off the end of the
+		destination.
+		*/
+		let bound = String(Math.min(destinationLength, lengthOf(source)));
+		if (source instanceof ArrayHandleRet) {
+			const limit = this.getTempSymbol();
+			const limitName = limit.getAssemblySymbol();
+			/*
+			`lenof` of a handle: the count sits one field up, so it is shifted
+			down and masked -- the same two instructions `lenof(handle)` emits.
+			*/
+			result.concat(InstructionBuilder.op('shr', limitName, source.name,
+				String(HANDLE_FIELD_BITS * 2)));
+			result.concat(InstructionBuilder.op('and', limitName, limitName, String(HANDLE_MASK)));
+			result.concat(InstructionBuilder.op('min', limitName, limitName,
+				String(destinationLength)));
+			bound = limitName;
+		}
+		result.concat(InstructionBuilder.set(indexName, '0'));
+		/*
+		Forward test, then the body, then back to the test -- the same shape
+		`visitForStatement` builds, with the same referrer names, so the
+		instruction writer does not need a second kind of loop to understand.
+		*/
+		const testJumper = InstructionBuilder.jump('{goto_test}', 'always', null, null);
+		const bodyLoop = new Instruction();
+		bodyLoop.concat(destination.element(indexName).set(source.element(indexName).get()));
+		bodyLoop.concat(InstructionBuilder.op('add', indexName, indexName, '1'));
+		bodyLoop.concat(testJumper);
+		const loopSystem = new Instruction();
+		loopSystem.concat(new InstructionReferrer(testJumper, 'goto_test'));
+		/*
+		The test goes into a register of its own rather than into an `{op}`
+		placeholder: the jump that follows reads the result, and a placeholder
+		would be a different register on each side of it.
+		*/
+		const verdict = this.getTempSymbol();
+		const verdictName = verdict.getAssemblySymbol();
+		loopSystem.concat(InstructionBuilder.op('lessThan', verdictName, indexName, bound));
+		/*
+		A jump condition is a COMPARISON, not a bare register: `jump t x` is not
+		a thing. The comparison is against `false` so that the branch fires on
+		the negated verdict -- i.e. when the loop is done -- exactly the shape
+		`visitToCondition` hands to `visitForStatement`.
+		*/
+		const conditBreak = InstructionBuilder.jumpx('{loop_break}', `equal ${verdictName} false`);
+		loopSystem.concat(conditBreak);
+		loopSystem.concat(bodyLoop);
+		result.concat(loopSystem);
+		result.concat(new InstructionReferrer(conditBreak, 'loop_break'));
+		return result;
+	}
+
+	/**
 	 * Split an LValue into the instructions that compute its address and a bare
 	 * reference (carrying no instructions) that can be read and written afterwards.
 	 * 
@@ -5152,6 +5328,37 @@ export class CodeGenerator extends ASTVisitor {
 				result.instructionReturn = returningSymbol.getAssemblySymbol();
 				result.setAttribute('isPointer', true);
 				return result;
+			},
+			/*
+			`vecalias(&a, b)`: the binding of Phase 5, written as an intrinsic.
+			The `&` has already been turned into a one-word NAME pointer to the
+			cell by `visitUnaryExpression`, so what is left is the array's handle
+			packed into that one register -- the same body `a = b;` gets, and the
+			same cost: one store once `packHandle` has done its three or four
+			instructions.
+
+			It is an intrinsic rather than a function for a reason that shows up
+			here: as a function it would have to be handed `b` as an ARRAY
+			argument, and the delivery machinery would try to alias the caller's
+			array to a parameter -- which is exactly the thing a handle cannot be.
+			*/
+			vecalias: ast => {
+				return this.emitVecAlias(ast);
+			},
+			/*
+			`veccpy(a, b)`: an element loop. Both layouts are turned into views,
+			which is what makes the copy work the same whatever they are -- a
+			loop that knew about memory blocks and registers separately would be
+			two copies of the same loop, and one of them would rot.
+
+			The bound is the SMALLER of the two lengths. When a length is only in
+			a packed handle it cannot be known here, and a source longer than the
+			destination would otherwise run past its end -- so the loop stops at
+			whichever runs out first. When both are static the front end has
+			already refused `M > N`, so this is a belt to that pair of braces.
+			*/
+			veccpy: ast => {
+				return this.emitVecCopy(ast);
 			}
 		};
 

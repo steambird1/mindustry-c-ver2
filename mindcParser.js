@@ -2405,7 +2405,15 @@ export class Parser {
 			'draw', 'print', 'drawflush', 'printflush', 'getlink', 'ceil', 'floor', 'sqrt', 'rand', 'abs', 'memcpy', 'pow',
 			'control', 'radar', 'sensor', 'set', 'op', 'lookup', 'ubind', 'ulocate', 'ucontrol', 'uradar', 'min', 'max',
 			'wait', 'stop', 'end', 'jump', 'read', 'write', 'asm', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'adiff',
-			'memsp', 'printchar', 'format', 'stricteq', 'byname', ...(this.extraFunctions.map(func => func.name))
+			'memsp', 'printchar', 'format', 'stricteq', 'byname',
+			/*
+			`vecalias` / `veccpy` are intrinsics, not functions: they have no
+			body to call, and their array arguments are laid out by the generator
+			itself. Making them BUILTIN calls is what puts them in front of the
+			argument-delivery machinery, which would otherwise alias a caller's
+			array to a parameter that does not exist.
+			*/
+			'vecalias', 'veccpy', ...(this.extraFunctions.map(func => func.name))
 		];
         return builtins.includes(name);
     }

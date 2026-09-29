@@ -1217,6 +1217,14 @@ export class SemanticAnalyzer extends ASTVisitor {
 			{ name: 'memcpy', returnType: 'void', parameters: ['void*', 'void*', 'unsigned']},
 			{ name: 'memsp', returnType: 'void*', parameters: ['device', 'int']},
 			{ name: 'byname', returnType: 'void*', parameters: [], hasVarArgs: true, special: 'byname' },
+			/*
+			`vecalias(&a, b)` binds a handle cell to an array, `veccpy(a, b)`
+			copies elements into storage of its own. Both are intrinsics: the
+			arity and the argument layouts are checked in `visitBuiltinCall`, and
+			the generator emits the bodies (one store; one loop).
+			*/
+			{ name: 'vecalias', returnType: 'void', parameters: [], hasVarArgs: true, special: 'vecalias' },
+			{ name: 'veccpy', returnType: 'void', parameters: [], hasVarArgs: true, special: 'veccpy' },
 			{ name: 'remote', returnType: 'void*', parameters: [], hasVarArgs: true, special: 'remote' },
 			...(this.extraConfig.getAttribute('extraFunctions') ?? [])
 		];
@@ -4284,6 +4292,219 @@ export class SemanticAnalyzer extends ASTVisitor {
             ?? null;
     }
 
+    /**
+     * `vecalias(handle *dst, int b[])` -- bind a handle cell to an array.
+     *
+     * The `&` is not decoration. A handle is ONE register, so the address of a
+     * handle is an ordinary one-word name pointer, the signature is the
+     * cheapest thing that can carry it, and the body is one store. That is the
+     * whole reason this exists as an intrinsic rather than as a function: as a
+     * function it would have to be passed an array, and a handle cannot be
+     * passed as an array (it is a description of one).
+     *
+     * The destination must therefore be a handle cell this program OWNS, which
+     * means a declared one (`int a[];`). The other shapes are refused each for
+     * its own reason, because the advice differs: a memory array is storage
+     * with an address and nothing to pack a handle into, so the advice is the
+     * copy that does work; an array in registers has no address at all; and a
+     * handle PARAMETER is a copy the caller passed, so binding into it would
+     * rebind the callee's view and leave the caller's array as it was.
+     *
+     * The source may be any LOCAL layout, and a remote one is refused for the
+     * same reason every other remote-to-local handle copy is: the helpers in a
+     * handle are line numbers of this program, and they mean nothing on another
+     * processor.
+     *
+     * @param {ASTNode} node A `vecalias` BuiltinCall
+     */
+    checkVecAlias(node) {
+        const args = node.arguments ?? [];
+        if (args.length !== 2) {
+            this.addError(`'vecalias' takes exactly 2 arguments, but ${args.length} were provided`,
+                node.location);
+            return;
+        }
+        const [destination, source] = args;
+        const nameOf = symbol => symbol?.name ?? 'it';
+        /*
+        `&a` -- the address of a name. Anything else is not a cell to write a
+        handle into: `vecalias(mem, b)` would have to be a memory array by
+        definition, and `vecalias(3, b)` names nothing at all.
+        */
+        if (destination.type !== 'UnaryExpression' || destination.operator !== '&'
+            || destination.argument?.type !== 'Identifier') {
+            this.addError(
+                `The first argument of vecalias must be the address of a handle, as in `
+                + `'vecalias(&a, b)': a handle is bound by writing into the cell that holds it`,
+                destination.location ?? node.location);
+            return;
+        }
+        const cell = this.symbolOfArrayExpression(destination.argument);
+        const cellType = cell?.myType?.() ?? null;
+        if (!cell || cellType?.kind !== 'array') {
+            this.addError(
+                `'${destination.argument.name}' is not an array, so it has no handle to bind`,
+                destination.argument.location ?? node.location);
+            return;
+        }
+        const cellImpl = this.arrayImplementationOf(cell);
+        if (cellImpl === 'remote') {
+            this.addError(
+                `Cannot vecalias into '${nameOf(cell)}': a remote array is an element of ANOTHER `
+                + `processor, and a handle here packs the entry points of THIS one`,
+                destination.location);
+            return;
+        }
+        /*
+        Only a handle cell THIS PROGRAM OWNS can be bound into, and that means
+        a declared one (`int a[];`). The other three shapes are refused for
+        three different reasons, so the message has to say which one it hit:
+        the advice is not the same for any of them.
+        */
+        if (cell.isUnboundHandle !== true) {
+            const name = nameOf(cell);
+            /*
+            An array with no length of its own, and not one this program
+            declared, is a PARAMETER (`int s[]`) -- the one shape that is a
+            handle without being a cell. `arrayParamRep` would say so too, but
+            it is filled in only at the very end of this pass, long after this
+            runs, so the type is what can be asked.
+            */
+            const isParameter = this.staticArrayLengthOf(cell) === null;
+            const said = isParameter
+                ? 'an array PARAMETER, and the handle in it is a COPY -- '
+                    + 'the one the caller passed, so binding into it would change what this '
+                    + "function sees from here on and leave the caller's array on the handle it "
+                    + "already has. Declare a handle of your own "
+                    + "('int h[];') to bind instead"
+                : (cellImpl === 'memory')
+                    ? `an array in memory, and a handle is not storage -- use veccpy(${name}, ...)`
+                    : 'an array in registers, which has no address to take the address of';
+            this.addError(
+                `Cannot vecalias into '${name}': it is ${said}`, destination.location);
+            return;
+        }
+        if (source.dataType?.kind !== 'array') {
+            this.addError(`The second argument of vecalias must be an array, as in 'vecalias(&a, b)'`,
+                source.location ?? node.location);
+            return;
+        }
+        /*
+        A remote array cannot be NAMED by a handle, whatever the destination is:
+        the get / set helpers a handle packs are line numbers in this program's
+        own output. The elements can still be copied, one at a time, with
+        `veccpy` -- and the message has to say so, because a refusal that only
+        said no would read as "remote arrays are unusable".
+        */
+        if (this.arrayImplementationOf(this.symbolOfArrayExpression(source)) === 'remote'
+            || this.typeHasRemoteQualifier(source.dataType)) {
+            this.addError(
+                `Cannot bind a remote array by vecalias: a handle packs helper entry points `
+                + `of THIS processor, which mean nothing there. Copy the elements with `
+                + `'veccpy' instead`,
+                source.location ?? node.location);
+            return;
+        }
+        node.dataType = this.getTypeInfo('void');
+    }
+
+    /**
+     * `veccpy(int a[N], int b[M])` -- copy elements from `b` into `a`.
+     *
+     * The destination is storage this program owns, and only that. A handle is
+     * a NAME and not storage, so there are no elements in it to write: the way
+     * to bind one is `vecalias(&h, b)`, and saying so is the whole advice.
+     *
+     * The lengths are settled here when both are known, and that is a refusal
+     * rather than a silent truncation: `M > N` in the source text is a mistake
+     * in the program, not a runtime condition. When one of the two is only
+     * known at run time -- which is what a handle's packed length is -- there is
+     * nothing to check here, and the generator copies the SMALLER of the two
+     * counts so that the copy cannot run past the end of the destination.
+     *
+     * @param {ASTNode} node A `veccpy` BuiltinCall
+     */
+    checkVecCpy(node) {
+        const args = node.arguments ?? [];
+        if (args.length !== 2) {
+            this.addError(`'veccpy' takes exactly 2 arguments, but ${args.length} were provided`,
+                node.location);
+            return;
+        }
+        const [destination, source] = args;
+        if (destination.dataType?.kind !== 'array') {
+            this.addError(`The first argument of veccpy must be an array, as in 'veccpy(a, b)'`,
+                destination.location ?? node.location);
+            return;
+        }
+        if (source.dataType?.kind !== 'array') {
+            this.addError(`The second argument of veccpy must be an array, as in 'veccpy(a, b)'`,
+                source.location ?? node.location);
+            return;
+        }
+        const destinationSymbol = this.symbolOfArrayExpression(destination);
+        const destinationImpl = this.arrayImplementationOf(destinationSymbol);
+        if (destinationImpl === 'handle') {
+            this.addError(
+                `Cannot veccpy into '${destinationSymbol?.name ?? 'it'}': a handle is a NAME, not `
+                + `storage, so it has no elements to write. Write `
+                + `'vecalias(&${destinationSymbol?.name ?? 'h'}, b);' to bind it instead`,
+                destination.location);
+            return;
+        }
+        /*
+        The loop needs a bound, so the destination has to have a length to
+        count up to. Every layout has one except a handle, and that was just
+        refused above.
+        */
+        const destinationLength = this.staticArrayLengthOf(destinationSymbol);
+        if (destinationLength === null) {
+            const name = destinationSymbol?.name ?? 'a';
+            this.addError(
+                `Cannot veccpy into '${name}': it has no length, so there is nothing to copy `
+                + `into. Give it a size, as in 'int ${name}[8];'`, destination.location);
+            return;
+        }
+        /*
+        The source length is only KNOWN when the source is not a handle: a
+        handle carries its length in the packed value, which is a run time
+        question. A remote array's length is its declared one, and a local
+        array's is the size it was written with.
+        */
+        const sourceSymbol = this.symbolOfArrayExpression(source);
+        const sourceLength = this.staticArrayLengthOf(sourceSymbol);
+        if (sourceLength !== null && sourceLength > destinationLength) {
+            this.addError(
+                `The second argument of veccpy has ${sourceLength} element(s) in dimension 1, but `
+                + `the destination '${destinationSymbol?.name ?? 'it'}' has ${destinationLength}`,
+                source.location ?? node.location);
+            return;
+        }
+        node.dataType = this.getTypeInfo('void');
+    }
+
+    /**
+     * An array symbol's element count when the type gives one, else null.
+     *
+     * `null` means "not known here" and not "zero": a handle has a length, but
+     * it is in the packed value rather than in the type, so only run time can
+     * read it.
+     *
+     * @param {SymbolEntry?} symbol
+     * @returns {number?}
+     */
+    staticArrayLengthOf(symbol) {
+        const type = symbol?.myType?.() ?? null;
+        if (!type || type.kind !== 'array') return null;
+        /*
+        `hasOpenDimension` already draws the line between "the type says how
+        many" and "only run time knows", and this is the same line: an open
+        dimension is a handle, whose length is in the packed value.
+        */
+        if (this.hasOpenDimension(type)) return null;
+        return Number((this.dimensionListOf(type) ?? [])[0]);
+    }
+
     visitAssignmentExpression(node) {
         this.visit(node.left);
         this.visit(node.right, {
@@ -6574,6 +6795,19 @@ export class SemanticAnalyzer extends ASTVisitor {
 				if (node.arguments.length !== 2) {
 					this.addError(`'${node.functionName}' requires exactly 2 arguments`, node.location);
 				}
+				break;
+
+			/*
+			`vecalias` / `veccpy`: the arity and the argument layouts are the whole
+			of what can be checked here, and both are questions about how an array
+			is STORED rather than about a type name -- which is why they get their
+			own checks instead of the parameter count in `default`.
+			*/
+			case 'vecalias':
+				this.checkVecAlias(node);
+				break;
+			case 'veccpy':
+				this.checkVecCpy(node);
 				break;
 				
 			default:

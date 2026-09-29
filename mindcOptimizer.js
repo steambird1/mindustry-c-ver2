@@ -182,6 +182,19 @@ export const ARRAY_IMPLEMENTATIONS = new Map([
 ]);
 
 /**
+ * The intrinsics that STORE, as opposed to the ones that only read.
+ *
+ * `veccpy` writes elements, and `vecalias` binds a name to an array whose
+ * contents are then writable through it, so neither is an expression whose
+ * value can be reasoned away. Two passes want the same list -- the one that
+ * forgets an array whose contents stop being known, and the one that decides
+ * whether a tree has side effects -- so it is written down once, here.
+ *
+ * @type {string[]}
+ */
+export const STORING_INTRINSICS = ['veccpy', 'vecalias'];
+
+/**
  * The key of an array style inside `ARRAY_IMPLEMENTATIONS`.
  * 
  * @param {arrayStyle?} style 
@@ -1752,6 +1765,15 @@ export class Optimizer extends ASTVisitor {
 					break;
 				
 				case 'BuiltinCall':
+					/*
+					An array the intrinsics STORE cannot stay an encoded constant, for
+					the same reason one given to a pointer cannot: its contents stop
+					being known from here on. The arguments are walked as well -- a
+					subscript in either position is a write this pass has to see.
+					*/
+					if (STORING_INTRINSICS.includes(node.functionName)) {
+						this.discardArrayWrittenByIntrinsic(node);
+					}
 					const builtins = info ? { ...info } : {};
 					builtins.callNode = node;
 					node.arguments.forEach(args => {
@@ -2451,6 +2473,31 @@ export class Optimizer extends ASTVisitor {
 		if (target?.isUnboundHandle !== true) return;
 		const source = this.baseSymbolOf(right);
 		if (this.isFoldableArray(source)) this.invalidateConstantArray(source);
+	}
+
+	/**
+	 * `vecalias(&a, b)` and `veccpy(a, b)`: the same forgetting as the two
+	 * assignment forms, for the same reasons, reached through an intrinsic.
+	 *
+	 * `vecalias` hands `b` a second name, so every later `a[i] = ...` is a write
+	 * to `b` -- the situation `discardArrayBoundToHandle` describes for
+	 * `a = b;`. `veccpy` writes the elements itself, so the DESTINATION is the
+	 * array whose contents stop being known; the source is only read and stays
+	 * as it is.
+	 *
+	 * @param {ASTNode} node A `vecalias` / `veccpy` BuiltinCall
+	 * @returns {void}
+	 */
+	discardArrayWrittenByIntrinsic(node) {
+		/*
+		Which side is the WRITTEN one differs between the two, and neither is the
+		same side twice: `veccpy` writes the first argument, while `vecalias`
+		writes the handle it is given and leaves the second array reachable under
+		a new name -- which makes it writable all the same.
+		*/
+		const written = (node.functionName === 'veccpy') ? 0 : 1;
+		const symbol = this.baseSymbolOf(node.arguments?.[written] ?? null);
+		if (this.isFoldableArray(symbol)) this.invalidateConstantArray(symbol);
 	}
 
 	/**
@@ -6343,7 +6390,8 @@ export class Optimizer extends ASTVisitor {
 			case 'BuiltinCall':
 				// Exclusion of some
 				if (!inFunction) return true;
-				return functionBuiltin.includes(node.functionName);
+				return functionBuiltin.includes(node.functionName)
+					|| STORING_INTRINSICS.includes(node.functionName);
 				break;
             case 'UnaryExpression':
 				// ++ and -- itself actually have no side effect.
