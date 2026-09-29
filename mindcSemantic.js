@@ -690,8 +690,19 @@ export class TypeInfo {
 					if (Array.isArray(x)) return x.map(sizeOf).join('');
 					return String(x.value ?? '');
 				};
+				/*
+				An open dimension is `NaN` -- the same thing a parameter's `[]`
+				reads back as, and the reason a type-name channel cannot carry it
+				(see `getTypeInfo`). It has to print as `[]`: "NaN" in a message
+				about a program the user wrote is noise, and `int[NaN]` is not a
+				type anybody can write.
+				*/
+				const shownSize = value => {
+					const text = sizeOf(value);
+					return (/^\s*NaN\s*$/.test(text) || text === 'undefined') ? '' : text;
+				};
 				return (extra.length > 0 ? extra.join(' ') + ' ' : '') + inner
-					+ `[${sizeOf(t.arraySize)}]`;
+					+ `[${Array.isArray(t.arraySize) ? t.arraySize.map(shownSize).join('') : shownSize(t.arraySize)}]`;
 			}
 			// `name` may be a node rather than a string in odd cases
 			const name = (typeof t.name === 'string') ? t.name : (t.name?.value ?? '');
@@ -2079,6 +2090,13 @@ export class SemanticAnalyzer extends ASTVisitor {
                 // 类型检查初始化表达式
                 const initType = this.getExpressionType(declarator.initializer);
                 /*
+                `int s[] = r;`: settled here, because the length has to come from
+                what `s` is given, and that is not known until now.
+                */
+                if (declarator.getAttribute?.('openDimensionBinding') === true) {
+                    this.bindOpenDimensionArray(declarator, varSymbol, initType);
+                }
+                /*
                 A function pointer naming a CONCRETE struct may be given a
                 function whose parameter is the template that struct spells
                 out: the version for that variant is emitted and the pointer
@@ -2175,6 +2193,61 @@ export class SemanticAnalyzer extends ASTVisitor {
 	}
 
 	/**
+	 * Settle an array declared with an open dimension and bound to another
+	 * array in its initializer (`int s[] = r;`).
+	 *
+	 * The length is not written and cannot be counted from an initializer list,
+	 * so the only place it can come from is `r` -- and there is only one way to
+	 * keep it: `s` has to BE `r`, not a copy of it. That is also what makes the
+	 * feature affordable. A copy would have to be allocated at a length only
+	 * known once `r` is, and every access would go through it; an alias costs
+	 * nothing and writes back to `r`, exactly as C's array-to-pointer decay
+	 * suggests.
+	 *
+	 * So the type is taken from `r` -- which is also what fixes `symbol.size`:
+	 * left on its own `int[]` has size NaN, and a stack frame advanced by NaN
+	 * never finishes -- and the array is aliased to it.
+	 *
+	 * @param {any} declarator
+	 * @param {SymbolEntry} symbol
+	 * @param {TypeInfo?} initType
+	 * @returns {void}
+	 */
+	bindOpenDimensionArray(declarator, symbol, initType) {
+		if (!initType || initType.kind !== 'array') {
+			this.addError(
+				`The size of array '${declarator.name}' is neither given nor deducible: ` +
+				`write a size, or an initializer that is itself an array`,
+				declarator.location);
+			return;
+		}
+		if (this.hasOpenDimension(initType)) {
+			this.addError(
+				`Neither '${declarator.name}' nor what it is given says how many elements `
+				+ `there are: one of them has to`,
+				declarator.location);
+			return;
+		}
+		const target = this.symbolOfArrayExpression(declarator.initializer);
+		if (!target) {
+			this.addError(
+				`'${declarator.name}' has no length of its own, so it can only be bound to `
+				+ `a named array -- there is nothing to take a length from here`,
+				declarator.location);
+			return;
+		}
+		/*
+		The type is replaced but the wrapper is kept: `isConst` and `isVolatile`
+		were already read off the declaration and are still true of `s`.
+		*/
+		const wrapper = symbol.type;
+		symbol.type = (wrapper && typeof wrapper === 'object' && 'type' in wrapper)
+			? { ...wrapper, type: initType } : initType;
+		symbol.arrayAliasOf = target;
+		symbol.isRemote = target.isRemote === true || this.typeHasRemoteQualifier(initType);
+	}
+
+	/**
 	 * Fill in the array dimensions that were left out (`int a[] = {...}`).
 	 *
 	 * Counting is done level by level: the number of items at one level is the
@@ -2190,6 +2263,20 @@ export class SemanticAnalyzer extends ASTVisitor {
 		if (!dims.some(d => !d)) return;	// Nothing left out
 		const list = this.initializerListOf(declarator.initializer);
 		if (!list) {
+			/*
+			`int s[] = r;`: the length is not written and not countable, but it
+			does not have to be -- the array being bound already has one, and `s`
+			can take it. The dimension is left OPEN here (`NaN`, exactly as a
+			parameter's `[]` reads back) and settled once the initializer's type
+			is known, which is later than this.
+			*/
+			if (declarator.initializer) {
+				for (let i = 0; i < dims.length; i++) {
+					if (!dims[i]) dims[i] = ASTBuilder.numericLiteral(NaN);
+				}
+				declarator.setAttribute('openDimensionBinding', true);
+				return;
+			}
 			// Same reason as below: do not leave `null` behind
 			this.addError(
 				`The size of array '${declarator.name}' is neither given nor deducible: ` +
@@ -3948,12 +4035,31 @@ export class SemanticAnalyzer extends ASTVisitor {
      */
     refuseIncompatibleArrayAssignment(node, leftType, rightType) {
         if (leftType?.kind !== 'array' || rightType?.kind !== 'array') return false;
-        const nameOf = side => {
-            const symbol = this.symbolOfArrayExpression?.(side) ?? null;
-            return symbol?.name ?? 'an array';
-        };
-        const leftImpl = this.arrayImplementationOf(this.symbolOfArrayExpression?.(node.left));
-        const rightImpl = this.arrayImplementationOf(this.symbolOfArrayExpression?.(node.right));
+        const left = this.symbolOfArrayExpression?.(node.left) ?? null;
+        const right = this.symbolOfArrayExpression?.(node.right) ?? null;
+        const nameOf = side => side?.name ?? 'an array';
+        /*
+        A symbol with `arrayAliasOf` does not HOLD an array -- it IS one, the one
+        it names. There is nothing behind it to rebind: the storage is the other
+        array's, and the code that reaches it was generated for the other array.
+        Writing to it would either be dropped or, worse, land in the wrong place;
+        say so instead.
+
+        Only a declaration can produce one: `int s[] = r;` -- and that is what
+        the inliner itself makes, which is why nothing the optimizer generates can
+        run into this (the optimizer runs after this pass).
+        */
+        if (left?.arrayAliasOf) {
+            const target = left.arrayAliasOf;
+            this.addError(
+                `Cannot assign to '${nameOf(left)}': it is not an array of its own, it is `
+                + `'${target?.name ?? 'another array'}' itself. Write `
+                + `\`int ${nameOf(left)}[] = ${target?.name ?? 'that array'};\` to bind it`,
+                node.location);
+            return true;
+        }
+        const leftImpl = this.arrayImplementationOf(left);
+        const rightImpl = this.arrayImplementationOf(right);
         const saidAs = impl => ({
             memory: 'an array in memory',
             register: 'an array in registers',
@@ -3963,7 +4069,7 @@ export class SemanticAnalyzer extends ASTVisitor {
         if (leftImpl === rightImpl) return false;
         this.addError(
             `Cannot assign ${saidAs(rightImpl)} to ${saidAs(leftImpl)}: `
-            + `'${nameOf(node.right)}' and '${nameOf(node.left)}' are not the same type, `
+            + `'${nameOf(right)}' and '${nameOf(left)}' are not the same type, `
             + `because they are not stored the same way`,
             node.location);
         return true;
