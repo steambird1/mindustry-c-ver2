@@ -150,9 +150,43 @@ export function knownContentIdOf(glob, name) {
 	return null;
 }
 
+/** Whether a dimension list has a dimension that is not a compile-time number
+ *  (the open `int s[]` -- its length is not part of the type). */
+function hasOpenDimension(type) {
+	const dims = type.arraySize;
+	if (dims === null || dims === undefined) return false;
+	const numeric = d => Number(d?.node ?? d?.value ?? d);
+	const list = Array.isArray(dims) ? dims : [dims];
+	return list.some(d => d === null || d === undefined || !Number.isFinite(numeric(d)));
+}
+
+/**
+ * How many REGISTERS a value of this type occupies -- the width a temporary
+ * is allocated with and the width a conversion between two types must bridge.
+ *
+ * One word: numbers, and the two single-register representations a pointer
+ * or an array can take:
+ *   - a NAME pointer (`int *byname`, `int *byvaluename`): one register
+ *     holds the name,
+ *   - an array travelling as a HANDLE: an array with no length of its own
+ *     (`int s[]`, `int s[] = r`) and a `remote` array both ride in one
+ *     register holding the packed helper line.
+ *
+ * `remote` on a POINTER says where the pointer is STORED, not how wide it
+ * is, so `int *remote` is still two words. `sizeof` keeps its own meaning --
+ * "cells in memory", frame offsets, `__step` -- and deliberately does NOT go
+ * through this function.
+ */
 export function widthOfType(type) {
 	if (!type || !type.isTypeInfo) return 1;
-	if (type.kind === 'pointer' || type.kind === 'array') return 2;
+	if (type.kind === 'pointer') {
+		const quals = type.qualifiers ?? [];
+		return (quals.includes('byname') || quals.includes('byvaluename')) ? 1 : 2;
+	}
+	if (type.kind === 'array') {
+		if ((type.qualifiers ?? []).includes('remote') || hasOpenDimension(type)) return 1;
+		return 2;
+	}
 	if (type.kind === 'struct' || type.kind === 'union') return type.isPointerImpl() ? 2 : 1;
 	return 1;
 }
@@ -1593,6 +1627,43 @@ export class NamePointerRet extends PointerRet {
 	offset(step, backward = false) {
 		throw new InfrastructureNotImplementedExpection(
 			'pointer arithmetic on a name pointer (point it at an array instead)');
+	}
+}
+
+/**
+ * A `*byname` MEMBER of a struct that lives in memory: the name is read out of
+ * the cell first (so the value is a working name pointer, exactly as a byname
+ * member of a registry struct is), but STORING into the member must write the
+ * name back into that very cell. A plain temp-backed name pointer would drop
+ * the store -- the cell would never update, and the next read would fetch a
+ * stale value.
+ */
+export class MemoryNamePointerRet extends NamePointerRet {
+	/**
+	 * @param {Globals} glob
+	 * @param {MemoryRefRet} cell Reference to the member's memory cell
+	 * @param {TypeInfo?} type
+	 * @param {boolean} [temporary=false]
+	 */
+	constructor(glob, cell, type, temporary = false) {
+		const read = cell.get();
+		super(glob, read.instructions, read.instructionReturn, type, temporary, null);
+		this.cell = cell;
+	}
+
+	/**
+	 * @inheritdoc
+	 */
+	set(other) {
+		const base = super.set(other);
+		const glob = this.glob;
+		// The temp now holds the new name: write it back into the member's cell.
+		const write = this.cell.fixedLocation
+			? glob.memory.outputStorageOf(this.cell.fixedLocation, base.name)
+			: writeThrough(glob, this.cell.name, base.name, 1, this.cell.isNear,
+				this.cell.blockAlias ?? null);
+		return new NamePointerRet(glob, [base.instructions, write], base.name,
+			this.type, this.temporary, null);
 	}
 }
 

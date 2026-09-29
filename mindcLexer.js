@@ -37,6 +37,7 @@ export const TokenType = {
     SHORT: 'SHORT',
     SIGNED: 'SIGNED',
     SIZEOF: 'SIZEOF',
+	WIDTHOF: 'WIDTHOF',
     STATIC: 'STATIC',
     STRUCT: 'STRUCT',
     SWITCH: 'SWITCH',
@@ -196,7 +197,7 @@ export class Token {
             TokenType.CONTINUE, TokenType.DEFAULT, TokenType.DO, TokenType.DOUBLE, TokenType.ELSE,
             TokenType.ENUM, TokenType.EXTERN, TokenType.FLOAT, TokenType.FOR, TokenType.GOTO,
             TokenType.IF, TokenType.INT, TokenType.LONG, TokenType.REGISTER, TokenType.RETURN,
-            TokenType.SHORT, TokenType.SIGNED, TokenType.SIZEOF, TokenType.STATIC, TokenType.STRUCT,
+            TokenType.SHORT, TokenType.SIGNED, TokenType.SIZEOF, TokenType.WIDTHOF, TokenType.STATIC, TokenType.STRUCT,
             TokenType.SWITCH, TokenType.TYPEDEF, TokenType.UNION, TokenType.UNSIGNED, TokenType.VOID,
             TokenType.VOLATILE, TokenType.WHILE, TokenType.NULL
         ];
@@ -235,6 +236,7 @@ export const KEYWORDS = {
     'short': TokenType.SHORT,
     'signed': TokenType.SIGNED,
     'sizeof': TokenType.SIZEOF,
+	'widthof': TokenType.WIDTHOF,
     'static': TokenType.STATIC,
     'struct': TokenType.STRUCT,
     'switch': TokenType.SWITCH, /* Unsupported */

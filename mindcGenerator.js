@@ -26,7 +26,7 @@ import { ensureMemspHelper, remoteDeviceRegOf, remoteNameRegOf, RemotePointerRet
 	TraditionalArrayRet,
 	PointerRet, RefPointerRet, MemPointerRet, VolatilePointerRet, MemoryRefRet, StructRefRet,
 	symbolRef, ExportRet, valueClassOf, readThrough, writeThrough, pointerStep,
-	RegistryStructRet, NamePointerRet,
+	RegistryStructRet, NamePointerRet, MemoryNamePointerRet,
 	arrayRetOf, selectArrayImplementation, accessCostOf,
 	pointerToValue, valueToPointer, contentTypeOf, SPECIAL_CONTENT_TYPES,
 	arithmetic, widthOfType, knownContentIdOf, memberTypeOf, InvalidCastException, InfrastructureNotImplementedExpection
@@ -3864,9 +3864,7 @@ export class CodeGenerator extends ASTVisitor {
 		out of the struct first, and only then is it a name pointer.
 		*/
 		if (node.getAttribute('memberByname') === true) {
-			const read = reference.get();
-			return new NamePointerRet(glob, read.instructions, read.instructionReturn,
-				node.dataType, true);
+			return new MemoryNamePointerRet(glob, reference, node.dataType, true);
 		}
 		return reference;
 	}

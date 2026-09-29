@@ -2194,9 +2194,10 @@ export class Parser {
 	 * re-parsing.
 	 *
 	 * @param {object} token The `sizeof` token
+	 * @param {string} [name='sizeof'] The builtin name to record on the call
 	 * @returns {ASTNode}
 	 */
-	parseSizeof(token) {
+	parseSizeof(token, name = 'sizeof') {
 		this.consumeToken();
 		const parenthesized = this.matchToken(TokenType.LEFT_PAREN);
 		if (parenthesized) this.consumeToken();
@@ -2209,7 +2210,7 @@ export class Parser {
 			if (argument) argument.parent = null;
 		}
 		if (parenthesized) this.expectToken(TokenType.RIGHT_PAREN);
-		const call = ASTBuilder.functionCall(ASTBuilder.identifier('sizeof'));
+		const call = ASTBuilder.functionCall(ASTBuilder.identifier(name));
 		call.arguments = [argument];
 		if (argument) argument.parent = call;
 		call.location = token.location;
@@ -2228,6 +2229,14 @@ export class Parser {
 		const token = this.getCurrentToken();
 		if (!token) return false;
 		if (typeKeywords.includes(token.type)) return true;
+		// A storage word can open a type name (`remote int[4]`, `volatile int`),
+		// but `remote(x, y)` / `byname(&c)` are calls: a following `(` means the
+		// parenthesized text is an expression, not a type name.
+		if (['REMOTE', 'BYNAME', 'CONST', 'VOLATILE', 'NEAR', 'REGISTER', 'STATIC',
+			'EXTERN', 'AUTO'].includes(token.type)) {
+			const next = this.peekToken(1);
+			return !!next && next.type !== TokenType.LEFT_PAREN;
+		}
 		return token.type === 'IDENTIFIER' && special.includes(token.value);
 	}
 
@@ -2244,18 +2253,31 @@ export class Parser {
 			if (!token) break;
 			if (parenthesized && token.type === 'RIGHT_PAREN') break;
 			if (token.type === 'LEFT_PAREN' || token.type === 'SEMICOLON' || token.type === 'COMMA') break;
+			// `[4]` / `[]` dimensions are one part: `getTypeInfo` reads them
+			// attached to the element (`int[4]`), not as separate words.
+			if (token.type === TokenType.LEFT_BRACKET) {
+				const dim = ['['];
+				this.consumeToken();
+				const inner = this.getCurrentToken();
+				if (inner && inner.type === TokenType.NUMBER) {
+					dim.push(inner.value);
+					this.consumeToken();
+				}
+				this.expectToken(TokenType.RIGHT_BRACKET);
+				dim.push(']');
+				parts.push(dim.join(''));
+				continue;
+			}
 			parts.push(token.value ?? String(token.type).toLowerCase());
 			this.consumeToken();
-			// `struct pt` / `union u`: the tag belongs to the name
+			// `struct pt` / `union u`: the tag belongs to the name. Unlike the
+			// pinned base types, the type name keeps going after it (`struct pt *`,
+			// `struct pt *byname`), so only pair the tag here and keep reading.
 			if ((token.type === 'STRUCT' || token.type === 'UNION')
 				&& this.getCurrentToken()?.type === 'IDENTIFIER') {
 				parts.push(this.getCurrentToken().value);
 				this.consumeToken();
-				break;
 			}
-			if (token.type === 'IDENTIFIER') break;
-			if (token.type === 'INT' || token.type === 'CHAR' || token.type === 'FLOAT'
-				|| token.type === 'DOUBLE' || token.type === 'VOID' || token.type === 'BOOL') break;
 		}
 		return parts.join(' ').trim();
 	}
@@ -2270,6 +2292,10 @@ export class Parser {
 			// Why aren't they identifiers?
 			case TokenType.SIZEOF: {
 				return this.parseSizeof(token);
+			}
+
+			case TokenType.WIDTHOF: {
+				return this.parseSizeof(token, 'widthof');
 			}
 
 			case TokenType.ASM:

@@ -8,6 +8,7 @@ import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 	ASTBuilder
  } from "./mindcBase.js";
 import { Instruction, MemoryBlockInfo } from "./mindcGeneratorBase.js";
+import { widthOfType } from "./mindcInfrastructure.js";
 
 export class VariableLinker {
 	/**
@@ -2159,6 +2160,24 @@ export class SemanticAnalyzer extends ASTVisitor {
 						varSymbol.addressedByName = true;
 					}
 				}
+			}
+			/*
+			A `struct X *byname` where the struct does NOT stay in registers
+			(nested / too wide for the threshold / compiled without the pragma) is
+			degraded to a memory struct above, so the pointer keeps a real
+			block/offset ADDRESS -- the byname name-representation is refused for
+			struct pointees. But the `byname` qualifier on the type is the very
+			fact `widthOfType` reads: it would answer 1 (a name word) for a value
+			that truly occupies two registers. Make the type describe the storage:
+			drop the qualifier, exactly when the name representation is not used.
+			*/
+			if (finalType.kind === 'pointer'
+				&& ['struct', 'union'].includes(finalType.pointerTo?.kind ?? null)
+				&& varSymbol.addressedByName !== true
+				&& this.hasByNameQualifier(declarator)) {
+				finalType.qualifiers = (finalType.qualifiers ?? [])
+					.filter(q => q !== 'byname' && q !== 'byvaluename');
+				declarator.dataType = varSymbol.extractType();
 			}
 
             // 检查初始化表达式
@@ -4534,7 +4553,25 @@ export class SemanticAnalyzer extends ASTVisitor {
 	}
 
 	/**
-	 * Fold `sizeof(...)` / `lenof(...)`, which are compile time questions.
+	 * Resolve the type NAME a `sizeof(...)` / `widthof(...)` handed over as a
+	 * string literal. `getTypeInfo` knows typedefs and struct tags but not the
+	 * `struct` / `union` keyword itself, which the parser keeps in the name
+	 * (`widthof(struct pt)`, `widthof(volatile struct pt)`); drop the keyword
+	 * wherever it shows up and try again.
+	 *
+	 * @param {string} raw
+	 * @returns {TypeInfo?}
+	 */
+	resolveCompileTimeTypeName(raw) {
+		const direct = this.getTypeInfo(raw);
+		if (direct) return direct;
+		const bare = raw.replace(/\b(struct|union)\s+/g, '').trim();
+		return bare !== raw ? this.getTypeInfo(bare) : null;
+	}
+
+	/**
+	 * Fold `sizeof(...)` / `lenof(...)` / `widthof(...)`, which are compile
+	 * time questions.
 	 *
 	 * The call node is turned into the number it stands for, so that
 	 * everything downstream -- constant folding, array sizes, code generation
@@ -4545,7 +4582,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 	 */
 	foldCompileTimeFunction(node) {
 		const name = node.callee?.name;
-		if (name !== 'sizeof' && name !== 'lenof') return false;
+		if (name !== 'sizeof' && name !== 'lenof' && name !== 'widthof') return false;
 		const location = node.location;
 		const args = node.arguments ?? [];
 		let value = null;
@@ -4557,14 +4594,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 			const arg = args[0];
 			if (arg.type === 'StringLiteral') {
 				// `sizeof(<type>)`: the parser left the type's NAME here
-				const resolveType = raw => {
-					const direct = this.getTypeInfo(raw);
-					if (direct) return direct;
-					// `sizeof(struct pt)` -- the tag alone is the name here
-					const stripped = raw.replace(/^(struct|union)\s+/, '').trim();
-					return (stripped !== raw) ? this.getTypeInfo(stripped) : null;
-				};
-				const info = resolveType(String(arg.value));
+				const info = this.resolveCompileTimeTypeName(String(arg.value));
 				if (!info) {
 					this.addError(`Unknown type '${arg.value}' in sizeof()`, location);
 					return true;
@@ -4587,6 +4617,38 @@ export class SemanticAnalyzer extends ASTVisitor {
 					return true;
 				}
 			}
+		} else if (name === 'widthof') {
+			if (args.length !== 1) {
+				this.addError(`widthof() takes exactly one operand`, location);
+				return true;
+			}
+			/*
+			`widthof` answers the representation question: how many REGISTERS a
+			value of the type occupies (1 for a name pointer or a handle array,
+			2 for a memory pointer or array). It must always agree with code
+			generation, so it is a thin wrapper over the infrastructure's
+			`widthOfType` -- the very function the generator allocates with --
+			never a second copy of the width table.
+			*/
+			const arg = args[0];
+			/** @type {TypeInfo?} */
+			let info = null;
+			if (arg.type === 'StringLiteral') {
+				// `widthof(<type>)`: the parser left the type's NAME here
+				info = this.resolveCompileTimeTypeName(String(arg.value));
+				if (!info) {
+					this.addError(`Unknown type '${arg.value}' in widthof()`, location);
+					return true;
+				}
+			} else {
+				this.visit(arg);
+				info = this.getExpressionType(arg);
+				if (!info) {
+					this.addError(`widthof() cannot be applied to this operand`, location);
+					return true;
+				}
+			}
+			value = widthOfType(info);
 		} else {
 			if (args.length !== 1) {
 				this.addError(`lenof() takes exactly one operand`, location);

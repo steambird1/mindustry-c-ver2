@@ -152,6 +152,43 @@ Gate now: `check.mjs` **152/0**, `negative.mjs` **37/0/2**, `nomem.mjs` **7/0**
 Rejected: making `size` layout-aware. `size` is genuinely "cells in memory" and is
 used that way throughout.
 
+### Phase 2 status — DONE (uncommitted)
+
+How the design landed:
+
+- **2a/2b** `widthOfType` (mindcInfrastructure.js ~180) now reads the per-level
+  qualifiers as *the* `namePointer` fact (no new field): a `byname`/`byvaluename`
+  pointer level is 1 word, `remote` is storage not width, a `remote` array and an
+  open-dimension array are 1-word handles, everything else memory-shaped is 2.
+- **2c** `widthof` = lexer token `WIDTHOF` + `parseSizeof(token, name)` (both
+  builtins share the parser path; `readTypeName` now consumes full type names:
+  `*` levels, `[N]`/`[]` dimensions, storage qualifiers, struct tags) + a
+  compile-time fold wrapper over `widthOfType` (`foldCompileTimeFunction`, with a
+  shared `resolveCompileTimeTypeName` for the type-name form). `sizeof` keeps
+  meaning "cells in memory".
+- **Type honesty fix (t87)**: `struct outer *byname w` with a struct that does NOT
+  stay in registers (`addressedByName` unset) refuses the name representation —
+  but the `byname` qualifier stayed on the type, and `widthOfType` answered 1 for
+  a value that is really a block/offset pair, so `asRet` stopped wrapping the
+  `_block`/`_pos` pair and `RefPointerRet.set` recursed infinitely. The semantic
+  now strips `byname`/`byvaluename` from the type exactly when the name
+  representation is not used; the type and the storage agree again.
+- **Memory-byname member store fix (t127)**: a `*byname` member of a struct that
+  lives in memory produced a temp-backed name pointer whose `set()` wrote only the
+  temp — the cell never updated, and the 1-word width made the next read reuse the
+  temp and clobber it with 0. The member lvalue is now a `MemoryNamePointerRet`
+  (subclass of `NamePointerRet`, mindcInfrastructure.js) that writes the name back
+  into the very cell it was read out of.
+- Tests added (free slots, max 149 respected): `check/t13` (scalar basics, with
+  `EMIT-NOT: widthof` to pin the fold), `t14` (pointer levels/qualifiers), `t15`
+  (arrays, open dims), `t16` (register vs memory structs), `t17` (expression form
+  on variables), `t25` (remote handles), `t32` (byname member of a memory struct,
+  t127 tie-in), `t39` (unsized-array-parameter handle), `t44` (storage qualifiers
+  don't change width), `t45` (`sizeof` cells vs `widthof` registers).
+
+Gate now: `check.mjs` **162/0**, `negative.mjs` **37/0/2**, `nomem.mjs` **7/0**
+(76 shape assertions, 698 pragma-invariance runs).
+
 ## Phase 3 — One decision point (replaces the old "representation on TypeInfo")
 
 - **3a** Decide `chosenArrayStyle` in semantic analysis, not in the generator. Add a
@@ -241,7 +278,8 @@ Open decisions (flagged, not guessed):
 
 - `MESSAGE:` on the 29 negative cases that lack it.
 - Typedef'd **data** pointer coverage (the gap that hid Phase 1c).
-- The width/size matrix from Phase 2.
+- ~~The width/size matrix from Phase 2.~~ → added as `check/t13`–`t17`, `t25`, `t32`,
+  `t39`, `t44`, `t45`.
 - A remote-`&x` regression test.
 - Out-of-bounds subscripting: `int r[3]; int s[] = r; s[5]=7;` **silently succeeds and
   prints 7.** A design question (C-like permissiveness vs. trapping), not a blind fix —
