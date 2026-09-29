@@ -3571,9 +3571,6 @@ class ArrayHandleSlotRet extends VariableRet {
 		return valueClassOf(glob, this.type).create(glob,
 			[this.instructions, got.instruction, call, InstructionBuilder.set(tn, '__arrret')],
 			tn, this.type, true);
-		return valueClassOf(glob, this.type).create(glob,
-			[this.instructions, call, InstructionBuilder.set(tn, '__arrret')],
-			tn, this.type, true);
 	}
 
 	set(other) {

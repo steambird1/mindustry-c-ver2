@@ -3739,7 +3739,6 @@ export class SemanticAnalyzer extends ASTVisitor {
 			return (type.members ?? []).filter(m => names.includes(m.name))
 				.map(m => (m.namePointer === true ? 'name' : 'memory')).join('|');
 		};
-		const extra = [];
 		for (const func of [...list]) {
 			const name = String(func.name ?? '');
 			const paramTypes = (func.parameters ?? []).map(p => {
@@ -3834,9 +3833,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 			this.currentScope = saved;
 			const at = list.indexOf(func);
 			if (at >= 0) list.splice(at, 1, ...made);
-			extra.push(...made);
 		}
-		if (extra.length) (ast.functions ?? []).push(...[]);
 	}
 
 	/**
