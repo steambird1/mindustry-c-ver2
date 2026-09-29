@@ -1464,132 +1464,204 @@ export class SemanticAnalyzer extends ASTVisitor {
     }
 	
 	createAliasType(baseType, declarator) {
-        // 创建typedef别名类型
-        const aliasType = new TypeInfo(baseType.name, baseType.kind, baseType.size, [...baseType.members]);
-        aliasType.qualifiers = [...baseType.qualifiers];
-        
-        // 处理指针
-        if (declarator.pointerDepth > 0) {
-            let currentType = aliasType;
-            for (let i = 0; i < declarator.pointerDepth; i++) {
-                const ptrType = new TypeInfo('', 'pointer', 2);
-                ptrType.pointerTo = currentType;
-                ptrType.qualifiers = declarator.pointerQualifiers[i] || [];
-                currentType = ptrType;
-            }
-            return currentType;
-        }
-        
-        // 处理数组
-        if (declarator.arrayDimensions && declarator.arrayDimensions.length > 0) {
-            // 计算数组类型
-            let arrayType = aliasType;
-            for (const dim of declarator.arrayDimensions.reverse()) {
-                const arrType = new TypeInfo('', 'array', arrayType.size * (dim || 1));
-                arrType.arraySize = dim;
-                arrType.pointerTo = arrayType; // 使用pointerTo指向元素类型
-                arrayType = arrType;
-            }
-            return arrayType;
-        }
-        
-        return aliasType;
-    }
+		/*
+		An alias is a COPY of the whole base type, not a shell built from its
+		name and outermost size. Typedefs nest (`typedef int *p; typedef p *pp;`),
+		and a copy that drops `pointerTo` quietly turns `p` into a plain `int` --
+		a pointer that is only not one, which the first dereference crashes on.
+		`duplicate()` carries the whole chain, and every level keeps its own
+		qualifiers along with it.
+		*/
+		let aliasType = baseType.duplicate();
+
+		// 处理指针
+		if (declarator.pointerDepth > 0) {
+			let currentType = aliasType;
+			for (let i = 0; i < declarator.pointerDepth; i++) {
+				const ptrType = new TypeInfo('', 'pointer', 2);
+				ptrType.pointerTo = currentType;
+				ptrType.qualifiers = declarator.pointerQualifiers[i] || [];
+				currentType = ptrType;
+			}
+			return currentType;
+		}
+		
+		// 处理数组
+		if (declarator.arrayDimensions && declarator.arrayDimensions.length > 0) {
+			/*
+			A typedef array is built exactly like a variable's: the outermost
+			dimension is written first in the program (`int a[3][4]` is an array
+			of `int[4]`), so wrap from the innermost out. The array level shows
+			the base's qualifiers, as a variable's array layer does.
+			*/
+			const baseQualifiers = [...aliasType.qualifiers];
+			let arrayType = aliasType;
+			for (const dim of [...declarator.arrayDimensions].reverse()) {
+				/*
+				A dimension has to be known while compiling -- the same rule a
+				variable declaration enforces, or `arr a;` made from this alias
+				would be a variable length array by surprise.
+				*/
+				let value = dim;
+				if (dim.type !== 'NumericLiteral') {
+					const folded = this.constantDimensionOf(dim);
+					if (folded !== null) {
+						value = { type: 'NumericLiteral', value: folded };
+					} else {
+						this.addError(
+							`Variable length arrays are not supported: the size of ` +
+							`'${declarator.name}' must be a compile time constant`,
+							declarator.location);
+					}
+				}
+				const arrType = new TypeInfo('', 'array',
+					arrayType.size * ((typeof value?.value === 'number') ? value.value : 1));
+				arrType.arraySize = value;
+				arrType.pointerTo = arrayType; // 使用pointerTo指向元素类型
+				arrType.qualifiers = [...baseQualifiers];
+				arrayType = arrType;
+			}
+			return arrayType;
+		}
+		
+		return aliasType;
+	}
 	
 	/**
 	 * 
 	 * @param {string} typeNameRaw 
 	 * @returns {TypeInfo}
 	 */
+		/**
+		 * The type a NAME spells out, as a `TypeInfo`.
+		 *
+		 * A declarator is a base name, some `*`s and some qualifiers, and a
+		 * qualifier belongs to the LEVEL it was written on: in `int *remote` the
+		 * `remote` follows the `*` and describes the POINTER, while in
+		 * `remote int *` it precedes the base and describes the int. Those are
+		 * different types, and this is the one place a written type name becomes a
+		 * `TypeInfo`, so the level is read off the spelling here rather than
+		 * guessed afterwards.
+		 *
+		 * Each level of the `pointerTo` chain carries its own `qualifiers` --
+		 * exactly what `TypeInfo.toString` already prints -- so the level is not
+		 * recorded a second time anywhere.
+		 *
+		 * @param {string} typeNameRaw
+		 * @returns {TypeInfo?}
+		 */
 	getTypeInfo(typeNameRaw) {
-
 		if (typeof typeNameRaw !== 'string') {
 			return typeNameRaw;
 		}
-		
-		let typeName = typeNameRaw;
-		/*
-		const ptrLocate = typeName.indexOf('*');
-		const ptrSize = (ptrLocate < 0) ? 0 : typeName.length - ptrLocate;
-		if (ptrLocate != -1) {
-			typeName = typeName.slice(0, ptrLocate);
-		}
-			*/
-			/**
-			 * @type {TypeInfo?}
-			 */
+		/**
+		 * @type {TypeInfo?}
+		 */
 		let result = null;
-
-		// Get qualifiers from typeNameRaw string:
-		const checkQualifiers = ['const', 'volatile', 'near', 'extern', 'auto', 'static', 'register', 'remote'];
-		let existQualifiers = [], relevantPointers = [];
-		const splitResult = typeName.split(' ').map((value, index) => {
-			let result = 0, noPtr = '';
-			for (const chr of value) {
-				if (chr === '*') result++;
-				else noPtr += chr;
-			}
-			relevantPointers[index] = result;
-			return noPtr;
-		});
-		if (splitResult.length <= 0) {
+		/*
+		How many pointer levels have been opened. A word written now belongs to
+		level `levels + stars`: the stars in its own chunk sit to its LEFT, so in
+		`*remote` the qualifier describes the pointer, while in `int*` the word is
+		the base itself.
+		*/
+		let levels = 0;
+		/** @type {Map<number, string[]>} */
+		const perLevel = new Map();
+		const note = (level, q) => {
+			const list = perLevel.get(level) ?? [];
+			if (!list.includes(q)) list.push(q);
+			perLevel.set(level, list);
+		};
+		/*
+		`[]` is an OPEN dimension, and NaN is how an unspecified one is spelled
+		everywhere else (`arrayDimensionsOf` normalises it to null). The printer
+		turns it back into `[]`.
+		*/
+		const wrapArray = (element, dimensions) => {
+			const sizes = dimensions.map(d => {
+				const inside = d.slice(1, -1).trim();
+				return (inside === '') ? NaN : parseInt(inside);
+			});
+			let total = 1;
+			for (const s of sizes) total *= s;
+			const arr = new TypeInfo('', 'array', total);
+			arr.arraySize = sizes;
+			arr.pointerTo = element;
+			return arr;
+		};
+		const checkQualifiers = ['const', 'volatile', 'near', 'extern', 'auto',
+			'static', 'register', 'remote', 'byname', 'byvaluename'];
+		const chunks = String(typeNameRaw).split(/\s+/).filter(c => c.length > 0);
+		if (chunks.length === 0) {
 			return null;
 		}
 
-		for (let currIndex = 0; currIndex < splitResult.length; currIndex++) {
-			const splitter = splitResult[currIndex];
-			if (splitter.indexOf('[') != -1) {
-				if (!result) {
-					console.log(`Internal error: read incorrect type msg ${typeNameRaw}`);
-					return null;
-				}
-				const matches = str => {
-					let match, result = [];
-					let matchReg = /\[[0-9]*\]/g;
-					while (match = matchReg.exec(str)) {
-						result.push(match[0]);
-					}
-					return result;
-				};
-				const arraySize = matches(splitter).map(s => parseInt(s.substring(s.indexOf('[') + 1, s.lastIndexOf(']'))));
-				let totalSize = 1;
-				arraySize.forEach(sz => void(totalSize *= sz));
-				const newResult = new TypeInfo('', 'array', totalSize);
-				newResult.arraySize = arraySize;
-				newResult.pointerTo = result;
-				result = newResult;
-			} else if (!checkQualifiers.includes(splitter)) {
-				typeName = splitter;
-				if (this.typeTable.has(typeName)) {
-					result = this.typeTable.get(typeName).duplicate();
-				} else if (this.structTable.has(typeName)) {
-					const live = this.structTable.get(typeName);
-					/*
-					A struct that is still being defined (`struct node { struct node
-					*next; }` -- its own name appears while the members are read).
-					Hand back the LIVE entry, not a copy: a copy taken now is empty
-					and stays empty, so `p->next` later found no members and read at
-					the wrong offset. The live entry is filled in as the definition
-					finishes, which is exactly what a pointer to it needs.
-					*/
-					result = (live.beingDefined === true) ? live : live.duplicate();
-				} else {
-					return null;	// Unable to fetch information
-				}
-				for (let i = 0; i < relevantPointers[currIndex]; i++) {
-					const ptrType = new TypeInfo('', 'pointer', 2);
-					ptrType.pointerTo = result;
-					result = ptrType;
-				}
-				result.qualifiers = existQualifiers;
-				existQualifiers = [];
-			} else {
-				existQualifiers.push(splitter);
+		for (const chunk of chunks) {
+			let stars = 0, word = '';
+			for (const chr of chunk) {
+				if (chr === '*') stars++;
+				else word += chr;
 			}
+			// Dimensions written onto the name: `int[5]`, or `int [5]`.
+			const dimensions = [];
+			const bare = word.replace(/\[[0-9]*\]/g, m => { dimensions.push(m); return ''; });
+			if (checkQualifiers.includes(bare)) {
+				note(levels + stars, bare);
+				levels += stars;
+				continue;
+			}
+			if (bare.length === 0) {
+				if (dimensions.length > 0) {
+					if (!result) {
+						console.log(`Internal error: read incorrect type msg ${typeNameRaw}`);
+						return null;
+					}
+					result = wrapArray(result, dimensions);
+				}
+				// A `*` of its own: it opens a level and names no type.
+				levels += stars;
+				continue;
+			}
+			if (this.typeTable.has(bare)) {
+				result = this.typeTable.get(bare).duplicate();
+			} else if (this.structTable.has(bare)) {
+				const live = this.structTable.get(bare);
+				/*
+				A struct that is still being defined (`struct node { struct node
+				*next; }` -- its own name appears while the members are read).
+				Hand back the LIVE entry, not a copy: a copy taken now is empty
+				and stays empty, so `p->next` later found no members and read at
+				the wrong offset. The live entry is filled in as the definition
+				finishes, which is exactly what a pointer to it needs.
+				*/
+				result = (live.beingDefined === true) ? live : live.duplicate();
+			} else {
+				return null;	// Unable to fetch information
+			}
+			if (dimensions.length > 0) result = wrapArray(result, dimensions);
+			levels += stars;
 		}
-
-        return result;
-    }
+		if (!result) {
+			return null;
+		}
+		/*
+		Build the chain outwards and give each level the qualifiers written on
+		it. The base keeps whatever qualifiers it already carried: a `const int`
+		out of the type table is still a `const int` after a `*` goes on it.
+		*/
+		const chain = [result];
+		for (let i = 0; i < levels; i++) {
+			const ptr = new TypeInfo('', 'pointer', 2);
+			ptr.pointerTo = chain[chain.length - 1];
+			chain.push(ptr);
+		}
+		chain.forEach((type, level) => {
+			const own = perLevel.get(level);
+			if (!own || own.length === 0) return;
+			type.qualifiers = [...new Set([...(type.qualifiers ?? []), ...own])];
+		});
+		return chain[chain.length - 1];
+	}
 	
 	calculateTypeSize(typeInfo) {
         if (!typeInfo) return 1; // 默认大小
@@ -1806,8 +1878,17 @@ export class SemanticAnalyzer extends ASTVisitor {
         }
         
         // 创建带有限定符的类型
-        const varType = new TypeInfo(baseType.name, baseType.kind, baseType.size, [...baseType.members]);
-        varType.pointerTo = baseType.pointerTo;
+        /*
+        A COPY of the base type, not a shell made from its name and outermost
+        size: when the base is itself a typedef'd array (`typedef int arr[4];
+        arr a;`) the dimensions travel with it, and a shell that drops
+        `arraySize` leaves a variable whose array is size-unknown -- which the
+        first access walks into a crash. `duplicate()` carries the whole chain
+        (each level owns its own qualifiers); members are re-copied so the base
+        is not shared.
+        */
+        const varType = baseType.duplicate();
+        if (baseType.members) varType.members = [...baseType.members];
 		varType.qualifiers = [... new Set([...baseType.qualifiers, ...qualifiers])];
 		
 		const warningTypes = ['device', 'content_t'];
@@ -3079,7 +3160,20 @@ export class SemanticAnalyzer extends ASTVisitor {
 		if (typeNode.isTypeInfo === true) return typeNode.name;
         
 		let prefix = "";
-		let ptrSuffix = "*".repeat(typeNode.pointerDepth);
+		/*
+		The `*`s carry their OWN qualifiers: `int *remote` is a remote POINTER,
+		`remote int *` is a pointer to a remote int -- two different types, so
+		each level has to come out on its own star. A plain level prints a bare
+		`*`, exactly as before. (`pointerDepth` lives on the parameter node, and
+		on the type specifier of a function pointer.)
+		*/
+		let ptrSuffix = '';
+		const depth = typeNode.pointerDepth ?? typeNode.type?.pointerDepth ?? 0;
+		const levelQuals = typeNode.pointerQualifiers ?? typeNode.type?.pointerQualifiers ?? [];
+		for (let i = 0; i < depth; i++) {
+			const own = levelQuals[i] ?? [];
+			ptrSuffix += '*' + (own.length > 0 ? ' ' + own.join(' ') : '');
+		}
 		
 		if (typeNode.type === 'TypeSpecifier' && typeNode.getAttribute('qualifiers')) {
 			const attributes = typeNode.getAttribute('qualifiers');
@@ -5008,10 +5102,7 @@ export class SemanticAnalyzer extends ASTVisitor {
     autoRepFromExpectedType(expected) {
         let t = (typeof expected === 'string') ? this.getTypeInfo(expected) : expected;
         if (!t) return null;
-        const quals = [
-            ...(t.qualifiers ?? []),
-            ...((t.pointerQualifiers ?? []).flat?.() ?? [])
-        ];
+        const quals = this.qualifiersOfTypeInfo(t);
         if (t.kind === 'pointer') {
             return quals.includes('byname') ? 'name' : 'memory';
         }
@@ -5046,14 +5137,26 @@ export class SemanticAnalyzer extends ASTVisitor {
     /**
      * The qualifiers written on a type, wherever they were written.
      *
+     * A qualifier describes the LEVEL it was written on, and for a pointer those
+     * levels are different types: `const int *` is a pointer to a constant int,
+     * `int *const` is a constant pointer to a plain int. So there is no separate
+     * list to consult -- each level of the `pointerTo` chain carries its own
+     * `qualifiers`, and the whole set is what this walks. (`pointerQualifiers`
+     * used to be read here, on a field no `TypeInfo` ever had, which is how a
+     * per-level qualifier came to be ignored.)
+     *
      * @param {TypeInfo?} t
      * @returns {string[]}
      */
     qualifiersOfTypeInfo(t) {
-        return [
-            ...(t?.qualifiers ?? []),
-            ...((t?.pointerQualifiers ?? []).flat?.() ?? []),
-        ];
+        const found = [];
+        for (let level = t, guard = 0; level && guard < 64; guard++) {
+            for (const q of (level.qualifiers ?? [])) {
+                if (!found.includes(q)) found.push(q);
+            }
+            level = level.pointerTo ?? null;
+        }
+        return found;
     }
 
     /**
@@ -5128,10 +5231,7 @@ export class SemanticAnalyzer extends ASTVisitor {
             const raw = p?.type ?? p;
             let t = (typeof raw === 'string') ? this.getTypeInfo(raw) : raw;
             if (!t) continue;
-            const quals = [
-                ...(t.qualifiers ?? []),
-                ...((t.pointerQualifiers ?? []).flat?.() ?? [])
-            ];
+            const quals = this.qualifiersOfTypeInfo(t);
             if (quals.includes('auto')) {
                 this.addError(`A function pointer cannot have an 'auto' parameter: its value is a `
                     + `line number, so nothing can choose the version at run time. Write the `
@@ -6491,11 +6591,28 @@ export class SemanticAnalyzer extends ASTVisitor {
 	 */
 	isSameType(targetTypeRaw, sourceTypeRaw) {
 		const targetType = targetTypeRaw.duplicate(), sourceType = sourceTypeRaw.duplicate();
-		const ignoredQualifiers = ['auto', 'volatile', 'static', 'extern', 'near'];
-		sourceType.qualifiers = sourceType.qualifiers.filter(
-			item => (!ignoredQualifiers.includes(item)));	// 'const' of source does not matter
-		targetType.qualifiers = targetType.qualifiers.filter(
-			item => (!ignoredQualifiers.includes(item) && item !== 'const'));
+		/*
+		This comparison exists for the template-struct variant check: a pattern
+		member `auto int *p` and a variant member `int *byname p` are the same
+		SHAPE -- the representation is spelled out by the variant, not by the
+		type string (it is read back off `namePointer` / the array implementation
+		later). Storage and representation qualifiers therefore have to come off
+		EVERY level, not just the top one: the program may have written them in
+		front of the base (`auto int`) or behind a `*` (`int *byname`), and the
+		older, lossier parsing used to make both read the same -- which is what
+		made the two spellings match here.
+		*/
+		const ignoredQualifiers = ['auto', 'static', 'extern', 'near', 'register', 'byname', 'byvaluename', 'volatile'];
+		const strip = t => {
+			let head = t;
+			while (head) {
+				head.qualifiers = head.qualifiers.filter(item => !ignoredQualifiers.includes(item));
+				head = head.pointerTo ?? null;
+			}
+		};
+		strip(sourceType); strip(targetType);
+		// 'const' of the source does not matter (kept on the target only)
+		sourceType.qualifiers = sourceType.qualifiers.filter(item => item !== 'const');
 		return this.typeToString(sourceType) == this.typeToString(targetType);
 	}
 
@@ -6524,14 +6641,19 @@ export class SemanticAnalyzer extends ASTVisitor {
 		if (typeof sourceType === 'string') {
 			sourceType = this.getTypeInfo(sourceType);
 		}
-
-		targetType.qualifiers = [...new Set(targetType.qualifiers)];
-		sourceType.qualifiers = [...new Set(sourceType.qualifiers)];
+		/*
+		A type name that resolves to nothing is a type nobody wrote: an
+		unreadable qualifier, or a typedef that is not in scope yet. There is
+		nothing to compare it against, so it is simply not compatible -- and the
+		check has to come BEFORE any field of either side is read, or refusing the
+		program is a crash instead of a message. (The `qualifiers` de-duplication
+		this used to do here is already inside `duplicate()`, and doing it on the
+		originals rewrote the caller's type.)
+		*/
+		if (!targetType || !sourceType) return false;
 
 		targetType = targetType.duplicate();
 		sourceType = sourceType.duplicate();
-		
-		if (!targetType || !sourceType) return false;
         
 		// Remove auto and volatile qualifier for both sides:
 		const ignoredQualifiers = ['auto', 'volatile', 'static', 'extern', 'near'];
