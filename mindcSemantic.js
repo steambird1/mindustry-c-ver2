@@ -6520,6 +6520,41 @@ export class SemanticAnalyzer extends ASTVisitor {
     }
 
     /**
+     * Narrow an overload set by ARGUMENT COUNT, before the arguments are visited.
+     *
+     * `resolveOverloadedCall` chooses by type, and it needs the arguments visited
+     * to know their types -- but visiting an argument needs a parameter list to
+     * take its `givenType` from. Neither can go first. The count is the one fact
+     * available from the syntax alone, so it goes first: when it narrows the set
+     * to exactly one candidate, the arguments can be visited against a parameter
+     * list of the right length, and the type-based choice still runs afterwards to
+     * settle anything the count could not.
+     *
+     * Without this, a call carrying MORE arguments than the parameter list the
+     * name lookup happened to find reads `expectedParams[index].type` out of
+     * bounds. A name lookup can only find one of the versions -- the others were
+     * renamed `name__ov1`, `name__ov2` by `prescanFunctionDeclarations` -- so
+     * `add(1, 2, 3)` was measured against the 2-parameter `add` and threw
+     * `Cannot read properties of undefined` before anything could be reported.
+     *
+     * Returns the entry only when the count decides it. Zero or several
+     * candidates matching is not an answer, and guessing would pick a version the
+     * types may not want.
+     *
+     * @param {any} node A FunctionCall
+     * @returns {{node: any, paramTypes: string[]}|null}
+     */
+    preselectOverloadByArity(node) {
+        if (node?.callee?.type !== 'Identifier') return null;
+        if (node.callee.getAttribute?.('overloadResolved') === true) return null;
+        const set = this.overloadSets?.get(String(node.callee.name ?? '')) ?? null;
+        if (!set || set.length <= 1) return null;
+        const arity = (node.arguments ?? []).length;
+        const matching = set.filter(entry => entry.paramTypes.length === arity);
+        return matching.length === 1 ? matching[0] : null;
+    }
+
+    /**
      * Pick which of several functions sharing a name this call means.
      *
      * Called after the arguments have been visited (their types are needed)
@@ -6616,14 +6651,46 @@ export class SemanticAnalyzer extends ASTVisitor {
 			expectedParams = funcType.functionTo.type.parameters;
 			isFunctionPointer = true;
 		}
+
+		/*
+		Decide the overload by argument count FIRST, so the loop below has a
+		parameter list of the right length to read `givenType` out of. See
+		`preselectOverloadByArity` for why the count has to go before the types.
+		*/
+		const byArity = this.preselectOverloadByArity(node);
+		if (byArity) {
+			const picked = this.currentScope?.lookup?.(byArity.node.name) ?? null;
+			if (picked && picked.kind === 'function') {
+				funcSymbol = picked;
+				funcType = picked.myType();
+				readableFunctionName = picked.name;
+				expectedParams = funcType.parameters || [];
+			}
+			node.callee.name = byArity.node.name;
+			if (picked) node.callee.symbol = picked;
+			node.callee.setAttribute('overloadResolved', true);
+		}
+
+		/*
+		`index < expectedParams.length` is not decoration. The parameter list can
+		still be the wrong length here -- no overload set, or a count that matched
+		zero or several versions -- and the count check below comes too late to
+		stop the read. Such an argument is visited with no `givenType` (both
+		consumers guard for it), so the count check is what reports the mistake,
+		instead of a TypeError thrown before any diagnostic exists.
+		*/
         node.arguments.forEach((arg, index) => this.visit(arg, {
-			givenType: this.getTypeInfo(expectedParams[index].type),
+			givenType: index < expectedParams.length
+				? this.getTypeInfo(expectedParams[index].type)
+				: null,
 			givenTypeUnsure: true
 		}));
 
 		/*
-		Only now are the argument types known, so only now can the right
-		overload be chosen. Everything below then works on that one.
+		The count may have decided it already, in which case the callee is no
+		longer the shared name and there is nothing left to choose. Otherwise the
+		argument types are known now, so the right overload can be chosen, and
+		everything below then works on that one.
 		*/
 		this.resolveOverloadedCall(node);
 		if (node.callee.type === 'Identifier') {
@@ -6637,8 +6704,19 @@ export class SemanticAnalyzer extends ASTVisitor {
 		}
 
         // 检查参数数量
-       
-        if (node.arguments.length !== expectedParams.length) {
+        /*
+        A name shared by several versions is not one function with one
+        parameter count. The count belongs to whichever version is chosen,
+        and the choice has already been reported above, naming every version
+        it tried against. Quoting one version's count here as well would name
+        a version the call was never matched against: `add(1, 2, 3, 4)` was
+        told it wanted 2 arguments, because 2 is how many the FIRST `add`
+        takes, and saying so next to the accurate message reads as a second
+        finding about the same call.
+        */
+        const shared = node.callee.type === 'Identifier'
+            && (this.overloadSets?.get(String(node.callee.name))?.length ?? 0) > 1;
+        if (!shared && node.arguments.length !== expectedParams.length) {
             this.addError(
                 `Function '${readableFunctionName}' expects ${expectedParams.length} arguments, but ${node.arguments.length} were provided`,
                 node.location
