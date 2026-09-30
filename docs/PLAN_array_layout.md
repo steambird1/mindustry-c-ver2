@@ -1,0 +1,417 @@
+# Array layout, handles, and the `vec` standard library
+
+Working plan and design record for the array-representation work.
+
+**Where it stands:** Phases 1, 2, 4, 5 and 6 are done and committed. Phase 3 is
+partial (only 3b). Phase 7 (test debt) is not started. Two fixes landed that were
+not in the original plan; they are recorded in [§8](#8-fixes-that-were-not-in-the-plan).
+
+Baselines are recorded per phase. The current ones are in
+[§9](#9-current-baselines).
+
+## 0. Inventory: what already records array implementation information
+
+This is the constraint. **The same fact must not be recorded in two places.**
+
+| axis | canonical field | values | decided in | cached |
+|---|---|---|---|---|
+| element layout | `symbol.chosenArrayStyle` | `{traditional \| embedded \| encoded} × {÷ divided \| lookup \| —}` | `arrayStyleFor` (generator) | yes |
+| transport | `symbol.arrayParamRep` | `'handle' \| 'traditional' \| null` | `finalizeArrayParameters` (semantic) | — |
+| request | `symbol.requestedArrayImplementation` | a *string request*, not a decision | declaration | — |
+| remote-ness | `symbol.isRemote` / the `remote` qualifier | bool | declaration | — |
+| const-ness | `symbol.isConst` | bool | declaration | — |
+| aliasing | `symbol.arrayAliasOf` | `SymbolEntry` | semantic | — |
+
+`selectArrayImplementation` is the layout decider; its vocabulary is
+`{type, implement, reason}` where `type ∈ {traditional, embedded, encoded}` and
+`implement ∈ {divided, lookup, null}`. `arrayStyleFor` (mindcGenerator.js) is the
+single accessor and caches into `symbol.chosenArrayStyle`.
+
+### Verified: the transport axis is already binary
+
+Every *write* to `arrayParamRep` yields only `'handle'`, `'traditional'` or `null` —
+there are 9 of them, and they are checkable by grep:
+
+| site | writes |
+|---|---|
+| `mindcSemantic.js:2094`, `:6454`, `:6477`, `:6482`, `:6489` | `'handle'` |
+| `mindcSemantic.js:6496` | `'traditional'` |
+| `mindcSemantic.js:5562` | `'handle'` or `null` (ternary) |
+| `mindcSemantic.js:6034` | `'traditional'` or `'handle'` |
+| `mindcOptimizer.js:7429` | `null` |
+
+`'remote'` and `'names'` are **never written** — they are dead reads, still present at
+mindcGenerator.js:1540, 1541, 3752, 3753, 3837, 3838. Phase 3c has not removed them
+yet.
+
+This confirms the design position: a `remote` array and an `embedded` array **are**
+handles, and `arrayRetFor` already treats all three labels identically. The labels
+are just stale.
+
+### Verified: handles are already the universal transport
+
+`ensureArrayHandle` / `handleShapeOf` describe `RemoteArrayRet`, `LookupArrayRet`,
+`NameArrayRet` and `TraditionalArrayRet` (the last with `kind: 'memory'`, block+pos).
+Every read/write of a handled array becomes a call through the packed helper line
+numbers. Confirmed in generated code: a local `remote int x[4]` emits
+`op and x 4095` (get) and `op shr x 12 / op and … 4095` (set), then calls through them.
+
+### The duplication that used to exist
+
+`arrayImplementationOf` (mindcSemantic.js) **re-derived** layout+transport from
+`requestedArrayImplementation` + `isRemote`, defaulting to `'memory'`. It existed
+only because `chosenArrayStyle` is decided in the *generator*, which runs after the
+type system. It invented a `'register'` value that had no counterpart in the
+canonical taxonomy, and it was the sole reason the `null` escape hole existed under
+`#pragma optimize(array)`. **Removed in Phase 3b.**
+
+### The real problem: a time-ordering problem, not a vocabulary problem
+
+`chosenArrayStyle` is decided in the generator; the type system needs the answer
+earlier. The fix is to **hoist the decision into semantic analysis** — where
+`requestedArrayImplementation`, `isRemote`, `isConst`, the memory available and the
+instruction budget are *already* all consulted by `finalizeArrayParameters` — and have
+the generator read it instead of re-deciding. One decision, taken once, read by both.
+**This is Phase 3a and it is still outstanding.**
+
+**Therefore: no `representation` field is added to `TypeInfo`.** It would be a fourth
+copy. The type system instead gets a *derived read* of the canonical fields.
+
+---
+
+## Phase 1 — Per-level qualifiers (foundation) — DONE
+
+Commit `5d9c660`.
+
+Blocker: type equality is decided by stringifying both `TypeInfo`s
+(`isTypeCompatible`). Any distinction the printer cannot show does not exist.
+Printer first, then parsing.
+
+- **1a** `TypeInfo.toString` must print `remote int *` and `int *remote`
+  differently. **No new field needed**: each `pointerTo` level already owns its own
+  `.qualifiers` and `toString`/`qualifiersOfTypeInfo` render them per level. The
+  reporter (printer) part was already correct; what was wrong was the *writer*
+  (parsing and the alias/declaration builders) never attached qualifiers to the
+  level they were written on.
+- **1b** `getTypeInfo`: the star-wrap loop sat *inside* the non-qualifier branch, so
+  `"int *remote"` dropped the `*` entirely; `"int *"` split to `["int",""]` and
+  returned `null` on the empty token; `result.qualifiers = existQualifiers` clobbered
+  the base type's own qualifiers. All three fixed; a qualifier now attaches to the
+  level it prefixes.
+- **1c** `createAliasType` dropped `pointerTo` —
+  `new TypeInfo(baseType.name, baseType.kind, baseType.size, [...baseType.members])`.
+  This was the `typedef int *p;` crash.
+- **1d** `isTypeCompatible`: move the null guard above the dereference.
+
+What it actually took, beyond those four items:
+
+- **1b** rewrote `getTypeInfo`: level-aware qualifier attachment (`levels + stars`
+  rule: `*remote` goes on the pointer level, `remote int *` on the base), bare-`*`
+  tokens no longer return null, `int[4]` / `int[]` dimensions are parsed in the same
+  chunk (open dim = NaN), the base's own qualifiers are kept, and `byname` /
+  `byvaluename` joined the qualifier list. `int *remote`, `remote int *` and `int *`
+  now give three distinct chains (verified end-to-end through function signatures).
+- **Write side**: `getTypeNameFromTypeNode` now rebuilds each `*` with its own
+  qualifiers (it used to print `"*".repeat(depth)` and silently dropped `*remote`),
+  so the string channel no longer degrades `int *remote` to `int*`.
+- **1c** `createAliasType` now builds from `baseType.duplicate()` — the whole chain
+  (pointerTo, per-level qualifiers, arraySize) survives, and typedef array dimensions
+  go through `constantDimensionOf` like variable declarations (VLA typedefs are
+  refused with a real message).
+- **New crash found**: `visitVariableDeclaration` built `varType` the same lossy way
+  → `typedef int arr[4]; arr a;` produced an array whose `arraySize` was `null` and
+  crashed `TypeInfo.extractSingle` on first access. Now `baseType.duplicate()`.
+- **Regression caught by the suite**: template-struct variant matching
+  (`isStructVariantOf` → `isSameType`) compared member types by string after
+  stripping qualifiers from the *top* level only; the old lossy parsing happened to
+  make `auto int *` and `int *byname` read the same. With correct per-level parsing
+  they no longer match, so `isSameType` now strips storage/representation qualifiers
+  (`auto, static, extern, near, register, byname, byvaluename, volatile`) from
+  **every** level — shape comparison stays representation-agnostic, the
+  representation itself is still read off `namePointer` / the array style.
+- Tests added: `check/t40` (typedef'd data pointer), `t41` (chained pointer typedef),
+  `t42`/`t43` (typedef'd array, multi-dim),
+  `negative/typedef_array_variable_length`.
+
+## Phase 2 — `widthOfType` becomes representation-aware — DONE
+
+Commit `70c0e70`.
+
+`widthOfType` is kind-based: `pointer`/`array` → 2. So `int *byname` (one word) and
+a handle (one word) both reported 2.
+
+- **2a** lift the existing `namePointer` fact onto the `TypeInfo`.
+- **2b** make `widthOfType` consult it; a handle array is 1 word.
+- **2c** add a `widthof` builtin **as a wrapper over `widthOfType`**, never
+  independently — a program-visible `widthof` that disagrees with codegen is worse
+  than none. `sizeof` keeps meaning "cells in memory" (frame offsets, `__step`,
+  struct member offsets all depend on it); the two notions stay separate.
+
+Rejected: making `size` layout-aware. `size` is genuinely "cells in memory" and is
+used that way throughout.
+
+How it landed:
+
+- **2a/2b** `widthOfType` now reads the per-level qualifiers as *the* `namePointer`
+  fact (no new field): a `byname`/`byvaluename` pointer level is 1 word, `remote` is
+  storage not width, a `remote` array and an open-dimension array are 1-word handles,
+  everything else memory-shaped is 2.
+- **2c** `widthof` = lexer token `WIDTHOF` + `parseSizeof(token, name)` (both
+  builtins share the parser path; `readTypeName` now consumes full type names:
+  `*` levels, `[N]`/`[]` dimensions, storage qualifiers, struct tags) + a
+  compile-time fold wrapper over `widthOfType` (with a shared
+  `resolveCompileTimeTypeName` for the type-name form).
+- **Type honesty fix (`check/t87`)**: `struct outer *byname w` with a struct that does
+  NOT stay in registers (`addressedByName` unset) refuses the name representation —
+  but the `byname` qualifier stayed on the type, and `widthOfType` answered 1 for a
+  value that is really a block/offset pair, so `asRet` stopped wrapping the
+  `_block`/`_pos` pair and `RefPointerRet.set` recursed infinitely. The semantic now
+  strips `byname`/`byvaluename` from the type exactly when the name representation is
+  not used; the type and the storage agree again.
+- **Memory-byname member store fix (`check/t127`)**: a `*byname` member of a struct
+  that lives in memory produced a temp-backed name pointer whose `set()` wrote only
+  the temp — the cell never updated, and the 1-word width made the next read reuse
+  the temp and clobber it with 0. The member lvalue is now a
+  `MemoryNamePointerRet` (subclass of `NamePointerRet`) that writes the name back
+  into the very cell it was read out of.
+- Tests added: `check/t13` (scalar basics, with `EMIT-NOT: widthof` to pin the fold),
+  `t14` (pointer levels/qualifiers), `t15` (arrays, open dims), `t16` (register vs
+  memory structs), `t17` (expression form on variables), `t25` (remote handles),
+  `t32` (byname member of a memory struct), `t39` (unsized-array-parameter handle),
+  `t44` (storage qualifiers don't change width), `t45` (`sizeof` cells vs `widthof`
+  registers). Later phases added `t118_addr_of_remote` and `t146_open_array_param`.
+
+## Phase 3 — One decision point (replaces the old "representation on TypeInfo") — PARTIAL
+
+Only **3b** is done. **3a, 3c and 3d are outstanding.**
+
+- **3a** Decide `chosenArrayStyle` in semantic analysis, not in the generator. Add a
+  semantic-time `arrayStyleFor(symbol)` that reads the already-available facts
+  (`requestedArrayImplementation`, `isRemote`, `isConst`, memory, budget, version) and
+  stores the result in the *existing* `symbol.chosenArrayStyle`. The generator's
+  `arrayStyleFor` becomes a reader.
+  **Outstanding** — the only writes to `chosenArrayStyle` are still in the generator
+  (mindcGenerator.js:3772, 3778, 3812).
+- **3b** `arrayImplementationOf` stops re-deriving. It reads `chosenArrayStyle` +
+  `arrayParamRep`; when they are genuinely undecided (the `optimize(array)` case) it
+  says so explicitly instead of guessing `'memory'`. `'register'` is retired.
+  **DONE** — the function no longer exists anywhere in the tree.
+- **3c** Delete the dead `'remote'` / `'names'` reads.
+  **Outstanding** — all 6 sites still read them (see §0).
+- **3d** `isRequireMem()` consults the canonical style, so a handled array is not
+  given memory of its own. This deletes the dead 4-cell block that every `remote`
+  array currently allocates (`set __step 4`, `x_block`/`x_pos`) and never uses.
+  **Outstanding** — `isRequireMem()` (mindcSemantic.js:632) still returns true for
+  every `array` kind unconditionally.
+
+Payoff when complete: `refuseIncompatibleArrayAssignment` becomes a comparison of the
+canonical answers, and the `null === null` hole closes because "undecided" becomes a
+real, distinct state.
+
+## Phase 4 — `&` resolution — DONE
+
+Commit `b1621ae`.
+
+`&` on a **memory array is correct** and stays correct: a memory array has an
+address, like a memory pointer.
+
+The bug: `getExpressionType` case `'&'` unconditionally built `pointer to argType` of
+size 2. Verified wrong-code: `remote int x[4]` and `int x[4]` generated
+**byte-identical** code — a local block+pos for an array whose elements are on another
+processor.
+
+Rule: **`&` takes the address of the variable's storage, and every variable has
+storage.** A handle is one register; a `remote` array's handle is one local register.
+
+| operand | `&` gives | width |
+|---|---|---|
+| memory array | `int[4]*` (block,pos) | 2 |
+| handle array | pointer to the handle cell | 1 |
+| remote array | pointer to the *local handle cell*, not the elements | 1 |
+| register variable | name pointer, or the bare assembly name | 1 |
+
+- **4a** `&` produces a representation-appropriate pointer.
+- **4b** three-tier resolution for a callee that needs "a place to write": memory
+  pointer → name pointer → bare assembly name. The third tier is what `ulocate` uses.
+  `vecalias` is its first non-builtin consumer.
+- **4c** `markVariableAsAddressed` needs an array branch.
+
+Deliberate non-decisions, kept: a handle cannot cross processors (the packed get/set
+helpers are local line numbers); `&` on a handle is not refused; remote / register /
+embedded arrays are handles unless inlined; `vecalias(&a, b)` keeps the `&`.
+
+## Phase 5 — `int a[];` as an unbound handle — DONE
+
+Commit `daf1eb0`.
+
+Previously refused: *"The size of array 'a' is neither given nor deducible."*
+
+- `int a[];` (no initializer) is a 1-word handle cell, length `NaN` until bound.
+- Bound by `a = b;` or by `vecalias(&a, b);`.
+- `a[i]` before binding is a compile error.
+- A handle that escapes unbound traps at run time (precedent:
+  `set null_block null; set null_pos null`).
+- An `int a[];` that is never bound is a compile error.
+- Cost: 1 register + `packHandle`'s instructions. `&` adds no instructions — you pay
+  `packHandle` either way, because either form needs a cell to write into.
+
+## Phase 6 — `veccpy` / `vecalias` — DONE
+
+Commit `a23e3c9`.
+
+Intrinsics, not a `.js` extension: `mindc.js` says `extensions (Currently not
+working!!!)`, and `EXT_ROOT` points at a directory that does not exist. Precedent is
+`array()`, `lenof`, `sizeof`, `widthof`, `byname` — all intrinsics.
+
+- `vecalias(handle *dst, int b[])` — the `&` is right: a handle is one register, so
+  the address of a handle is an ordinary one-word pointer, the signature is the
+  cheapest possible, and the body is one store.
+- `veccpy(int a[N], int b[M])` — `M <= N` statically when both are static; a run-time
+  clamp when a length lives only in a packed handle.
+
+Implementation notes worth keeping:
+
+- Both are registered as **builtins** (parser `isBuiltinFunction` +
+  `initializeBuiltinFunctions` with `special` and `hasVarArgs: true`) to bypass
+  argument-delivery aliasing.
+- `vecalias` binds only a cell the program **owns** (`isUnboundHandle === true`),
+  detected as `staticArrayLengthOf(cell) === null`.
+- `emitVecAlias` writes to `NamePointerRet.targetName` — the **cell**, not `.name`.
+  A handle source is a single `set`; otherwise `ensureArrayHandle` + `packHandle`.
+- `emitVecCopy` loops on `destination.element(i).set(source.element(i).get())` with
+  `{goto_test}` / `{loop_break}` referrers. One loop for every layout pair, because
+  both sides go through the same `element(i)` machinery a subscript uses.
+- Jump conditions are comparisons, not bare registers: `equal <verdict> false`.
+
+Decisions taken (both were flagged in the plan rather than guessed):
+
+- `b = a` with `a` remote and `b` local stays **refused**. A handle's helper line
+  numbers mean nothing on another processor, so a remote→local handle copy yields a
+  local handle whose get/set helpers are wrong.
+- `veccpy` stays element-wise into owned storage, and a handle **destination is
+  refused**. `vecalias` into a handle *parameter* is refused too.
+
+Tests: `check/t152`–`t156` for the working forms, and eight
+`negative/vec*` cases for the refusals — `vecalias_into_parameter`,
+`vecalias_into_storage`, `vecalias_needs_address`, `vecalias_remote_source`,
+`veccpy_into_handle`, `veccpy_never_bound_source`, `veccpy_source_too_long` and
+`vec_intrinsic_arity`.
+
+## Phase 7 — Test debt — NOT STARTED
+
+Measured, not estimated:
+
+- **30 of the 51 negative cases have no `MESSAGE:`** (21 do). They currently pass on
+  "did it fail" alone, so a deleted check goes unnoticed — see the note in
+  `negative.mjs`'s header for the full argument. Two of the 30 are the reported
+  `KNOWN-GAP`s (`ovl_auto.c`, `ovl_pragma.c`); the other 28 are listed in §9.
+- Typedef'd **data** pointer coverage. Done in Phase 1 as `check/t40`; the *other*
+  half of this item — a typedef'd data pointer that is not a function pointer, used
+  in a way that reaches the alias builder — is worth re-checking now that Phases 5/6
+  added handle typedefs.
+- ~~The width/size matrix from Phase 2.~~ → done, `check/t13`–`t17`, `t25`, `t32`,
+  `t39`, `t44`, `t45`.
+- A remote-`&x` regression test asserting the remote and non-remote `&x` code differs.
+  Partly covered by `check/t118_addr_of_remote`; a dedicated one is still wanted.
+- Out-of-bounds subscripting: `int r[3]; int s[] = r; s[5]=7;` **silently succeeds
+  and prints 7.** A design question (C-like permissiveness vs. trapping), not a blind
+  fix — the answer changes codegen for every subscript.
+
+## 8. Fixes that were not in the plan
+
+### `e6ba968` — `ReferenceError: Cannot access 'Instruction' before initialization`
+
+`main.html` imports `mindcLexer.js` → `mindcGeneratorBase.js` → `mindc.js`, and
+`mindcInfrastructure.js` reads `Instruction` (`class VariableRet extends
+Instruction`) at module-evaluation time. Node always enters via `mindc.js`, so this
+was unreachable from the command line and only fired in the browser.
+
+Fixed by extracting the instruction classes into a new leaf, `mindcInstruction.js`,
+which imports only `mindcBase.js`; `mindcGeneratorBase.js` re-exports them. Chosen
+over reordering `main.html` because it makes import order irrelevant rather than
+merely correct. `Instruction` is the only superclass in the repo that originates
+outside `mindcInfrastructure.js`.
+
+`testers/tools/loadorder.mjs` guards it: **one `node` process per entry point**. A
+single process looping over entries with a cache-busting query is unsound — the first
+import warms the shared subgraph, and the guard was empirically shown to report the
+unfixed tree as PASSING. `mindcCompileWorker.js` and `mindcHighlightWorker.js` are
+exempt (they need `self`).
+
+### `add2f5d` — `canOptimize` and `EVAL_TRACKED`
+
+`addWrittenSymbol` decides `usage.canOptimize`, which gates whether a later read may
+be folded to a constant. The gate was `resolved !== EVAL_UNKNOWN`, so a **TRACKED**
+write (occurrence known, value not — what a loop body produces) still cleared it.
+
+An attempt to relax this to `resolved === EVAL_DEFINITE` dropped the TRACKED case
+entirely. Consequence: a declaration inside a loop body counted as foldable, its
+initialising store was deleted, and a later read took whatever the register happened
+to hold. `gcd(28, 35)` returned `0`; in `t10_big` the same defect made a `while`
+loop diverge into a step-limit trap; `t53` crashed the optimiser with an empty
+error list.
+
+The shipped condition is one rule per state — `UNKNOWN` is never foldable,
+everything else trusts `valueKnown` — which keeps a TRACKED-but-known value foldable
+(the original intent of the attempt) without losing the loop-body safety net. Pinned
+by `check/t157_loop_local_init.c` and `check/t158_inline_in_loopbody_noreport.c`.
+
+A second hunk in the same commit wraps `doUpdate` in `resolveWriteState` before
+passing it to `addWrittenSymbol`. That is a **provable no-op**: `addWrittenSymbol`
+already normalises that argument itself, and `resolveWriteState` is idempotent over
+all seven of its inputs.
+
+## 9. Current baselines
+
+Reproduce from `testers/unit_tests`:
+
+| harness | result |
+|---|---|
+| `node ../tools/check.mjs` | 171 passed, 0 failed (94 shape assertions, 743 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 49 passed, 0 failed, 2 known gaps |
+| `node ../tools/nomem.mjs` | 7 passed, 0 failed |
+| `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
+| `node ../tools/runall.mjs` | 101/101 |
+
+Invariants that must hold at every boundary:
+
+- No pragma may change program output. Every `check/` case is re-run under each
+  `optimize(...)` variant; none currently opts out.
+- Never record the same fact twice, and never let a test assert a fact another test
+  already asserts.
+- The 30 negative cases with no `MESSAGE:` are the outstanding Phase 7 debt.
+
+Test numbering: `check/` runs `t1`–`t158` with **no free slot**, so the next case is
+`t159`. (`negative/` is named by behaviour, not by number.)
+
+### The Phase 7 `MESSAGE:` debt, in full
+
+30 files, all under `testers/unit_tests/negative/`. The same list, with the
+reasoning behind each, is in [`testers/INFO.md`](../testers/INFO.md).
+
+**2 are the reported `KNOWN-GAP`s** — the compiler accepts them today, so there is no
+message to match: `ovl_auto.c`, `ovl_pragma.c`.
+
+**The other 28** each fail for a real reason that no case currently pins down:
+
+`array_no_address_to_function_pointer`, `array_param_too_small`,
+`byname_needs_v150`, `byname_of_array_element`, `byname_of_volatile`,
+`byname_pointer_arithmetic`, `byname_target_needs_two_representations`,
+`lookup_capacity`, `n05_const_pointer_qualifiers`, `n06_variable_length_array`,
+`n07_runtime_string_concat`, `n08_string_concat_runtime`, `n09_lenof_pointer`,
+`n10_conditional_string_concat`, `nomem_pointer_needs_memory`,
+`nomem_storage_class_pointer`, `nomem_undereferenced_pointer`,
+`remote_array_no_length`, `remote_array_two_dimensions`, `remote_of_remote`,
+`remote_struct_pointer_needs_pragma`, `struct_name_packet_needs_byname`,
+`struct_template_conversion_mismatch`, `struct_template_pointer_needs_byname`,
+`t25_opaque_reject`, `t32_encoded_bad`, `template_struct_in_function_pointer`,
+`typedef_array_variable_length`.
+
+---
+
+## 10. What the user sees
+
+This document is a design record. The language-level description of what landed is
+in [`TYPES_AND_FUNCTIONS.md`](TYPES_AND_FUNCTIONS.md) — the "Array Handles" section
+covers `int a[];`, `widthof` and the `vec*` intrinsics; the "Major Differences"
+list in [`README.md`](README.md) links to it.
