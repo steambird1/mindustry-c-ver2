@@ -3,7 +3,7 @@
 Working plan and design record for the array-representation work.
 
 **Where it stands:** Phases 1, 2, 4, 5 and 6 are done and committed. Phase 3 is
-partial (only 3b). Phase 7 (test debt) is not started. Two fixes landed that were
+partial (and less of it than it looked -- see Phase 3). Phase 7 (test debt) is not
 not in the original plan; they are recorded in [§8](#8-fixes-that-were-not-in-the-plan).
 
 Baselines are recorded per phase. The current ones are in
@@ -183,7 +183,9 @@ How it landed:
 
 ## Phase 3 — One decision point (replaces the old "representation on TypeInfo") — PARTIAL
 
-Only **3b** is done. **3a, 3c and 3d are outstanding.**
+**None of the four is done.** 3b was recorded as done on the strength of a claim that
+was wrong: `arrayImplementationOf` still exists, at `mindcSemantic.js:6242`, with five
+call sites. Phase 6 improved it but did not retire it.
 
 - **3a** Decide `chosenArrayStyle` in semantic analysis, not in the generator. Add a
   semantic-time `arrayStyleFor(symbol)` that reads the already-available facts
@@ -195,7 +197,15 @@ Only **3b** is done. **3a, 3c and 3d are outstanding.**
 - **3b** `arrayImplementationOf` stops re-deriving. It reads `chosenArrayStyle` +
   `arrayParamRep`; when they are genuinely undecided (the `optimize(array)` case) it
   says so explicitly instead of guessing `'memory'`. `'register'` is retired.
-  **DONE** — the function no longer exists anywhere in the tree.
+  **NOT DONE — measured.** The function is at `mindcSemantic.js:6242` and still
+  re-derives. It reads `arrayParamRep` and `requestedArrayImplementation` and **never
+  reads `chosenArrayStyle`** — which is generator-local, written only at
+  `mindcGenerator.js:3772`, `3778`, `3812` and read only at `:3764`. It still falls
+  through to `return 'memory'` (`:6259`) when nothing else decided, which is exactly
+  the guess this item removes. It still returns `'register'` (`:6257`) and nothing in
+  the tree consumes that value: all five call sites compare against `'remote'` or
+  `'handle'`. What Phase 6 did add is `'handle'` handling and a `null` return for the
+  `optimize(array)` case, so the item is advanced but not met.
 - **3c** Delete the dead `'remote'` / `'names'` reads.
   **Outstanding** — all 6 sites still read them (see §0).
 - **3d** `isRequireMem()` consults the canonical style, so a handled array is not
@@ -301,7 +311,7 @@ Tests: `check/t152`–`t156` for the working forms, and eight
 
 Measured, not estimated:
 
-- **30 of the 51 negative cases have no `MESSAGE:`** (21 do). They currently pass on
+- **30 of the 52 negative cases have no `MESSAGE:`** (22 do). They currently pass on
   "did it fail" alone, so a deleted check goes unnoticed — see the note in
   `negative.mjs`'s header for the full argument. Two of the 30 are the reported
   `KNOWN-GAP`s (`ovl_auto.c`, `ovl_pragma.c`); the other 28 are listed in §9.
@@ -361,14 +371,60 @@ passing it to `addWrittenSymbol`. That is a **provable no-op**: `addWrittenSymbo
 already normalises that argument itself, and `resolveWriteState` is idempotent over
 all seven of its inputs.
 
+### `94f5737` — a call with too many arguments crashed the compiler
+
+```c
+int add(int a, int b)        { return a + b; }
+int add(int a, int b, int c) { return a + b + c; }
+int main() { return add(1, 2) + add(1, 2, 3); }
+```
+
+`TypeError: Cannot read properties of undefined (reading 'type')` out of
+`visitFunctionCall`, surfacing as a `fatalError` with an **empty error list** rather than
+as a diagnostic. The overloading was incidental: a single `int add(int a, int b)` called
+as `add(1, 2, 3)` does it with no overloads in the program at all.
+
+Both halves of the defect predate the array work. The read that goes out of bounds and
+the count check that should have caught it are both from `52fd9f5` (2026-08-19), and
+overload support (`9ff9395`, 2026-09-22) left the ordering alone. Nothing here is
+attributable to a phase.
+
+Two separate things were wrong, and the report conflated them:
+
+1. **The count was checked after the arguments were walked.**
+   `expectedParams[index].type` was read for every argument before the count was
+   compared. The asymmetry is why it went unnoticed: too FEW arguments was always
+   reported properly, because the walk only reads as far as the argument list goes, so a
+   short parameter list is harmless. Only a long one is fatal, and only in the rarer
+   direction.
+2. **Overload resolution was circular.** `resolveOverloadedCall` picks by type and needs
+   the arguments visited; visiting needs a parameter list to take each expected type
+   from. Neither could go first, and the comment above the call described the cycle as
+   though it were a sequence. `prescanFunctionDeclarations` mangles every version but the
+   first to `name__ov1`, `name__ov2`, so a name lookup finds only one of them — the
+   2-parameter `add` — and `add(1, 2, 3)` was measured against it.
+
+Fix: `preselectOverloadByArity` narrows the set by argument count before the walk, which
+is the one fact available from the syntax alone. Type-based resolution still runs after
+and still decides what the count cannot, so same-arity type overloads are unchanged. Two
+guards came with it: the walk no longer reads out of bounds (an argument with no
+parameter is visited with no `givenType`, which both consumers already test for), and a
+shared name no longer also gets one version's count quoted at it when
+`resolveOverloadedCall` has already named every version it tried.
+
+Tests: `check/t159_overload_by_arity.c` and `negative/fn_arity_mismatch.c`. Both were
+run against the unmodified compiler and both fail — t159 with a compile error, and
+`fn_arity_mismatch` with "refused, but with no message", which is the state the crash
+produced and the state no `MESSAGE:` assertion can catch.
+
 ## 9. Current baselines
 
 Reproduce from `testers/unit_tests`:
 
 | harness | result |
 |---|---|
-| `node ../tools/check.mjs` | 171 passed, 0 failed (94 shape assertions, 743 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 49 passed, 0 failed, 2 known gaps |
+| `node ../tools/check.mjs` | 172 passed, 0 failed (97 shape assertions, 747 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 50 passed, 0 failed, 2 known gaps |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 101/101 |
@@ -381,8 +437,8 @@ Invariants that must hold at every boundary:
   already asserts.
 - The 30 negative cases with no `MESSAGE:` are the outstanding Phase 7 debt.
 
-Test numbering: `check/` runs `t1`–`t158` with **no free slot**, so the next case is
-`t159`. (`negative/` is named by behaviour, not by number.)
+Test numbering: `check/` runs `t1`–`t159` with **no free slot**, so the next case is
+`t160`. (`negative/` is named by behaviour, not by number.)
 
 ### The Phase 7 `MESSAGE:` debt, in full
 

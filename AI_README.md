@@ -50,6 +50,7 @@
 | `docs/asm.md` | 直接插入汇编 |
 | `docs/LiyueSprache/` | 中文文档 |
 | **`docs/PLAN_array_layout.md`** | **数组表示 / handle / `vec` 内建函数的设计与实施记录**。动手改数组相关代码前先读它 |
+| **`docs/OPEN_WORK.md`** | **尚未完成的工作清单**，含建议实现方式。想知道还有哪些没做、或者该从哪一项开始，就读它 |
 
 ## 编译器的用法
 
