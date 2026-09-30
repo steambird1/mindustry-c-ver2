@@ -8,17 +8,17 @@
 
 Incomplete parts:
 
-- Comprehensive testing (will be done as I occasionally use it)
+- Support of complex types.
 
 ----
 
-Please notice that: Mindustry-C has AI-generated code. The AI tool used in this project is DeepSeek (for individuals).
+Please notice that: Mindustry-C has a number AI-generated code. The AI tool used in this project is DeepSeek (for individuals), Hunyuan 4 Preview and OpenCode's Big Pickle.
 
-> I have no time to code completely, though. I've written only prompts and some parts of code (including **100% part of code generation part (i.e. `mindcGenerator*.js`) and almost 60% of optimizer (i.e. `mindcOptimizer.js`)**) for it. (Yet for sure, I also have to do all bug-fixing.)
+> I have no time to code completely, though. I've written only prompts and some parts of code -- However, the percentage of AI code is surging because agents ARE reliable at least so far.
 > (AI is just no so realiable as I've expected)
 > * This piece of text is clarified on 19 Mar.
 
-Mindustry-C aims to compile C code to Mindustry Assembly, a brain-racking language for most of us.
+Mindustry-C aims to compile C code (more precisely, a C dialect I've defined) to Mindustry Assembly, a brain-racking language for most of us.
 
 There have been many similar softwares aiming at using languages like C/C++ (alike grammar) or Python to code in Mindustry, but they aren't so effective. So here we are.
 

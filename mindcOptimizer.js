@@ -4728,8 +4728,37 @@ export class Optimizer extends ASTVisitor {
 		const usage = variableUses.get(varName);
 		if (usage) {
 			usage.writes++;
-			if (resolved !== state_.EVAL_UNKNOWN) {
-				// A known value may be folded; an unknown one forbids it
+			/*
+			`canOptimize` gates whether a LATER READ of this variable may be
+			folded to a constant, so it must be false whenever the value after
+			this write is not actually known -- otherwise the read folds to a
+			stale number and the program is silently miscompiled.
+
+			That gives one rule per state, and each one is load-bearing:
+
+			  DEFINITE + known value -> foldable; this is the ordinary case.
+			  DEFINITE + unknown     -> not foldable; nothing to fold TO.
+			  TRACKED  + known value -> foldable. A write whose occurrence is
+			                         known but whose state is only "tracked"
+			                         still carries a usable value.
+			  TRACKED  + unknown     -> NOT foldable. This is the loop-body
+			                         case, and it is the one that matters: if
+			                         the flag survives here, a declaration
+			                         inside a loop body is treated as
+			                         foldable, its initialising store is
+			                         dropped, and a later read of it takes
+			                         whatever the register happened to hold.
+			                         See t157_loop_local_init.c.
+			  UNKNOWN               -> not foldable, always. Nothing about
+			                         this write is reliable.
+
+			Skipping the TRACKED case here (as `=== EVAL_DEFINITE` alone did)
+			is what uninitialised the loop-local in t157 and looped forever in
+			t10_big.
+			*/
+			if (resolved === state_.EVAL_UNKNOWN) {
+				usage.canOptimize = false;
+			} else {
 				usage.canOptimize = valueKnown;
 			}
 		}
@@ -5033,7 +5062,8 @@ export class Optimizer extends ASTVisitor {
 
 	addWriteForCurrentScope(varName, noSideEffectValue, doUpdate = true) {
 		const varSymbol = this.currentScope.lookup(varName);
-		this.addWrittenSymbol(varSymbol, noSideEffectValue, doUpdate);
+		// Manually changed (30 Sept.)
+		this.addWrittenSymbol(varSymbol, noSideEffectValue, this.resolveWriteState(doUpdate));
 	}
 
     // =============== 作用域优化 ===============
