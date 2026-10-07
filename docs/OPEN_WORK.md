@@ -10,8 +10,9 @@ Where the two overlap, this one is the one to trust for status — auditing it t
 three claims in the plan that did not survive checking, all corrected in place and
 marked below.
 
-Everything here was measured against `94f5737`. Line numbers drift; symbol names do
-not, so each item cites both and the symbol is the thing to grep for.
+Everything here was measured against `94f5737` and re-checked at `f391690`. Line
+numbers drift; symbol names do not, so each item cites both and the symbol is the thing
+to grep for.
 
 Reproduce the baselines from `testers/unit_tests`:
 
@@ -29,6 +30,28 @@ The two invariants any new work has to keep:
   `optimize(...)` variant; none opts out.
 - **Never record the same fact twice.** A test that asserts what another test already
   asserts is a test that will keep passing after the thing it guards is deleted.
+
+## Where everything stands
+
+One line per item, so this file can be read a piece at a time. The reasoning is where the
+last column says, and the order of work is the order of the rows: **§1 and §2 first, then
+§7** — §7 moves ahead only if it gets in the way of finishing them.
+
+| item | state | detail |
+|---|---|---|
+| 3a — decide `chosenArrayStyle` at semantic time | not started — a split, not a hoist | §1.1 |
+| 3b — delete the dead `'register'` return | not started — no dependencies | §1.2 |
+| 3c — delete the six dead `'remote'` / `'names'` reads | not started — safe | §1.3 |
+| 3d — `isRequireMem()` consults the canonical style | **struck — do not implement** | §1.4 |
+| Phase 7: `MESSAGE:` on the 28 negative cases | not started | §2.1 |
+| typedef'd data pointer, second half | not started | §2.2 |
+| remote-`&x` difference regression | not started | §2.3 |
+| out-of-bounds subscript | **deferred by decision** — options written down | §2.4, §7.4 |
+| a case for the zero-candidate overload refusal | not started | §2.5 |
+| `'x'` loses its text (§3.1) | **decided** — `int`, ASCII value; fix after §1–§2 | §7.1 |
+| `for (int i = 0; …)` (§3.2) | **decided** — support it, and the empty clauses; fix after §1–§2 | §7.2 |
+| `m = remote(@this, r)` (§6) | **decided** — fix it; the shape needs analysis first | §7.3 |
+| §4 harness debt | fix it while testing | §4 |
 
 ---
 
@@ -280,6 +303,30 @@ correct programs do. It needs a decision and a scope, not a patch. Whoever takes
 start by finding out how many of the 342 driven cases would notice — that number is the
 real cost.
 
+**Deferred by decision.** The options, and what each costs, are written down in §7.4.
+
+### 2.5 The zero-candidate overload refusal has no case
+
+`94f5737` made a shared name whose argument count matches no version say exactly one
+thing — `No version of 'add' accepts these arguments (int, int, int, int)` — and
+`f391690` closed the read past the end of the parameter list that suppressing the count
+check had opened (`mindcSemantic.js:6742`, guarding the `:6743` read). Nothing in the
+tree locks either one: no case matches `No version of`, and
+`negative/fn_arity_mismatch.c` only asserts the *single-function* count message.
+
+One negative case covers both — two `add` versions (2 and 3 parameters) called with four
+arguments. On the compiler at `53ce864` that input threw a `TypeError` before any
+diagnostic existed, which `negative.mjs` reports as `refused, but with no message`, so the
+case is red on the old code and green now.
+
+It does not cover the other half. Deleting the `shared` guard (`mindcSemantic.js:6717`)
+puts the count message back *next to* `No version of …`, and a case that carries only
+`MESSAGE:` lines still passes — every `MESSAGE:` still matches, because matching is
+"some error", not "every error". Saying what must **not** be reported needs an annotation
+the runner does not have: **`NOT-MESSAGE: <regex>`**, one per line, failing the case if
+any error matches. That is a small runner change, and it is the only shape that can
+assert silence.
+
 ---
 
 ## 3. Defects found while auditing, in no plan
@@ -404,3 +451,93 @@ Listed so it is not re-investigated. Each was hit while probing and none has a c
   dangerous half: it is what makes a crash indistinguishable from a clean refusal to
   anything reading `errors` alone, which is the same weakness `negative/fn_arity_mismatch.c`
   was written to close for the one path it covers.
+
+---
+
+## 7. Decisions on the defects in §3 and §6
+
+Recorded so these are not re-opened, and in the order they were given: **§1 and §2 first**,
+then the three below — or earlier, but only if they get in the way of finishing them.
+
+### 7.1 `'x'` is an `int` holding its ASCII value
+
+A single-quoted literal has type `int` and evaluates to the character's ASCII code, so
+`int c = 'x';` compiles and printing `c` prints `120`.
+
+This is more than §3.1's "carry the text onto the node". The lexer classifies `'x'` as
+`char` today, which is why `int c = 'x';` is refused with `Cannot initialize 'int' with
+'char'` — so there are two halves, and they land together:
+
+- the expression's type becomes `int`. This is the half that changes behaviour: the
+  refusal above disappears, and a literal used as a value is a number;
+- the node carries the literal text, which is what `visitCharacterLiteral`
+  (`mindcGenerator.js:4867`) reads. §3.1's generator crash and its runtime trap both go
+  with it.
+
+`char c = 'x';` then becomes an `int`→`char` initialization. Whatever the compiler already
+does for `int`→`char` is the answer; if that is a refusal, it has to be a clear one-line
+message and not a crash. Settle it by testing both when this is implemented.
+
+### 7.2 `for (int i = 0; …)` parses, and every clause may be empty
+
+Support a declaration in the for-init, and check the forms that leave a clause out:
+
+```c
+for (int i = 0; i < 2; i++) …   // declaration in init: four errors and a crash today
+for (; i < 5; i++) …              // empty init
+for (;; i++) …                    // empty init and empty condition
+for (;;) …                        // all three empty
+```
+
+The crash is not the parse: `wrapToCompound` (`mindcParser.js:1457`) throws on a `null`
+target at `:1458`, reached from `parseForStatement` (`:1509`, calling at `:1529`). So the
+work is (a) parse a declaration where the init expression is expected, in the loop's own
+scope, and (b) make an absent clause reach `wrapToCompound` as something it can handle.
+Each empty form needs a case proving it *runs*, because "parses" and "runs" are separate
+claims here: `int i; for (i = 0; …)` and `while` already work, so the generator has an
+existing shape to copy.
+
+### 7.3 `m = remote(@this, r)`
+
+Fix it, in two steps, because the failure has two halves.
+
+1. **The empty error list goes first.** The compiler crashes with
+   `fatalError: Cannot read properties of undefined (reading 'type')` after producing no
+   message at all — and an empty `errors` array is indistinguishable from a clean refusal
+   to anything that reads only that (§2.1's argument for `MESSAGE:` is the same weakness,
+   on the path `fn_arity_mismatch.c` covers). Whatever this call turns out to be, it must
+   not be able to reach the crash without saying something.
+2. **Then decide what it should be.** Accepting it means `m` takes over `r`'s
+   representation; refusing it means joining the handle/array conversions that are
+   deliberately refused (§5). Start from the read that produced the `undefined` — the name
+   it was looking for is the fact that is missing, and that says which of the two the
+   language already intends.
+
+### 7.4 Out-of-bounds subscript — deferred, with the options written down
+
+**Deferred by decision: no code change until it is picked up again.** What the eventual
+choice is between:
+
+1. **Leave it, and say so.** `s[5] = 7` on a three-element array is C-like
+   permissiveness, documented as such. Cost: zero, and one known-wrong program keeps
+   printing 7.
+2. **A static check, only where the length is already known.** A constant subscript
+   against an array whose length is a compile-time number (`int r[3]`, an alias of one, a
+   bound handle) is refused at semantic time; a dynamic subscript (`s[i]`) is not looked
+   at. Nothing that compiles today changes its generated code, so the way the driven cases
+   can notice is by containing an out-of-range constant index — expected to be none, but
+   counting them is the first measurement. Two facts to establish before this can be
+   sized: whether `int s[] = r;` leaves `r`'s length on `s` (Phase 5 says an *unbound*
+   handle has no length — it is `NaN` — and it is not obvious a bound one survives the
+   assignment into the symbol), and what a static check is even supposed to say about an
+   unbound handle, where the length does not exist yet.
+3. **A runtime check on every subscript.** The honest fix and the expensive one: it
+   changes the code of every `a[i]` in the language. Its cost is measured the only useful
+   way — run the driven cases with the check in and count what changes.
+4. **Opt-in** (`#pragma boundscheck`), meaningful only on top of 3. It does not break the
+   no-pragma-may-change-output invariant *by construction* — a correct program prints the
+   same either way — but that has to be shown by the suite rather than argued, and a
+   pragma nothing runs is coverage nothing has.
+
+2 and 3 are not exclusive: 2 is what the compiler knows for free, 3 what it would have to
+pay for.
