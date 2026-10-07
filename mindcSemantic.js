@@ -6727,6 +6727,19 @@ export class SemanticAnalyzer extends ASTVisitor {
         // 检查参数类型
         node.arguments.forEach((arg, index) => {
             const argType = this.getExpressionType(arg);
+            /*
+            A parameter list shorter than the argument list can still reach this
+            loop. `resolveOverloadedCall` reports it when no version of a shared
+            name takes these arguments, and the `shared` flag below suppresses
+            the count check as well -- so nothing returns, and an out-of-range
+            read here is what a TypeError looks like.
+
+            The loop above guards the same index for the same reason. By this
+            point the diagnostics for this call are already written; what is
+            left needs a parameter to do anything with, so the argument that has
+            none is simply left alone.
+            */
+            if (index >= expectedParams.length) return;
             const expectedType = expectedParams[index].type;
             
             /*
