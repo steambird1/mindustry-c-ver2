@@ -1,3 +1,6 @@
+/* KNOWN-GAP: never finishes: main draws inside `while (true)` by design -- a real
+   processor runs forever too.
+*/
 // Example 8: Start RTG generator group in accordance with current
 // This will use getlink() to control as many RTG generators as possible
 // so there's no need to use pseudo list

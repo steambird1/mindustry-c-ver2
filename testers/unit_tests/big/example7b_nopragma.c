@@ -1,3 +1,6 @@
+/* KNOWN-GAP: never finishes: main binds and executes units inside `while (true)` by
+   design -- a real processor runs forever too.
+*/
 #pragma optimize(array)
 
 /**

@@ -19,7 +19,7 @@ is the web server's, and there is no server here. Answering it from the
 project's own `include/` directory is what makes the header tests runnable
 from Node at all.
 */
-const INCLUDE_ROOT = path.resolve(import.meta.dirname ?? '.', 'include');
+const INCLUDE_ROOT = path.resolve(import.meta.dirname ?? '.', '..', '..', 'include');
 const nodeFetch = globalThis.fetch;
 globalThis.fetch = async (url, options) => {
 	const text = String(url ?? '');
@@ -37,10 +37,11 @@ globalThis.fetch = async (url, options) => {
 `#include "something.js"` pulls in a COMPILER EXTENSION (a set of extra types,
 functions and code generators). In the browser the lexer does
 `import('/include/something.js')`; there is no server here, so the extension is
-loaded from `src/ext/` instead and handed to the Compiler directly -- and the
-`#include` line is commented out, so the lexer does not try the import and fail.
+loaded from the repository-root `include/` instead and handed to the Compiler
+directly -- and the `#include` line is commented out, so the lexer does not try
+to import it and fail.
 */
-const EXT_ROOT = path.resolve(import.meta.dirname ?? '.', 'src', 'ext');
+const EXT_ROOT = path.resolve(import.meta.dirname ?? '.', '..', '..', 'include');
 const extensionCache = new Map();
 async function loadNamedExtension(name) {
 	if (extensionCache.has(name)) return extensionCache.get(name);

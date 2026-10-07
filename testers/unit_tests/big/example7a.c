@@ -1,3 +1,6 @@
+/* KNOWN-GAP: never finishes: main is `while (true) { bindUnits(); }` by design -- a real
+   processor runs forever too.
+*/
 // Example 7a: Simplified version
 // (with only unit binding)
 // Automatically gather specified units around the player.

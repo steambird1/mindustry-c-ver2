@@ -5,7 +5,7 @@ import fs from 'fs';
 import { Compiler } from '../../mindc.js';
 import { AttributeClass } from '../../mindcBase.js';
 import { MemoryBlock } from '../../mindcGeneratorBase.js';
-import { runProgram, makeDevice, defaultLinks } from '../sim.mjs';
+import { runProgram, makeDevice, defaultLinks } from './sim.mjs';
 
 const blocks = [{ name: 'cell1', size: 64 }, { name: 'cell2', size: 64 }];
 

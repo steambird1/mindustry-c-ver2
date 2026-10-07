@@ -6251,10 +6251,10 @@ export class SemanticAnalyzer extends ASTVisitor {
         the same thing here: the array is described, not stored.
         */
         const rep = symbol.arrayParamRep ?? null;
-        if (rep === 'handle' || rep === 'remote' || rep === 'names') return 'handle';
+        if (rep === 'handle') return 'handle';
         if (rep === 'traditional') return 'memory';
         const requested = symbol.requestedArrayImplementation ?? null;
-        if (requested) return (requested === 'traditional') ? 'memory' : 'register';
+        if (requested) return (requested === 'traditional') ? 'memory' : null;
         if (this.compiler?.arrayOptimize === true) return null;
         return 'memory';
     }

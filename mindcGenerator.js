@@ -1537,8 +1537,7 @@ export class CodeGenerator extends ASTVisitor {
 				through a register that is still 0 -- an endless loop.
 				*/
 				if (sym.myType?.()?.kind === 'array'
-					&& (sym.arrayParamRep === 'handle' || sym.arrayParamRep === 'remote'
-						|| sym.arrayParamRep === 'names')) {
+					&& sym.arrayParamRep === 'handle') {
 					const base = sym.getAssemblySymbol();
 					return [InstructionBuilder.set(base, paramName)];
 				}
@@ -3749,8 +3748,7 @@ export class CodeGenerator extends ASTVisitor {
 		stops the array from being given memory of its own, and what lets
 		`arraySymbolOf` pick the by-name path instead of stepping a pointer.
 		*/
-		if (symbol?.arrayParamRep === 'handle' || symbol?.arrayParamRep === 'remote'
-			|| symbol?.arrayParamRep === 'names') {
+		if (symbol?.arrayParamRep === 'handle') {
 			return { type: 'embedded', implement: 'divided', reason: 'array parameter' };
 		}
 		/*
@@ -3834,8 +3832,7 @@ export class CodeGenerator extends ASTVisitor {
 		reach an array that has no address -- and the only way that writes back
 		into the caller's array.
 		*/
-		if (symbol?.arrayParamRep === 'handle' || symbol?.arrayParamRep === 'remote'
-			|| symbol?.arrayParamRep === 'names') {
+		if (symbol?.arrayParamRep === 'handle') {
 			/*
 			The parameter holds a HANDLE: two registers with the entry points of
 			the get / set helpers of the array it was handed. No device register

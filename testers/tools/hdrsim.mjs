@@ -11,7 +11,7 @@ globalThis.fetch = async (url) => {
 const { Compiler } = await import('../../mindc.js');
 const { AttributeClass } = await import('../../mindcBase.js');
 const { MemoryBlock } = await import('../../mindcGeneratorBase.js');
-import { runProgram, defaultLinks } from '../sim.mjs';
+import { runProgram, defaultLinks } from './sim.mjs';
 
 const cfg = new AttributeClass(); cfg.setAttribute('targetVersion', 154.3);
 const log = console.log; console.log = () => {};

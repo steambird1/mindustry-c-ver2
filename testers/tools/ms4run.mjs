@@ -2,7 +2,7 @@ import fs from 'fs';
 import { Compiler } from '../../mindc.js';
 import { AttributeClass } from '../../mindcBase.js';
 import { MemoryBlock } from '../../mindcGeneratorBase.js';
-import { runProgram, makeDevice } from '../sim.mjs';
+import { runProgram, makeDevice } from './sim.mjs';
 const cfg = new AttributeClass(); cfg.setAttribute('targetVersion', 154.3);
 const log = console.log; console.log = () => {};
 const blocks = [{ name: 'bank1', size: 64 }];
