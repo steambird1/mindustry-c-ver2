@@ -10,19 +10,21 @@ Where the two overlap, this one is the one to trust for status — auditing it t
 three claims in the plan that did not survive checking, all corrected in place and
 marked below.
 
-Everything here was measured against `94f5737` and re-checked at `f391690`. Line
-numbers drift; symbol names do not, so each item cites both and the symbol is the thing
-to grep for.
+Everything here was measured against `94f5737`, re-checked at `f391690`, and the status
+rows below were refreshed at `245c163` — every suite was re-run then, and the defects in
+§3.3–§3.6 were each re-measured against `2dc683e` (before this work's phases) to confirm
+none of them was caused by a phase. Line numbers drift; symbol names do not, so each item
+cites both and the symbol is the thing to grep for.
 
 Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 172 passed, 0 failed (97 shape assertions, 747 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 50 passed, 0 failed, 2 known gaps |
+| `node ../tools/check.mjs` | 174 passed, 0 failed (102 shape assertions, 757 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 51 passed, 0 failed, 2 known gaps |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
-| `node ../tools/runall.mjs` | 101/101 |
+| `node ../tools/runall.mjs` | 265/277 — the 12 misses are reported as known gaps, not failures |
 
 The two invariants any new work has to keep:
 
@@ -34,34 +36,42 @@ The two invariants any new work has to keep:
 ## Where everything stands
 
 One line per item, so this file can be read a piece at a time. The reasoning is where the
-last column says, and the order of work is the order of the rows: **§1 and §2 first, then
-§7** — §7 moves ahead only if it gets in the way of finishing them.
+last column says, and the order of work is the order of the rows: **§1 and §2 are closed** —
+their work rows read done or struck, and §1.5 records what the closure left open — so the
+§7 decisions and the §3 defects without a decision are what is left.
 
 | item | state | detail |
 |---|---|---|
-| 3a — decide `chosenArrayStyle` at semantic time | not started — a split, not a hoist | §1.1 |
-| 3b — delete the dead `'register'` return | not started — no dependencies | §1.2 |
-| 3c — delete the six dead `'remote'` / `'names'` reads | not started — safe | §1.3 |
+| 3a — decide `chosenArrayStyle` at semantic time | **done** — `07636d0`; a split, not a hoist | §1.1 |
+| 3b — `arrayImplementationOf` reads the decision | **done** — `2dc683e` + `8e54302` | §1.2 |
+| 3c — delete the six dead `'remote'` / `'names'` reads | **done** — `2dc683e` | §1.3 |
 | 3d — `isRequireMem()` consults the canonical style | **struck — do not implement** | §1.4 |
-| Phase 7: `MESSAGE:` on the 28 negative cases | not started | §2.1 |
-| typedef'd data pointer, second half | not started | §2.2 |
-| remote-`&x` difference regression | not started | §2.3 |
+| the `null === null` comparison the payoff left open | **open** — needs a decision | §1.5 |
+| Phase 7: `MESSAGE:` on the 28 negative cases | **done** — `1584cf3` | §2.1 |
+| typedef'd data pointer, second half | **done** — `245c163`, `check/t160` | §2.2 |
+| remote-`&x` difference regression | **done** — `245c163`, `check/t161` | §2.3 |
 | out-of-bounds subscript | **deferred by decision** — options written down | §2.4, §7.4 |
-| a case for the zero-candidate overload refusal | not started | §2.5 |
+| a case for the zero-candidate overload refusal | **done** — `1584cf3` | §2.5 |
 | `'x'` loses its text (§3.1) | **decided** — `int`, ASCII value; fix after §1–§2 | §7.1 |
 | `for (int i = 0; …)` (§3.2) | **decided** — support it, and the empty clauses; fix after §1–§2 | §7.2 |
+| both `stackcheck` overflow paths trap (§3.3) | **recorded** — no decision yet | §3.3 |
+| `&global_array[i]` / `&global_struct.field` (§3.4) | **recorded** — no decision yet | §3.4 |
+| `compiler.arrayOptimize` reads a flag nobody sets (§3.5) | **recorded** — no decision yet | §3.5 |
+| same-layout array assignment does not copy (§3.6) | **recorded** — no decision yet | §3.6 |
 | `m = remote(@this, r)` (§6) | **decided** — fix it; the shape needs analysis first | §7.3 |
-| §4 harness debt | fix it while testing | §4 |
+| §4 harness debt | **closed** — fixed in `2dc683e`, §4.4 corrected below | §4 |
 
 ---
 
 ## 1. Phase 3 — the canonical array decision
 
-**None of 3a, 3b, 3c and 3d is done.** The plan recorded 3b as done; that was wrong, and
-§1.2 below says what it actually achieved. The short version: the phase's goal is one
-decision point for how an array is stored, and today that decision is still made in the
-generator, re-derived a second time in semantic analysis, and — in one place — answered
-correctly for a different question than the plan assumed.
+**All four are disposed of.** The plan recorded 3b as done early; that was wrong when
+written, and §1.2 below says what it had actually achieved then and what closed it. What
+landed: 3a as a split, not a hoist (`07636d0`); 3b in two steps (`2dc683e`, `8e54302`);
+3c (`2dc683e`); 3d struck (§1.4). The sections below keep the measurements that shaped
+each decision — they are why the implementations look the way they do — and each now ends
+with what was done about it. One promise from §1.1's verification did not land, and it is
+written down as §1.5.
 
 ### 1.1 3a cannot be done as written: the inputs do not exist yet
 
@@ -105,6 +115,18 @@ read the same fact, and that hole closes. `null === null` becoming a real "undec
 state is the other half of the payoff, and it only works because the generator can no
 longer be the only place that knows.
 
+**Done in `07636d0`** — as the split, not the hoist: semantic time settles exactly the
+four classes that exist at semantic time (parameter representation, `isRemote`, volatile,
+a non-lookup `array()` request) in a new `finalizeArrayStyles()` pass, and the generator
+keeps everything whose inputs are its own (memory budget, initial values, `lookup`
+categories, recursion). What the final design rejected about the suggested implementation
+above — semantic-time `selectArrayImplementation` and the `narrowArrayImplementation`
+half — and the measurements behind that rejection are in the plan's Phase 3 section.
+The verification's first half landed: after `8e54302`, `arrayImplementationOf` and
+`arrayStyleFor` read each other and cannot disagree. The second half — `null === null`
+becoming a real, distinct state — did **not** land, and §1.5 writes down what is
+actually reachable.
+
 ### 1.2 3b — `arrayImplementationOf` still re-derives
 
 > `arrayImplementationOf` stops re-deriving; `'register'` is retired.
@@ -137,6 +159,18 @@ independent of 3a:
 `remote` array must report the same implementation from `arrayImplementationOf` as from
 the generator's `arrayStyleFor`. Today they are two functions that can disagree, and
 `refuseIncompatibleArrayAssignment` is where that would show.
+
+**Done in two steps.** `2dc683e` deleted the `'register'` return — the first bullet
+above — and no call site noticed, as the measurement predicted. `8e54302` did the second
+bullet: `arrayImplementationOf` now asks `arrayStyleFor` and maps the style's reason onto
+the words its five call sites know, so the two derivations cannot disagree — the
+verification above, landed. Two answers moved as a result of reading the canonical
+decision: an alias of a remote array now answers `'remote'` (the function follows the
+alias now), and a volatile array reaches `'memory'` through its style instead of by
+falling through to the default — the same answer as before, now stated by the decision
+rather than by accident (the branch meant to answer "undecided" under
+`#pragma optimize(array)` is dead, §3.5). All five suites stayed green at `8e54302`.
+What remains of this item's promise is §1.5.
 
 ### 1.3 3c — the dead reads, and this one is safe to delete
 
@@ -201,6 +235,10 @@ available to observe, so the tests are the only evidence there is — which is a
 is worth doing now, while the code is fresh, rather than as part of a larger change where
 a regression would be hard to attribute.
 
+**Done in `2dc683e`.** All six reads are gone — both shapes, the `sym` guard collapsed to
+`kind === 'array' && arrayParamRep === 'handle'` with the comment above it kept — the
+`'handle'` disjuncts stayed, and the suites were green at that commit.
+
 ### 1.4 3d — drop it; it is answering a different question
 
 > `isRequireMem()` consults the canonical style, so a handled array is not given memory
@@ -245,18 +283,43 @@ for storage they do not use, that cost does not exist and the item closes. The
 `null_block` / `null_pos` pair that *does* appear in every program is the Phase 5
 unbound-handle trap and is deliberate — it is what makes an unbound handle fail loudly.
 
+### 1.5 The payoff's second half is open: `null` is not one state
+
+§1.1's verification promised that once both sides read the same fact, `null === null`
+would become a real "undecided" state. The first half landed at `8e54302` — the two
+functions cannot disagree. What did not land: `null` still answers for several *different*
+layouts, and the comparison cannot tell them apart.
+
+Measured, all accepted by the compiler today:
+
+| assignment | the two answers | outcome |
+|---|---|---|
+| `int a[4]; int b[4]; a = b;` | `'memory'` `'memory'` | admitted — and then it does not copy (§3.6) |
+| `array("encoded")` assigned to `array("encoded")` | `null` `null` | admitted — a silent no-op (§3.6) |
+| `array("embedded")` assigned to `array("encoded")` | `null` `null` | **admitted although the layouts differ** — the hole proper |
+| two plain arrays under `#pragma optimize(array)` — the case §1.1 predicted | would be `null` `null` | **cannot occur**: the flag that would make them `null` is never set (§3.5) |
+
+So the reachable hole is narrower than written down: it needs two differently-*named*
+non-traditional layouts, which is unusual code — but it is silently accepted today while
+the refusal it would hit says "not stored the same way", i.e. the compiler already
+considers differing layouts a reason to refuse. The decision this needs is small and
+belongs with §3.5 and §3.6, which are the same mismatch seen at run time: either `null`
+has to carry the layout it is hiding, or `null === null` has to refuse and the
+identically-named pair gets refused beside it until the comparison can see they match.
+
 ---
 
 ## 2. Phase 7 — test debt
 
-Not started. Four items; the width/size matrix is done (`check/t13`–`t17`, `t25`, `t32`,
-`t39`, `t44`, `t45`) and is not repeated here.
+**Done.** Four items: the width/size matrix was already complete (`check/t13`–`t17`,
+`t25`, `t32`, `t39`, `t44`, `t45`, not repeated here); the other three closed at
+`1584cf3` and `245c163`, each recorded in its section below.
 
 ### 2.1 `MESSAGE:` on 30 negative cases
 
-**30 of the 52 cases in `testers/unit_tests/negative/` have no `MESSAGE:`**; 22 do. They
-pass on "did it fail" alone, so deleting the check that refuses them turns the case green
-rather than red.
+**30 of the 52 cases then in `testers/unit_tests/negative/` had no `MESSAGE:`**; 22 did.
+They pass on "did it fail" alone, so deleting the check that refuses them turns the case
+green rather than red. (53 files there today: `ovl_shared_noversion.c` joined in §2.5.)
 
 Two of the 30 are the reported `KNOWN-GAP`s — `ovl_auto.c` and `ovl_pragma.c`, where the
 compiler accepts the program today, so there is no message to match. The other 28 are
@@ -274,6 +337,13 @@ Add one `MESSAGE:` per distinct reason, not one per error — a case that quotes
 message it happens to produce stops discriminating the moment an unrelated error appears
 alongside.
 
+**Done in `1584cf3`.** All 28 carry `MESSAGE:` lines taken from the compiler's own
+wording (regex-escaped, short unique prefixes), the runner gained `NOT-MESSAGE:` so a
+case can also forbid an error, and the two known gaps stand: the compiler accepts those
+programs, so there is no message to match, and the runner reports them on their own line
+instead of passing them quietly. The rule applied throughout is the one above — one
+`MESSAGE:` per distinct refusal reason.
+
 ### 2.2 Typedef'd **data** pointer, the second half
 
 `check/t40_typedef_data_pointer.c` covers the first half, done in Phase 1. What is still
@@ -282,12 +352,28 @@ pointer — not a function pointer — used in a way that reaches the alias buil
 re-checking rather than writing fresh, because Phases 5 and 6 added handle typedefs and
 the shape may now be covered by accident.
 
+**Re-checked, then done in `245c163` as `check/t160`.** The re-check found no accidental
+coverage: no test from Phases 5 or 6 contains a `typedef` at all — the only typedef'd data
+pointers in the tree were t40 and t41, both first-half. t160 walks the alias builder's
+remaining paths: an alias of an alias (the copy path, no pointer wrap), the typedef'd
+pointer as a PARAMETER written through, an element of a local array, and a pointer whose
+target is itself a typedef'd array. The global-array shape (`&arr[i]` on a global) is
+deliberately absent: probing it exposed a pre-existing defect instead, recorded as §3.4,
+and the file's header says so.
+
 ### 2.3 A dedicated remote-`&x` regression
 
 `check/t118_addr_of_remote.c` partly covers it. The dedicated test should assert that
 remote and non-remote `&x` produce **different** code — Phase 4's actual finding was that
 `remote int x[4]` and `int x[4]` generated byte-identical code, so the discriminating
 assertion is the difference itself, not either side of it.
+
+**Done in `245c163` as `check/t161`.** The difference itself, from both directions:
+`widthof` constant-folds into the emitted `print`, so the two `EMIT` lines *are* the
+widths — 1 for the remote address, 2 for a memory pair, where Phase 4's bug made both
+`print 2` — and three `EMIT-NOT` lines forbid either address taking the other's form.
+t118 keeps asserting each side's positive form; t161 states the difference with its own
+names, so the guard survives t118 being trimmed and nothing is asserted twice.
 
 ### 2.4 Out-of-bounds subscripting — a design question, not a fix
 
@@ -300,7 +386,7 @@ s[5] = 7;      // silently succeeds, and prints 7
 This is C-like permissiveness versus trapping, and it is **not** a blind fix: a bound
 check changes codegen for every subscript in the language, and it changes what existing
 correct programs do. It needs a decision and a scope, not a patch. Whoever takes it should
-start by finding out how many of the 342 driven cases would notice — that number is the
+start by finding out how many of the 521 driven cases would notice — that number is the
 real cost.
 
 **Deferred by decision.** The options, and what each costs, are written down in §7.4.
@@ -327,12 +413,20 @@ the runner does not have: **`NOT-MESSAGE: <regex>`**, one per line, failing the 
 any error matches. That is a small runner change, and it is the only shape that can
 assert silence.
 
+**Done in `1584cf3`.** `negative/ovl_shared_noversion.c` is the case written above (two
+`add` versions, four arguments: red on the old compiler as `refused, but with no message`,
+green since), and the runner change exists — `negative.mjs` reads `NOT-MESSAGE:` lines
+and fails the case if any error matches them. The count message coming back alongside
+`No version of …` is now asserted against, not just suspected.
+
 ---
 
 ## 3. Defects found while auditing, in no plan
 
-Both were surfaced by probing the arity fix and neither is reachable from an overload.
-Both are pre-existing; neither is attributable to a phase.
+The first two were surfaced by probing the arity fix and neither is reachable from an
+overload. The last four were surfaced while closing §1 and §2. All are pre-existing —
+§3.3–§3.6 were each re-measured against `2dc683e`, before this work's phases — and none
+is attributable to a phase.
 
 ### 3.1 Single-quoted character literals lose their text
 
@@ -374,49 +468,158 @@ Worth deciding deliberately: either the dialect does not support C99-style decla
 in for-init, in which case the parser should say so in one line instead of four plus a
 crash, or it should support them. What it should not do is both.
 
+### 3.3 Both `stackcheck` overflow paths trap instead of reporting
+
+`stack/so1.c` — the default behaviour, write a fixed message to `__error` and stop — runs
+clean and is among runall's passing cases. The two pragma variants do not: they carry
+`KNOWN-GAP` annotations in the cases themselves, and this is the record those annotations
+point at (`Defect: docs/OPEN_WORK.md 3.3`).
+
+| case | pragma | what happens |
+|---|---|---|
+| `stack/so2.c` | `stackcheck(onOverflow)` | the handler returns with `__stackframe_block` left at -1; the next frame allocation does `getlink` on it, gets null, and the walker reads through it — `TRAP: Cannot read properties of null (reading 'cells') (at instruction 34: read __block __curptrblock 2)` |
+| `stack/so3.c` | `stackcheck()` | no capacity guard is emitted at all, so on exhaustion the walker follows `next block = -1` off the chain and reads through a null link — the same trap |
+
+Same trap, two different omissions: the overflow handler does not restore the frame, and
+the no-argument form does not check. The decision to make before fixing is what
+`stackcheck()` with no arguments *promises* — "no check, running out is the contract"
+(and then the crash should still be a clean report, like so1's) or "fall back to the
+default guard". so1's path is the working precedent either way. Annotated and known since
+`2dc683e`; deferred, no decision yet.
+
+### 3.4 The address of a global array element or struct field
+
+```c
+int arr[4] = {2, 3, 4, 5};
+void main() { int *t = &arr[2]; print(*t); … }
+```
+
+compiles without complaint and then misbehaves at run time. Measured shape, one plain
+`int` pointer throughout:
+
+| program | outcome |
+|---|---|
+| `int *t = &arr[2]; print(*t);` — global array | **trap**: `memory index 2 out of range for message1 (at instruction N: read … __curb … t_pos)` — the generated read resolves to `message1` at the raw element index instead of to the array's storage |
+| `&arr[0]` — the same, index 0 | **trap**, same shape |
+| `&arr[2]` passed into a function and dereferenced there | **trap**, same shape |
+| `int *t = &s.b;` — global struct field | **step limit exceeded** — never terminates |
+| `&g` — global scalar | works |
+| `print(arr[2])` — direct subscript, no address taken | works |
+| `&a[2]` — element of a *local* array | works |
+| typedef'd or plain pointer | identical either way — a typedef is not involved |
+
+Taking the address works; building the block/offset pair the dereference of a *global's*
+element needs does not — that local/global split is the shape of the bug. Verified
+identical at `2dc683e` (before this work), so no phase caused it. Pre-existing; deferred,
+no decision yet — until it is fixed, tests that take addresses stay on local arrays
+(`check/t160` says so in its header).
+
+### 3.5 `compiler.arrayOptimize` is read twice and set nowhere
+
+Two reads decide what an auto-chosen array layout answers:
+
+- `arrayImplementationOf` (`mindcSemantic.js`, the `arrayOptimize` line): `return null` —
+  the "genuinely undecided" path §1.2 credited Phase 6 with adding;
+- `autoRepresentationOf` (`mindcSemantic.js:5747`): the comment above it says *"the choice
+  is not visible here … so refuse instead"*, then `return 'ambiguous'` — the refusal.
+
+Neither can fire. `#pragma optimize(array)` writes `optimizerConfig.doArrayOptimize`
+(`mindc.js:394`) and optionally `optimizerConfig.arrayOptimize = JSON.parse(...)`, an
+*object*, at `:396`; every other reader picks the config up as
+`extraConfig.getAttribute('optimizeOption')` — `mindcGenerator.js:363`,
+`mindcOptimizer.js:368`, `mindcSemantic.js:5084`. A repo-wide search finds no assignment
+to a property `compiler.arrayOptimize` at all, and `=== true` could not match the object
+form anyway.
+
+Measured consequence: under `#pragma optimize(array)` a plain array still answers
+`'memory'` from `arrayImplementationOf` — `int a[4]; int c[4] = array("encoded", …); a = c`
+is refused with *"an array in memory"* for the plain side, at `245c163` **and** at
+`2dc683e`. And in `autoRepresentationOf` the `'ambiguous'` refusal never happens: auto
+versions always take the `'memory'` guess the comment directly above it says to avoid.
+
+The fix is a decision, not a deletion: what *should* `optimize(array)` answer here —
+`null` (undecided, refuse in both directions) or `'memory'` (what happens today, by
+accident)? The optimizer's own behaviour under the pragma is untouched; only these two
+reads are dead. Deferred, no decision yet.
+
+### 3.6 Same-layout array assignment is accepted and does not copy
+
+`refuseIncompatibleArrayAssignment` (`mindcSemantic.js:4253`) refuses arrays whose layouts
+differ and admits the rest — and the refusal's own wording ("not stored the same way")
+says matching layouts are the precondition for the exchange. Measured, the admitted cases
+then do not exchange anything:
+
+| program | outcome |
+|---|---|
+| `a = b`, two plain globals `{1,2,3,4}` / `{5,6,7,8}`, `print(a[0])` after | accepted, `a[0]` reads **0** — neither its old 1 nor b's 5 |
+| the same, both local | accepted, `a[0]` reads **0** |
+| `c = d`, both `array("encoded")`, `print(c[0])` after | accepted, `c[0]` unchanged — a silent no-op |
+| `array("embedded")` assigned to `array("encoded")` | accepted (that is §1.5's hole), also a no-op |
+| `for (i = 0; i < 4; i++) a[i] = b[i];` — the manual version | copies correctly: `5` |
+| `x = y` inside a function on two array parameters | the one form that changes the left side: `5` |
+
+All of it reproduced at `2dc683e`, so no phase caused it — and nothing in the 521 driven
+cases pins what the assignment is *meant* to do (all five suites are green through
+`245c163`). The semantics need deciding before any fix: copy element-wise, which is what
+the parameter form suggests, or refuse outright, which is what C does (arrays are not
+assignable). Distinct from §5's `s = b;` no-op, which is a handle *parameter* and was
+decided there.
+
 ---
 
 ## 4. Harness debt
 
-### 4.1 Six tools import `sim.mjs` from the wrong directory
+### 4.1 Six tools imported `sim.mjs` from the wrong directory — fixed in `2dc683e`
 
 `ex6run.mjs`, `hdrsim.mjs`, `ms2run.mjs`, `ms3run.mjs`, `ms4run.mjs` and `pdtest.mjs` all
-`import … from '../sim.mjs'`, but they live in `testers/tools/` next to `sim.mjs`. The
-fix is `'./sim.mjs'` in six files. Deliberately left alone during the documentation pass
-as out of scope; it is listed here because it is the cheapest thing on this list.
+`import … from '../sim.mjs'`, but they live in `testers/tools/` next to `sim.mjs`. Fixed
+to `'./sim.mjs'` in `2dc683e` — it was the cheapest thing on this list. Left alone: the
+same-shaped files under `testers/unit_tests/tools/`, which import `'../sim.mjs'` where no
+`sim.mjs` exists; they are not entry points of any runner and nothing imports them, so
+there is nothing to fix for.
 
-### 4.2 `runall.mjs` omits `stack/`
+### 4.2 `runall.mjs` omitted `stack/` — fixed in `2dc683e`, the gap is §3.3
 
-`runall.mjs:3` walks `['suite', 'mem', 'arr', 'arr2', 'ptr2']` — 101 cases. The three
-cases in `testers/unit_tests/stack/` (`so1.c`, `so2.c`, `so3.c`, the last two using
-`#pragma stackcheck`) are in no runner at all, so `#pragma stackcheck` currently has **no
-coverage**: a change that broke it would be invisible to all five suites.
+`runall.mjs:3` walked `['suite', 'mem', 'arr', 'arr2', 'ptr2']` — 101 cases — while the
+three cases in `testers/unit_tests/stack/` (`so1.c`, `so2.c`, `so3.c`, the last two using
+`#pragma stackcheck`) were in no runner at all. Fixed in `2dc683e`: the directory list
+carries 14 directories and 277 cases, and `KNOWN-GAP:` lines report known-broken cases on
+their own line instead of failing the run (12 today, `stack/so2` and `stack/so3` among
+them). So `#pragma stackcheck` is now driven — one passing case (`so1.c`) and two
+documented failures. What is wrong with the two is recorded as §3.3.
 
-### 4.3 176 cases have no runner
+### 4.3 "176 cases have no runner" — stale; re-measured, all 521 are driven
 
-518 `.c` files live under `testers/unit_tests`. 342 are driven: 101 by `runall.mjs`, 172
-by `check.mjs`, 52 by `negative.mjs`, 7 by `nomem.mjs`, and 10 `check/peers/*.c`
-programs driven by `check.mjs` on behalf of their owners. The remaining **176** are in nine
-directories that no runner reads:
+The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
+runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files under
+`testers/unit_tests`, every one of them driven —
 
-| dir | cases | | dir | cases |
-|---|---|---|---|---|
-| `t/` | 100 | | `hdr/` | 12 |
-| `tests/` | 25 | | `big/` | 8 |
-| `uc/` | 15 | | `exttests/` | 4 |
-| `u/` | 6 | | `cases/` | 3 |
-| `stack/` | 3 | | | |
+| runner | cases | covers |
+|---|---|---|
+| `check.mjs` | 174 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `negative.mjs` | 53 | `negative/` |
+| `nomem.mjs` | 7 | `nomem/` |
+| `runall.mjs` | 277 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-`exttests/` is a special case: extension loading does not work at all, so those four cases
-prove nothing either way.
+174 + 10 + 53 + 7 + 277 = 521. The caveat that replaces "no runner" is weaker but real:
+most of those directories are driven *by runall*, whose bar is "it ran" — only two files
+in the whole tree carry an `EXPECT:` line. Assertion density per directory is
+`testers/INFO.md`'s subject, not this file's.
 
-### 4.4 Extension loading is dead, and `runsim.mjs` does not notice
+### 4.4 Extension loading: roots fixed in `2dc683e`, the warning note unreconciled
 
-`mindc.js:322` says `extensions (Currently not working!!!)`, and `runsim.mjs` points
-`EXT_ROOT` (`:43`) at `testers/tools/src/ext/`, which does not exist, so the
-`collectExtensions` that resolves includes against it (`:58`) finds nothing. So
-`#include "*.js"` is silently skipped, and a case relying on an extension would pass by
-accident rather than fail.
+The original claim was that `runsim.mjs` pointed `EXT_ROOT` at `testers/tools/src/ext/`,
+which does not exist, so `collectExtensions` found nothing, `#include "*.js"` was
+silently skipped, and a case relying on an extension would pass by accident. Fixed in
+`2dc683e`: `EXT_ROOT` and `INCLUDE_ROOT` now point at the repository's top-level
+`include/`, which exists and carries `.h` and `.js` files, and all four `exttests/` cases
+pass through the include→extension path — the silent-skip scenario no longer holds for
+them.
+
+Still unreconciled: `mindc.js:322` says `extensions (Currently not working!!!)`. Either
+that note is stale or the four tests do not reach the part it warns about; resolving it
+needs someone to read what "not working" meant when it was written, and no suite can
+settle it. Recorded, deferred.
 
 ---
 
@@ -456,8 +659,9 @@ Listed so it is not re-investigated. Each was hit while probing and none has a c
 
 ## 7. Decisions on the defects in §3 and §6
 
-Recorded so these are not re-opened, and in the order they were given: **§1 and §2 first**,
-then the three below — or earlier, but only if they get in the way of finishing them.
+Recorded so these are not re-opened, in the order they were given. **§1 and §2 are
+closed**, so the four below are now eligible in their own order. The defects §3.3–§3.6
+arrived later and carry no decision yet — do not start any of them without one.
 
 ### 7.1 `'x'` is an `int` holding its ASCII value
 

@@ -13,11 +13,11 @@
 
 | 命令（从 `testers/unit_tests` 执行） | 读哪个目录 | 当前结果 | 判定标准 |
 |---|---|---|---|
-| `node ..\tools\check.mjs` | `check/` | **171 passed, 0 failed**（94 shape assertions, 743 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
-| `node ..\tools\negative.mjs` | `negative/` | **49 passed, 0 failed, 2 known gaps** | 必须编译失败，**且给出说得清的理由** |
+| `node ..\tools\check.mjs` | `check/` | **174 passed, 0 failed**（102 shape assertions, 757 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
+| `node ..\tools\negative.mjs` | `negative/` | **51 passed, 0 failed, 2 known gaps** | 必须编译失败，**且给出说得清的理由** |
 | `node ..\tools\nomem.mjs` | `nomem/` | **7 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
 | `node ..\tools\loadorder.mjs` | 仓库根的 `mindc*.js` | **12 passed, 0 failed, 2 exempt** | 每个入口单独起一个 `node` 进程导入，不得有循环依赖 |
-| `node ..\tools\runall.mjs` | `suite/` `mem/` `arr/` `arr2/` `ptr2/` | **101/101** | 只要求「能编译、能跑完不崩」 |
+| `node ..\tools\runall.mjs` | 14 个目录：`suite/` `mem/` `arr/` `arr2/` `ptr2/` `stack/` `tests/` `uc/` `cases/` `exttests/` `hdr/` `t/` `big/` `u/` | **265/277**（12 个已知坏例以 KNOWN-GAP 如实上报，不算失败） | 能编译、能跑完不崩；带 `EXPECT:` 的还比对输出 |
 
 默认给两块 64 格内存（`bank1`、`bank2`），目标版本 154.3。
 `loadorder.mjs` 豁免 `mindcCompileWorker.js` 与 `mindcHighlightWorker.js`（它们需要 `self`）。
@@ -31,7 +31,8 @@
 ## 注解
 
 注解写在用例的注释里，由 `testers/tools/annotations.mjs` 统一解析——`check.mjs`、
-`negative.mjs`、`nomem.mjs` 三个 runner 共用它。`loadorder.mjs` 和 `runall.mjs` 不用注解。
+`negative.mjs`、`nomem.mjs` 三个 runner 共用它。`runall.mjs` 也用注解，但只读它自己
+认识的两条（`KNOWN-GAP`、`EXPECT`，见下表）；`loadorder.mjs` 不用注解。
 下面三条规则都是踩过坑之后加的，改解析器前先读那个文件的头注释：
 
 1. **注解值是整行**，可以含 `*`。早先 `check.mjs` 用 `([^*]*)` 读值，
@@ -50,12 +51,14 @@
 | `NO-INVARIANT` | `check/` | 跳过下面的 pragma 不变性重跑 |
 | `NO-INVARIANT: optimize(array)` | `check/` | 只跳过列出的这几个 pragma |
 | `MESSAGE: <正则>` | `negative/` | 错误信息**必须**匹配一条（每行一条） |
+| `NOT-MESSAGE: <正则>` | `negative/` | 错误信息**不得**匹配任何一条（每行一条）；用来断言「保持沉默」 |
 | `NOMEM` | `negative/` | 这个用例在无内存块下编译 |
 | `VERSION: 140` | `negative/` | 用旧目标版本编译 |
-| `KNOWN-GAP: <理由>` | `negative/` | 编译器今天会接受它；如实上报，不算通过 |
+| `KNOWN-GAP: <理由>` | `negative/`、`runall/` | 今天达不到标准（`negative/` 是编译器接受它）；如实上报，不算通过。`runall.mjs` 还会在它开始通过时点名注解过期 |
+| `EXPECT: a b c` | `runall/` | 期望输出，与 `check.mjs` 同样的逐行比对；全树只有 2 个文件带它 |
 
 `check/` 的 pragma 不变性：每个用例都会被加上各种 `optimize(...)` 变体**重跑一遍**，
-输出必须完全一致。**任何 pragma 都不得改变程序输出。** 目前 171 个用例里
+输出必须完全一致。**任何 pragma 都不得改变程序输出。** 目前 174 个用例里
 没有任何一个声明 `NO-INVARIANT`。
 
 重跑时变体是写成**真实文件**（`check/<名字>__INV.c`）再交给 `simulate` 的，不是把
@@ -64,41 +67,35 @@
 
 ## 目录地图
 
-`testers/unit_tests/` 下共 516 个 `.c`，其中 **340 个被 runner 覆盖，176 个没有**。
-
-### 被 runner 覆盖
+`testers/unit_tests/` 下共 **521 个 `.c`，全部有 runner**（174 + 10 + 53 + 7 + 277 = 521）：
 
 | 目录 | 文件数 | 谁来跑 |
 |---|---|---|
-| `check/` | 171 | `check.mjs` |
-| `negative/` | 51 | `negative.mjs` |
-| `mem/` | 25 | `runall.mjs` |
+| `check/` | 174 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
+| `t/` | 100 | `runall.mjs`（早期按主题分的用例，`2dc683e` 起纳入） |
+| `negative/` | 53 | `negative.mjs` |
 | `suite/` | 50 | `runall.mjs` |
+| `mem/` | 25 | `runall.mjs` |
+| `tests/` | 25 | `runall.mjs`（另有手工的 `batch.mjs [baseline]`） |
+| `uc/` | 15 | `runall.mjs` |
 | `ptr2/` | 13 | `runall.mjs` |
+| `hdr/` | 12 | `runall.mjs`（另有手工的 `hdr.mjs` / `hdrsim.mjs`） |
 | `arr2/` | 11 | `runall.mjs` |
+| `peers/` | 10 | 不是独立用例：由 `check.mjs` 代它们的属主跑 |
+| `big/` | 8 | `runall.mjs` |
 | `nomem/` | 7 | `nomem.mjs` |
+| `u/` | 6 | `runall.mjs` |
+| `exttests/` | 4 | `runall.mjs` |
+| `cases/` | 3 | `runall.mjs` |
+| `stack/` | 3 | `runall.mjs`（`2dc683e` 起纳入；其中 2 个是 KNOWN-GAP，见 `OPEN_WORK.md` §3.3） |
 | `arr/` | 2 | `runall.mjs` |
 
-### 没有任何 runner 覆盖（176 个）
-
-| 目录 | 文件数 | 说明 |
-|---|---|---|
-| `t/` | 100 | 早期按主题分的用例，没有 EXPECT 也没有 runner |
-| `tests/` | 25 | 只有 `batch.mjs` 会读（`node ../tools/batch.mjs [baseline]`） |
-| `uc/` | 15 | `ucontrol` 相关 |
-| `hdr/` | 12 | `#include` 相关，靠 `hdr.mjs` / `hdrsim.mjs` 手工跑 |
-| `big/` | 8 | 大型示例（`example3.c` 等） |
-| `u/` | 6 | — |
-| `exttests/` | 4 | `#include` 加载 `.js` 扩展 |
-| `cases/` | 3 | — |
-| `stack/` | 3 | 栈容量；**注意 `runall.mjs` 的目录列表里没有它** |
-
-`stack/` 的三个用例（`so1`–`so3`）覆盖的是 `#pragma stackcheck` / `stackunderflow`，
-`runall.mjs` 漏了它——想跑得手工指定。这属于待补的债。
+有 runner 不等于断言密：`check/` 每个用例都比对输出，而 `runall.mjs` 那 277 个的
+门槛只是「能编译、跑完不崩」，全树只有 2 个文件带 `EXPECT:`。
 
 ## check/ 的编号约定
 
-`check/` 用 `tNN_主题.c` 命名，**编号 1–158 已用满，没有空号**，下一个用例是 `t159`。
+`check/` 用 `tNN_主题.c` 命名，**编号 1–161 已用满，没有空号**，下一个用例是 `t162`。
 另有 13 个不带编号的（`m1`–`m3`、`n1`–`n2`、`rw1`–`rw2`、`seq1`、`memsp2`–`memsp3`），
 它们早于编号制，保留原名。
 
@@ -159,6 +156,8 @@
 | `t150`–`t151` | **Phase 5**：`int a[];` 未绑定 handle，及其作为实参 |
 | `t152`–`t156` | **Phase 6**：`vecalias`、`veccpy`（元素循环、handle 源、运行期钳制、remote） |
 | `t157`–`t158` | 优化器 `canOptimize` 回归：循环体内声明必须真的被初始化；崩溃必须报出原因 |
+| `t159` | `auto` 按实参个数的重载分派（`noinline` 防内联掩盖） |
+| `t160`–`t161` | **Phase 7**：typedef 数据指针走别名构造器（`t160`；`&全局数组元素` 一条因 `OPEN_WORK.md` §3.4 缺陷故意缺席）；`&` 对 remote 与非 remote 必须生成不同代码（`t161`，`EMIT` 断宽度、`EMIT-NOT` 断不得互串） |
 
 设计背景见 `docs/PLAN_array_layout.md`。
 
@@ -171,27 +170,17 @@
 在它想守住的那条检查被删掉之后**依然会通过**——这正是删掉的检查不被发现的方式。
 所以每条 `MESSAGE:` 都必须匹配到编译器真实给出的某一条错误。
 
-**当前负债：51 个用例里有 30 个没有 `MESSAGE:`**，只靠「是否失败」判定。
-其中 2 个是如实上报的 `KNOWN-GAP`：
+**负债已清零**（`1584cf3`）。53 个用例里 51 个带 `MESSAGE:`（个别用例还需要
+`NOT-MESSAGE:` 断言「不得出现」），剩下 2 个是如实上报的 `KNOWN-GAP`——
+编译器今天会接受它们，没有错误信息可断言：
 
 | 用例 | 理由 |
 |---|---|
 | `ovl_auto.c` | 实参被解析到某一种表示，而不是被拒绝；这个用例记录的是缺失的检查 |
 | `ovl_pragma.c` | 为尚未存在的特性写的 pragma 被接受并忽略，而不是被拒绝 |
 
-另外 28 个待补 `MESSAGE:` 的：`array_no_address_to_function_pointer`、
-`array_param_too_small`、`byname_needs_v150`、`byname_of_array_element`、
-`byname_of_volatile`、`byname_pointer_arithmetic`、
-`byname_target_needs_two_representations`、`lookup_capacity`、
-`n05_const_pointer_qualifiers`、`n06_variable_length_array`、
-`n07_runtime_string_concat`、`n08_string_concat_runtime`、`n09_lenof_pointer`、
-`n10_conditional_string_concat`、`nomem_pointer_needs_memory`、
-`nomem_storage_class_pointer`、`nomem_undereferenced_pointer`、
-`remote_array_no_length`、`remote_array_two_dimensions`、`remote_of_remote`、
-`remote_struct_pointer_needs_pragma`、`struct_name_packet_needs_byname`、
-`struct_template_conversion_mismatch`、`struct_template_pointer_needs_byname`、
-`t25_opaque_reject`、`t32_encoded_bad`、`template_struct_in_function_pointer`、
-`typedef_array_variable_length`。
+`1584cf3` 之前哪 28 个缺注解，记在 `docs/PLAN_array_layout.md` §9；每个用例文件里
+则是它自己那条注解为什么这么写。
 
 ## 模拟器
 
@@ -206,15 +195,16 @@ control/radar/ubind/ucontrol/...`，并可注入 `sensorProvider`、`actions()`�
 - `compileAndRun(source, memoryBlocks = bank1+bank2 64格, extraAttributes = {})`
 
 `compileAndRun` 会预先处理 `#include "*.js"`（编译器扩展），把该行注释掉以保住行号，
-再把扩展挂到 `Compiler` 上。**但它只从 `testers/tools/src/ext/` 加载，而该目录不存在**，
-所以 `loadNamedExtension` 返回 `null`，这行 include 被静默跳过——和 `mindc.js:322`
-那句 `extensions (Currently not working!!!)` 一致。`exttests/` 那 4 个用例正是这条路径的。
-想真正用上扩展机制，得先让 `EXT_ROOT` 指向一个真实目录。
+再把扩展挂到 `Compiler` 上。**`2dc683e` 起 `EXT_ROOT` / `INCLUDE_ROOT` 指向仓库根的
+`include/`**（真实存在，里面有 `.h` 和 `.js`），`exttests/` 那 4 个用例因此都能走通
+include→扩展这条路径，不再被静默跳过。仍未对上的是 `mindc.js:322` 那句
+`extensions (Currently not working!!!)`：要么它过期了，要么这 4 个用例没碰到它警告的
+那部分——哪个对，读那句话写下的语境才知道，结论记在 `docs/OPEN_WORK.md` §4.4。
 
 ## 已知的坏工具
 
-`testers/tools/` 里有 6 个一次性脚本是坏的：`ex6run.mjs`、`ms2run.mjs`、`ms3run.mjs`、
-`ms4run.mjs`、`hdrsim.mjs`、`pdtest.mjs` 都写着 `from '../sim.mjs'`，
-而 `sim.mjs` 就在**同目录**下，应为 `'./sim.mjs'`。改成 `./sim.mjs` 即可修复，
-但先确认还需要不需要它们。`testers/unit_tests/tools/` 下的同名副本同样坏，
-而且那个目录里连 `sim.mjs` 都没有。
+`testers/tools/` 里的 6 个一次性脚本（`ex6run.mjs`、`ms2run.mjs`、`ms3run.mjs`、
+`ms4run.mjs`、`hdrsim.mjs`、`pdtest.mjs`）曾把 `sim.mjs` 引成 `'../sim.mjs'`——
+**`2dc683e` 已全部改成 `'./sim.mjs'`**。`testers/unit_tests/tools/` 下的同名副本
+写的也是 `'../sim.mjs'`、而且那个目录里连 `sim.mjs` 都没有，但它们不是任何 runner
+的入口、也没有谁 import 它们，保持原样（见 `docs/OPEN_WORK.md` §4.1）。

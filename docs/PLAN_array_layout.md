@@ -2,9 +2,10 @@
 
 Working plan and design record for the array-representation work.
 
-**Where it stands:** Phases 1, 2, 4, 5 and 6 are done and committed. Phase 3 is
-partial (and less of it than it looked -- see Phase 3). Phase 7 (test debt) is not
-not in the original plan; they are recorded in [§8](#8-fixes-that-were-not-in-the-plan).
+**Where it stands:** all seven phases are done and committed. Phase 3 landed as a
+split rather than the hoist it started as (see Phase 3), and its 3d sub-item was
+struck — the reasoning is in `OPEN_WORK.md` §1.4. Fixes that were not in the original
+plan are recorded in [§8](#8-fixes-that-were-not-in-the-plan).
 
 Baselines are recorded per phase. The current ones are in
 [§9](#9-current-baselines).
@@ -15,7 +16,7 @@ This is the constraint. **The same fact must not be recorded in two places.**
 
 | axis | canonical field | values | decided in | cached |
 |---|---|---|---|---|
-| element layout | `symbol.chosenArrayStyle` | `{traditional \| embedded \| encoded} × {÷ divided \| lookup \| —}` | `arrayStyleFor` (generator) | yes |
+| element layout | `symbol.chosenArrayStyle` | `{traditional \| embedded \| encoded} × {÷ divided \| lookup \| —}` | `arrayStyleFor` — semantic for the declaration-visible classes, generator for the resource-dependent rest (the Phase 3 split) | yes |
 | transport | `symbol.arrayParamRep` | `'handle' \| 'traditional' \| null` | `finalizeArrayParameters` (semantic) | — |
 | request | `symbol.requestedArrayImplementation` | a *string request*, not a decision | declaration | — |
 | remote-ness | `symbol.isRemote` / the `remote` qualifier | bool | declaration | — |
@@ -24,8 +25,10 @@ This is the constraint. **The same fact must not be recorded in two places.**
 
 `selectArrayImplementation` is the layout decider; its vocabulary is
 `{type, implement, reason}` where `type ∈ {traditional, embedded, encoded}` and
-`implement ∈ {divided, lookup, null}`. `arrayStyleFor` (mindcGenerator.js) is the
-single accessor and caches into `symbol.chosenArrayStyle`.
+`implement ∈ {divided, lookup, null}`. `arrayStyleFor` is the accessor — the semantic
+one (`mindcSemantic.js`, Phase 3a) settles what semantic time can see, the generator's
+(`mindcGenerator.js:3740`) settles the rest and reads the shared cache first — and both
+cache into the one `symbol.chosenArrayStyle`.
 
 ### Verified: the transport axis is already binary
 
@@ -40,9 +43,9 @@ there are 9 of them, and they are checkable by grep:
 | `mindcSemantic.js:6034` | `'traditional'` or `'handle'` |
 | `mindcOptimizer.js:7429` | `null` |
 
-`'remote'` and `'names'` are **never written** — they are dead reads, still present at
-mindcGenerator.js:1540, 1541, 3752, 3753, 3837, 3838. Phase 3c has not removed them
-yet.
+`'remote'` and `'names'` are **never written** — they were dead reads at six
+mindcGenerator.js sites (1540, 1541, 3752, 3753, 3837, 3838 at the time). **Removed in
+Phase 3c (`2dc683e`).**
 
 This confirms the design position: a `remote` array and an `embedded` array **are**
 handles, and `arrayRetFor` already treats all three labels identically. The labels
@@ -60,19 +63,20 @@ numbers. Confirmed in generated code: a local `remote int x[4]` emits
 
 `arrayImplementationOf` (mindcSemantic.js) **re-derived** layout+transport from
 `requestedArrayImplementation` + `isRemote`, defaulting to `'memory'`. It existed
-only because `chosenArrayStyle` is decided in the *generator*, which runs after the
+only because `chosenArrayStyle` was decided in the *generator*, which runs after the
 type system. It invented a `'register'` value that had no counterpart in the
-canonical taxonomy, and it was the sole reason the `null` escape hole existed under
-`#pragma optimize(array)`. **Removed in Phase 3b.**
+canonical taxonomy, and it carried the `#pragma optimize(array)` → `null` branch —
+which has no writer either (`OPEN_WORK.md` §3.5). **Removed in Phase 3b (`2dc683e`,
+`8e54302`).**
 
 ### The real problem: a time-ordering problem, not a vocabulary problem
 
 `chosenArrayStyle` is decided in the generator; the type system needs the answer
-earlier. The fix is to **hoist the decision into semantic analysis** — where
-`requestedArrayImplementation`, `isRemote`, `isConst`, the memory available and the
-instruction budget are *already* all consulted by `finalizeArrayParameters` — and have
-the generator read it instead of re-deciding. One decision, taken once, read by both.
-**This is Phase 3a and it is still outstanding.**
+earlier. One decision, taken once, read by both. **Phase 3a landed that — as a split,
+not the hoist this paragraph originally sketched**: two of the inputs named above
+(memory available, instruction budget) and the lookup table are generation-time
+quantities, so the classes that depend on them stay in the generator. What landed, what
+was rejected and why, and the measured split are in Phase 3's section below.
 
 **Therefore: no `representation` field is added to `TypeInfo`.** It would be a fourth
 copy. The type system instead gets a *derived read* of the canonical fields.
@@ -181,42 +185,58 @@ How it landed:
   `t44` (storage qualifiers don't change width), `t45` (`sizeof` cells vs `widthof`
   registers). Later phases added `t118_addr_of_remote` and `t146_open_array_param`.
 
-## Phase 3 — One decision point (replaces the old "representation on TypeInfo") — PARTIAL
+## Phase 3 — One decision point (replaces the old "representation on TypeInfo") — DONE
 
-**None of the four is done.** 3b was recorded as done on the strength of a claim that
-was wrong: `arrayImplementationOf` still exists, at `mindcSemantic.js:6242`, with five
-call sites. Phase 6 improved it but did not retire it.
+Commits `07636d0` (3a), `2dc683e` + `8e54302` (3b), `2dc683e` (3c). 3d was struck before
+any code was written for it — the reasoning, and the two things this plan got wrong about
+it, live in `OPEN_WORK.md` §1.4.
 
-- **3a** Decide `chosenArrayStyle` in semantic analysis, not in the generator. Add a
-  semantic-time `arrayStyleFor(symbol)` that reads the already-available facts
-  (`requestedArrayImplementation`, `isRemote`, `isConst`, memory, budget, version) and
-  stores the result in the *existing* `symbol.chosenArrayStyle`. The generator's
-  `arrayStyleFor` becomes a reader.
-  **Outstanding** — the only writes to `chosenArrayStyle` are still in the generator
-  (mindcGenerator.js:3772, 3778, 3812).
-- **3b** `arrayImplementationOf` stops re-deriving. It reads `chosenArrayStyle` +
-  `arrayParamRep`; when they are genuinely undecided (the `optimize(array)` case) it
-  says so explicitly instead of guessing `'memory'`. `'register'` is retired.
-  **NOT DONE — measured.** The function is at `mindcSemantic.js:6242` and still
-  re-derives. It reads `arrayParamRep` and `requestedArrayImplementation` and **never
-  reads `chosenArrayStyle`** — which is generator-local, written only at
-  `mindcGenerator.js:3772`, `3778`, `3812` and read only at `:3764`. It still falls
-  through to `return 'memory'` (`:6259`) when nothing else decided, which is exactly
-  the guess this item removes. It still returns `'register'` (`:6257`) and nothing in
-  the tree consumes that value: all five call sites compare against `'remote'` or
-  `'handle'`. What Phase 6 did add is `'handle'` handling and a `null` return for the
-  `optimize(array)` case, so the item is advanced but not met.
-- **3c** Delete the dead `'remote'` / `'names'` reads.
-  **Outstanding** — all 6 sites still read them (see §0).
-- **3d** `isRequireMem()` consults the canonical style, so a handled array is not
-  given memory of its own. This deletes the dead 4-cell block that every `remote`
-  array currently allocates (`set __step 4`, `x_block`/`x_pos`) and never uses.
-  **Outstanding** — `isRequireMem()` (mindcSemantic.js:632) still returns true for
-  every `array` kind unconditionally.
+The design that landed is a **split, not a hoist**. OPEN_WORK §1.1 measured why: three of
+`arrayStyleFor`'s nine inputs — `availableMemory`, `instructionBudget`, `lookupNames` —
+are generation-time quantities that do not exist while semantic analysis runs. That
+measurement is the basis for rejecting the two mechanisms this plan originally suggested:
 
-Payoff when complete: `refuseIncompatibleArrayAssignment` becomes a comparison of the
-canonical answers, and the `null === null` hole closes because "undecided" becomes a
-real, distinct state.
+- **Semantic-time `selectArrayImplementation` (old step 1) — rejected.** With the resource
+  inputs left `undefined` they default to `availableMemory ?? Infinity` and
+  `instructionBudget ?? 1000` (`mindcInfrastructure.js:3718`–`3719`), so the call returns
+  `'memory available'` → `traditional` for **every** array regardless of length — including
+  exactly the oversized arrays the automatic choice exists to move into registers. The one
+  class the auto-choice is for would get the wrong answer, and semantic time would have
+  nothing to correct it with.
+- **`narrowArrayImplementation` (old step 2) — removed from the design.** With the
+  automatic choice staying generator-side there is no semantic auto-answer to narrow:
+  everything semantic analysis settles (parameter representation, `isRemote`, volatile, a
+  non-lookup `array()` request) is final by construction. The generator's `arrayStyleFor`
+  returns a cached semantic style as-is (`mindcGenerator.js:3745`–`3760`) with exactly one
+  override, `forcedTraditionalReason` — recursion — and the comment at `:3746` records why
+  parameter and `remote` shapes outrank even that. A separate narrowing pass would have
+  been a fourth derivation of the same choice, which is what this phase exists to remove.
+- **What did land instead (old steps 3–4).** A semantic-time `arrayStyleFor(symbol)` plus
+  a new `finalizeArrayStyles()` pass that writes the *existing* `symbol.chosenArrayStyle`
+  for the four classes whose facts exist then (parameter representation, `isRemote`,
+  volatile, a non-lookup request); the generator keeps the inputs that are its own —
+  memory budget, `isConst`/initial values, target version, lookup categories, recursion.
+  The generator's memo read and the `narrow` position in the flow are the same code path:
+  `chosenArrayStyle` set → return it (modulo `forced`).
+
+**Measured where the split actually falls** — instrumented run over all 174
+`check/*.c` (every one compiles and simulates; distinct array symbols by which side's
+`arrayStyleFor` first returns a style for them, overlap 0):
+
+| settled by | count | reasons |
+|---|---|---|
+| semantic analysis | **86** | 46 `array parameter`, 35 `requested`, 5 volatile |
+| the generator only | **70** | 60 `memory available`, 8 `requested` (lookup categories — semantic deliberately returns styleless, `mindcSemantic.js:6281`), 1 recursion, 1 `out of memory` |
+
+156 symbols split exactly along the design's line: everything the declaration says lands
+at semantic time, everything the resources say stays in the generator.
+
+Payoff status: `refuseIncompatibleArrayAssignment` now compares answers that cannot
+disagree — after `8e54302`, `arrayImplementationOf` *reads* `arrayStyleFor` instead of
+re-deriving. The second half of the promised payoff did **not** land: `null === null` is
+not a real, distinct "undecided" state (`null` merges several differently-named layouts),
+and the `#pragma optimize(array)` branch meant to produce it reads a flag nothing ever
+sets. Both are recorded as `OPEN_WORK.md` §1.5 and §3.5.
 
 ## Phase 4 — `&` resolution — DONE
 
@@ -307,25 +327,36 @@ Tests: `check/t152`–`t156` for the working forms, and eight
 `veccpy_into_handle`, `veccpy_never_bound_source`, `veccpy_source_too_long` and
 `vec_intrinsic_arity`.
 
-## Phase 7 — Test debt — NOT STARTED
+## Phase 7 — Test debt — DONE
 
-Measured, not estimated:
+Commits `1584cf3` (the `MESSAGE:` annotations, the runner's `NOT-MESSAGE:`, the
+zero-candidate overload case) and `245c163` (the last two tests). As measured:
 
-- **30 of the 52 negative cases have no `MESSAGE:`** (22 do). They currently pass on
-  "did it fail" alone, so a deleted check goes unnoticed — see the note in
-  `negative.mjs`'s header for the full argument. Two of the 30 are the reported
-  `KNOWN-GAP`s (`ovl_auto.c`, `ovl_pragma.c`); the other 28 are listed in §9.
-- Typedef'd **data** pointer coverage. Done in Phase 1 as `check/t40`; the *other*
-  half of this item — a typedef'd data pointer that is not a function pointer, used
-  in a way that reaches the alias builder — is worth re-checking now that Phases 5/6
-  added handle typedefs.
+- **`MESSAGE:` debt — cleared.** All 28 carry `MESSAGE:` lines taken from the compiler's
+  own wording (regex-escaped, short unique prefixes); the two `KNOWN-GAP`s (`ovl_auto.c`,
+  `ovl_pragma.c`) stay annotated as gaps — the compiler accepts those programs, so there
+  is no message to match. `negative.mjs` gained `NOT-MESSAGE:`, and
+  `negative/ovl_shared_noversion.c` uses it to pin the zero-candidate refusal's silence
+  about the count message. The list is in §9 and in
+  [`testers/INFO.md`](../testers/INFO.md).
+- **Typedef'd data pointer, second half — done as
+  `check/t160_typedef_data_pointer_alias.c` (`245c163`).** The re-check found no
+  accidental coverage: no test from Phases 5 or 6 contains a `typedef` at all. The test
+  walks alias-of-alias (copy path, no pointer wrap), the typedef'd pointer as a parameter
+  written through, an element of a local array, and a pointer to a typedef'd array. The
+  global-array shape (`&arr[i]` on a global) is excluded on purpose — probing it exposed
+  a pre-existing defect instead (`OPEN_WORK.md` §3.4), and the file's header says so.
 - ~~The width/size matrix from Phase 2.~~ → done, `check/t13`–`t17`, `t25`, `t32`,
   `t39`, `t44`, `t45`.
-- A remote-`&x` regression test asserting the remote and non-remote `&x` code differs.
-  Partly covered by `check/t118_addr_of_remote`; a dedicated one is still wanted.
-- Out-of-bounds subscripting: `int r[3]; int s[] = r; s[5]=7;` **silently succeeds
-  and prints 7.** A design question (C-like permissiveness vs. trapping), not a blind
-  fix — the answer changes codegen for every subscript.
+- **Remote-`&x` difference regression — done as `check/t161_remote_addr_diff.c`
+  (`245c163`).** The difference itself, from both directions: `widthof` constant-folds
+  into the emitted `print`, so the `EMIT` lines *are* the widths (1 for the remote
+  address, 2 for a memory pair — Phase 4's bug made both `print 2`), and three
+  `EMIT-NOT`s forbid either side taking the other's form. `t118` keeps the per-side
+  positive assertions; t161 asserts the difference, with distinct names.
+- **Out-of-bounds subscripting — deferred by decision**, options written down in
+  `OPEN_WORK.md` §2.4 and §7.4. Not a blind fix: bounds checking changes codegen for
+  every subscript in the language.
 
 ## 8. Fixes that were not in the plan
 
@@ -423,11 +454,11 @@ Reproduce from `testers/unit_tests`:
 
 | harness | result |
 |---|---|
-| `node ../tools/check.mjs` | 172 passed, 0 failed (97 shape assertions, 747 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 50 passed, 0 failed, 2 known gaps |
+| `node ../tools/check.mjs` | 174 passed, 0 failed (102 shape assertions, 757 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 51 passed, 0 failed, 2 known gaps |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
-| `node ../tools/runall.mjs` | 101/101 |
+| `node ../tools/runall.mjs` | 265/277 — the 12 misses are known gaps, reported on their own line |
 
 Invariants that must hold at every boundary:
 
@@ -435,20 +466,23 @@ Invariants that must hold at every boundary:
   `optimize(...)` variant; none currently opts out.
 - Never record the same fact twice, and never let a test assert a fact another test
   already asserts.
-- The 30 negative cases with no `MESSAGE:` are the outstanding Phase 7 debt.
+- Every `negative/` case except the two known gaps states its refusal with `MESSAGE:`
+  (and must stay silent with `NOT-MESSAGE:` where silence is the point) — the
+  annotations themselves are the record.
 
-Test numbering: `check/` runs `t1`–`t159` with **no free slot**, so the next case is
-`t160`. (`negative/` is named by behaviour, not by number.)
+Test numbering: `check/` runs `t1`–`t161` with **no free slot**, so the next case is
+`t162`. (`negative/` is named by behaviour, not by number.)
 
-### The Phase 7 `MESSAGE:` debt, in full
+### The Phase 7 `MESSAGE:` debt — cleared in `1584cf3`
 
-30 files, all under `testers/unit_tests/negative/`. The same list, with the
-reasoning behind each, is in [`testers/INFO.md`](../testers/INFO.md).
+The list below is the 28 that had no annotation when Phase 7 closed; each now carries a
+`MESSAGE:` line. The reasoning behind each annotation is in
+[`testers/INFO.md`](../testers/INFO.md).
 
-**2 are the reported `KNOWN-GAP`s** — the compiler accepts them today, so there is no
+**2 remain the reported `KNOWN-GAP`s** — the compiler accepts them today, so there is no
 message to match: `ovl_auto.c`, `ovl_pragma.c`.
 
-**The other 28** each fail for a real reason that no case currently pins down:
+**The other 28, then without annotations:**
 
 `array_no_address_to_function_pointer`, `array_param_too_small`,
 `byname_needs_v150`, `byname_of_array_element`, `byname_of_volatile`,
