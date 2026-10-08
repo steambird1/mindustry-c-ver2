@@ -5744,6 +5744,9 @@ export class SemanticAnalyzer extends ASTVisitor {
             that expects a pointer for an array that ended up in registers (or
             the other way round), so refuse instead.
             */
+            // Dead: nothing ever sets `compiler.arrayOptimize`, so the refusal
+            // never fires and `return 'memory'` below is what happens
+            // (docs/OPEN_WORK.md 3.5).
             if (this.compiler?.arrayOptimize === true) return 'ambiguous';
             return 'memory';
         }
@@ -6313,11 +6316,13 @@ export class SemanticAnalyzer extends ASTVisitor {
      * declaration itself (volatile), or are a remote array -- including one
      * reached through an alias, which is where following the alias matters.
      *
-     * `null` when only the generator can tell: an explicit
-     * `#pragma optimize(array)` with nothing else deciding, or a `lookup`
-     * request whose category comes from the content table. When nothing
-     * decided at all the answer is the language default, memory -- a ruling,
-     * not a guess, and the two cases above are the only `null`s.
+     * `null` when only the generator can tell: a NAMED layout with no word
+     * among the questions above (there is no yes/no that says "encoded"), or
+     * a `lookup` request whose category comes from the content table. When
+     * nothing decided at all the answer is the language default, memory -- a
+     * ruling, not a guess. (The `#pragma optimize(array)` -> `null` branch in
+     * the body is dead: nothing ever sets `compiler.arrayOptimize`;
+     * `docs/OPEN_WORK.md` 3.5.)
      *
      * @param {SymbolEntry?} symbol
      * @returns {'memory' | 'handle' | 'remote' | null}
@@ -6341,6 +6346,7 @@ export class SemanticAnalyzer extends ASTVisitor {
         // A `lookup` request also comes back styleless -- the generator picks
         // its category from the content table -- and the request says so.
         if (symbol.requestedArrayImplementation != null) return null;
+        // Dead: nothing ever sets `compiler.arrayOptimize` (docs/OPEN_WORK.md 3.5).
         if (this.compiler?.arrayOptimize === true) return null;
         return 'memory';
     }
