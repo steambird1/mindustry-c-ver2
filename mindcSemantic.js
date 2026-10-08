@@ -4260,7 +4260,6 @@ export class SemanticAnalyzer extends ASTVisitor {
         const rightImpl = this.arrayImplementationOf(right);
         const saidAs = impl => ({
             memory: 'an array in memory',
-            register: 'an array in registers',
             handle: 'an array handle',
             remote: 'a remote array'
         })[impl] ?? 'an array in an undecided layout';
@@ -6305,23 +6304,43 @@ export class SemanticAnalyzer extends ASTVisitor {
      * That is why a remote array is its own kind here rather than one of the
      * local ones.
      *
-     * `null` when the layout has not been settled: `#pragma optimize(array)`
-     * leaves the choice to the generator, and it is not visible from here.
-     * Guessing would refuse -- or admit -- the wrong programs.
+     * The answer is READ, not re-derived: `arrayStyleFor` owns the decision,
+     * and this maps its style onto the words the call sites know. A parameter
+     * answers by its representation; a request that named `traditional`
+     * answers `'memory'` while any other NAMED layout answers `null` -- these
+     * call sites ask yes/no questions about four kinds, and there is no word
+     * for "encoded" among them; the remaining styles are settled by the
+     * declaration itself (volatile), or are a remote array -- including one
+     * reached through an alias, which is where following the alias matters.
+     *
+     * `null` when only the generator can tell: an explicit
+     * `#pragma optimize(array)` with nothing else deciding, or a `lookup`
+     * request whose category comes from the content table. When nothing
+     * decided at all the answer is the language default, memory -- a ruling,
+     * not a guess, and the two cases above are the only `null`s.
      *
      * @param {SymbolEntry?} symbol
-     * @returns {'memory' | 'register' | 'handle' | 'remote' | null}
+     * @returns {'memory' | 'handle' | 'remote' | null}
      */
     arrayImplementationOf(symbol) {
         if (!symbol) return null;
         if (symbol.isRemote === true || this.typeHasRemoteQualifier(symbol.myType?.())) {
             return 'remote';
         }
-        const rep = symbol.arrayParamRep ?? null;
-        if (rep === 'handle') return 'handle';
-        if (rep === 'traditional') return 'memory';
-        const requested = symbol.requestedArrayImplementation ?? null;
-        if (requested) return (requested === 'traditional') ? 'memory' : null;
+        const style = this.arrayStyleFor(symbol);
+        if (style) {
+            if (style.reason === 'array parameter') {
+                return symbol.arrayParamRep === 'handle' ? 'handle' : 'memory';
+            }
+            if (style.reason === 'requested') {
+                return style.type === 'traditional' ? 'memory' : null;
+            }
+            if (style.reason === 'remote array') return 'remote';
+            return 'memory';    // a volatile array: its declaration settled it
+        }
+        // A `lookup` request also comes back styleless -- the generator picks
+        // its category from the content table -- and the request says so.
+        if (symbol.requestedArrayImplementation != null) return null;
         if (this.compiler?.arrayOptimize === true) return null;
         return 'memory';
     }
