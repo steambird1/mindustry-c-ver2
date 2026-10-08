@@ -3742,6 +3742,23 @@ export class CodeGenerator extends ASTVisitor {
 		An inlined parameter has no style of its own: it borrows the caller's.
 		*/
 		if (symbol?.arrayAliasOf) return this.arrayStyleFor(symbol.arrayAliasOf);
+		if (symbol?.chosenArrayStyle) {
+			/*
+			Semantic analysis chose this layout from the facts it can see, and
+			one fact it cannot see is recursion (`recursiveInfo` is built by the
+			optimizer). Recursion outranks everything a declaration could
+			request -- but NOT the shape a parameter or a `remote` array arrives
+			in, which is decided before recursion in this function too, so the
+			order here stays the order the choice would have been made in.
+			*/
+			const cached = symbol.chosenArrayStyle;
+			const forced = this.forcedTraditionalReason(symbol);
+			if (forced && cached.reason !== 'array parameter' && cached.reason !== 'remote array') {
+				symbol.chosenArrayStyle = { type: 'traditional', implement: null, reason: forced };
+				return symbol.chosenArrayStyle;
+			}
+			return cached;
+		}
 		/*
 		A parameter that is handed a non-memory array has to keep that shape:
 		the call site gives it names, not an address. Saying so here is also what
@@ -3749,7 +3766,8 @@ export class CodeGenerator extends ASTVisitor {
 		`arraySymbolOf` pick the by-name path instead of stepping a pointer.
 		*/
 		if (symbol?.arrayParamRep === 'handle') {
-			return { type: 'embedded', implement: 'divided', reason: 'array parameter' };
+			symbol.chosenArrayStyle = { type: 'embedded', implement: 'divided', reason: 'array parameter' };
+			return symbol.chosenArrayStyle;
 		}
 		/*
 		An ordinary in-memory array parameter is passed as a pointer, exactly as
@@ -3757,9 +3775,9 @@ export class CodeGenerator extends ASTVisitor {
 		just because its own length is unknown (`int p[]`).
 		*/
 		if (symbol?.arrayParamRep === 'traditional') {
-			return { type: 'traditional', implement: null, reason: 'array parameter' };
+			symbol.chosenArrayStyle = { type: 'traditional', implement: null, reason: 'array parameter' };
+			return symbol.chosenArrayStyle;
 		}
-		if (symbol.chosenArrayStyle) return symbol.chosenArrayStyle;
 		/*
 		A `remote` array stores nothing here: its elements are registers of the
 		other processor. So it must never be given memory of its own (which is
@@ -4591,13 +4609,15 @@ export class CodeGenerator extends ASTVisitor {
 		per-element description either -- say so instead of emitting code that
 		silently reads a block/offset pair nobody assigned.
 		*/
-		if (!paramSymbol && argIsArray && !!slotType && slotType.kind === 'array'
-			&& this.arrayStyleFor(argSymbol)?.type !== 'traditional') {
-			throw new InternalGenerationFailure(
-				`Array '${argNode.name}' has no address, so it cannot be handed to a `
-				+ `function pointer whose parameter is an ordinary array: declare that `
-				+ `parameter 'remote' (it then travels as a handle), or give the array a `
-				+ `memory layout`, argNode.location);
+		if (!paramSymbol && argIsArray && !!slotType && slotType.kind === 'array') {
+			const style = this.arrayStyleFor(argSymbol);
+			if (style?.type !== 'traditional') {
+				throw new InternalGenerationFailure(
+					`Array '${argNode.name}' has no address, so it cannot be handed to a `
+					+ `function pointer whose parameter is an ordinary array: declare that `
+					+ `parameter 'remote' (it then travels as a handle), or give the array a `
+					+ `memory layout`, argNode.location);
+			}
 		}
 		/*
 		A struct handed over BY VALUE: it is copied member by member, because the

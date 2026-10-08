@@ -11,7 +11,7 @@ import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 // at run time is `MemoryBlockInfo`, and it is a type name, so nothing here
 // reads a binding from `mindcGeneratorBase.js` while this module's body runs.
 import { MemoryBlockInfo } from "./mindcGeneratorBase.js";
-import { widthOfType } from "./mindcInfrastructure.js";
+import { widthOfType, normalizeImplementation } from "./mindcInfrastructure.js";
 
 export class VariableLinker {
 	/**
@@ -1010,6 +1010,12 @@ export class SemanticAnalyzer extends ASTVisitor {
         its first binding, and one that is never bound at all is an error.
         */
         this.checkUnboundHandles(ast);
+        /*
+        Only now is every parameter representation, `remote` link and
+        `array("...")` request settled, so only now can each array's layout be
+        decided from them and remembered on the symbol for the generator.
+        */
+        this.finalizeArrayStyles();
 
         return {
             success: this.errors.length === 0,
@@ -6215,6 +6221,73 @@ export class SemanticAnalyzer extends ASTVisitor {
     }
 
     /**
+     * Decide and remember one array's layout, using only the facts that are
+     * settled by the end of semantic analysis: the parameter representation
+     * (`finalizeArrayParameters`), `remote`, `volatile`, and an explicit
+     * `array("...")` request. The generator reads `symbol.chosenArrayStyle`
+     * and re-forces the choice only for the one fact decided later -- whether
+     * the function is recursive (`recursiveInfo` is built by the optimizer).
+     *
+     * The automatic choice (memory, instruction budget, initial values) is
+     * deliberately NOT made here: whether the array's memory allocation
+     * actually succeeds, and what its literal contents are, are known only
+     * once the generator runs, and guessing either would change which
+     * programs compile.
+     *
+     * The order below mirrors the generator's `arrayStyleFor` exactly --
+     * parameter representation, then `remote`, then `volatile`, then the
+     * request -- so both compute the same style for every case handled here.
+     *
+     * @param {SymbolEntry?} symbol
+     * @returns {{type: string, implement: string?, reason: string}?} null when
+     *          the layout still depends on generator-time facts
+     */
+    arrayStyleFor(symbol) {
+        if (!symbol) return null;
+        if (symbol?.arrayAliasOf) return this.arrayStyleFor(symbol.arrayAliasOf);
+        if (symbol.chosenArrayStyle) return symbol.chosenArrayStyle;
+        const rep = symbol.arrayParamRep ?? null;
+        if (rep === 'handle') {
+            symbol.chosenArrayStyle = { type: 'embedded', implement: 'divided', reason: 'array parameter' };
+            return symbol.chosenArrayStyle;
+        }
+        if (rep === 'traditional') {
+            symbol.chosenArrayStyle = { type: 'traditional', implement: null, reason: 'array parameter' };
+            return symbol.chosenArrayStyle;
+        }
+        if (symbol.isRemote === true) {
+            symbol.chosenArrayStyle = { type: 'embedded', implement: 'divided', reason: 'remote array' };
+            return symbol.chosenArrayStyle;
+        }
+        /*
+        `volatile` is settled by the declaration, and it outranks an explicit
+        request just as the generator's `forcedTraditionalReason` lets it.
+        Recursion is NOT checked here on purpose: `recursiveInfo` does not
+        exist yet, so the generator re-forces the cached choice when it does.
+        */
+        if (symbol.isVolatile === true || symbol.myType()?.isVolatile?.()) {
+            symbol.chosenArrayStyle = { type: 'traditional', implement: null,
+                reason: 'a volatile array must be kept in memory' };
+            return symbol.chosenArrayStyle;
+        }
+        const requested = symbol.requestedArrayImplementation ?? null;
+        if (requested) {
+            const style = normalizeImplementation(requested);
+            /*
+            A `lookup` request still needs the category the generator picks
+            from the content table (`lookupNamesOf`), and an unrecognized name
+            falls through to the automatic choice -- both are left to the
+            generator, which sees those facts.
+            */
+            if (style && style.implement !== 'lookup') {
+                symbol.chosenArrayStyle = style;
+                return style;
+            }
+        }
+        return null;
+    }
+
+    /**
      * How an array is really stored, which is what decides whether two arrays
      * are the same thing at all.
      *
@@ -6244,12 +6317,6 @@ export class SemanticAnalyzer extends ASTVisitor {
         if (symbol.isRemote === true || this.typeHasRemoteQualifier(symbol.myType?.())) {
             return 'remote';
         }
-        /*
-        A parameter that was handed a non-memory array takes over the shape it
-        was given (`finalizeArrayParameters`), and a handle-parameter is
-        declared `remote` even when the arrays are perfectly local. Both mean
-        the same thing here: the array is described, not stored.
-        */
         const rep = symbol.arrayParamRep ?? null;
         if (rep === 'handle') return 'handle';
         if (rep === 'traditional') return 'memory';
@@ -6495,6 +6562,33 @@ export class SemanticAnalyzer extends ASTVisitor {
                 } else {
                     symbol.arrayParamRep = 'traditional';
                 }
+            }
+            (scope.children ?? []).forEach(visitScope);
+        };
+        visitScope(this.globalScope);
+    }
+
+    /**
+     * Give every array symbol the layout it will use, while the facts behind
+     * it are still the only thing consulted (`arrayStyleFor`), so the
+     * generator reads one settled choice instead of re-deriving it.
+     *
+     * The traversal mirrors `finalizeArrayParameters`: an `auto` template is
+     * never emitted -- its expanded children are -- so only the children have
+     * representations of their own.
+     *
+     * @returns {void}
+     */
+    finalizeArrayStyles() {
+        const visitScope = scope => {
+            if (!scope) return;
+            if (scope.astNode?.getAttribute?.('autoTemplate') === true) {
+                (scope.children ?? []).forEach(visitScope);
+                return;
+            }
+            for (const symbol of scope.symbols.values()) {
+                if (symbol.myType?.()?.kind !== 'array') continue;
+                this.arrayStyleFor(symbol);
             }
             (scope.children ?? []).forEach(visitScope);
         };
