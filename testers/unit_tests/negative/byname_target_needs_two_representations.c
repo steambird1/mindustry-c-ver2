@@ -1,3 +1,4 @@
+/* MESSAGE: Pointer 'q' was asked to hold the name of 'w', but that variable also  */
 /* Must fail: one variable, two representations. `q` was told to hold the NAME
    of `w` and `r` needs the ADDRESS of the same `w`; a register has no address,
    so the two cannot both be done and the program has to say which one wins. */

@@ -10,7 +10,7 @@
    Both spellings are here because they are refused for the same reason and it
    is the SAME check: a case that only asked about one would still pass if the
    `&` were dropped from the signature. */
-/* MESSAGE: The first argument of vecalias must be the address of a handle */
+/* MESSAGE: The first argument of vecalias must be the address of a handle, as in  */
 /* MESSAGE: The first argument of vecalias must be the address of a handle */
 int mem[4];
 int a[];

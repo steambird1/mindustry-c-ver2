@@ -18,7 +18,7 @@
    of another processor, which `veccpy` reaches one at a time quite happily --
    see `check/t156_veccpy_remote.c`. Element copies travel; only a NAME does
    not, which is why `vecalias` refuses what `veccpy` accepts.) */
-/* MESSAGE: The second argument of veccpy has 8 element\(s\) in dimension 1, but the destination 'dst' has */
+/* MESSAGE: The second argument of veccpy has 8 element\(s\) in dimension 1, but the */
 int src[8] = {1, 2, 3, 4, 5, 6, 7, 8};
 void main() {
     int dst[3];

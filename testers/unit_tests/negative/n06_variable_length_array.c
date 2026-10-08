@@ -1,3 +1,4 @@
+/* MESSAGE: Variable length arrays are not supported: the size of 'a' must be a co */
 /* A variable length array cannot be supported: the stack frame size is fixed
    at compile time. This used to be a warning and then silently behave as if
    the size were 1. */

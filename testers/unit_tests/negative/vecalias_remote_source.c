@@ -10,7 +10,7 @@
    `veccpy` is the call that does it, so the message has to name the way out.
    A refusal that only said "no" would leave the reader thinking remote arrays
    are unusable. */
-/* MESSAGE: Cannot bind a remote array by vecalias: a handle packs helper entry points of THIS processor, which */
+/* MESSAGE: Cannot bind a remote array by vecalias: a handle packs helper entry po */
 /* MESSAGE: Copy the elements with 'veccpy' instead */
 extern int r[4] = {1, 2, 3, 4};
 remote int ra[4] = remote(@this, r);

@@ -1,3 +1,4 @@
+/* MESSAGE: Pointer 'p' needs a real address \('x' is static\) */
 /* NOMEM */
 /* No memory block is linked, and this pointer needs a real address.
 

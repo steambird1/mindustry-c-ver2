@@ -9,7 +9,7 @@
    be NAMED. It is worth having as its own case: the two sides are named in the
    message, so a check that only ever looked at one of them would pass
    `array_assign_memory_to_remote` and fail this one. */
-/* MESSAGE: Cannot bind a remote array to 'a' */
+/* MESSAGE: Cannot bind a remote array to 'a': a handle packs helper entry points  */
 extern int r[4] = {1, 2, 3, 4};
 remote int ra[4] = remote(@this, r);
 int a[];

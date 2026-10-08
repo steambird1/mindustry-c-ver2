@@ -8,7 +8,7 @@
 extern int r[4] = {1, 2, 3, 4};
 int s[] = r;
 int q[4] = {9, 9, 9, 9};
-/* MESSAGE: Cannot assign to 's': it is not an array of its own */
+/* MESSAGE: Cannot assign to 's': it is not an array of its own, it is 'r' itself\. */
 void main() {
     s = q;
 }

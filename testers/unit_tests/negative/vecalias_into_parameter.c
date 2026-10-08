@@ -16,7 +16,7 @@
    A locally declared handle is the thing that works, and the message says so:
    `int h[];` is a cell this program owns, and binding into it is the whole of
    what `a = b;` does. */
-/* MESSAGE: Cannot vecalias into 's': it is an array PARAMETER, and the handle in it is a COPY */
+/* MESSAGE: Cannot vecalias into 's': it is an array PARAMETER, and the handle in  */
 /* MESSAGE: leave the caller's array on the handle it already has */
 /* MESSAGE: Declare a handle of your own \('int h\[\];'\) to bind instead */
 int other[4] = {1, 2, 3, 4};

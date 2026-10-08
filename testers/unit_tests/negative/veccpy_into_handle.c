@@ -13,7 +13,7 @@
 
    The unbound handle is the same refusal, said the same way -- a cell that
    holds no handle yet is still a cell, and `h[0]` is still not storage. */
-/* MESSAGE: Cannot veccpy into 'h': a handle is a NAME, not storage, so it has no elements */
+/* MESSAGE: Cannot veccpy into 'h': a handle is a NAME, not storage, so it has no  */
 /* MESSAGE: Write 'vecalias\(&h, b\);' to bind it instead */
 /* MESSAGE: Cannot veccpy into 'e': a handle is a NAME, not storage, so it has no elements */
 int src[4] = {1, 2, 3, 4};

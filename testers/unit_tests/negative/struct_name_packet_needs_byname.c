@@ -1,3 +1,4 @@
+/* MESSAGE: '&s' hands a struct pointer that carries member NAMES, so the paramete */
 /* Must fail: `&s` on a struct held in registers hands a pointer that carries
    member NAMES, so the parameter has to be declared `byname`. Without it the
    callee would read it as an address that was never assigned. */

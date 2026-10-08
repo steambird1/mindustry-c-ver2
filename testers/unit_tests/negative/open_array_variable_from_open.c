@@ -6,7 +6,7 @@
    argument it is given at each call site does carry a length (see
    `check/t148_open_array_two_lengths`). It is only an open dimension bound to
    another open dimension that has nothing to go on. */
-/* MESSAGE: Neither 'b' nor what it is given says how many elements there are */
+/* MESSAGE: Neither 'b' nor what it is given says how many elements there are: one */
 void f(int a[]) {
     int b[] = a;
     b[0] = 7;

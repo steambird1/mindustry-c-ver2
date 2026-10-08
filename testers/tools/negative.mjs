@@ -77,12 +77,28 @@ for (const f of files) {
 			break;
 		}
 	}
+	let failed = false;
 	if (wrongReason) {
 		console.log(`FAIL ${f}: ${wrongReason}`);
 		console.log(`     said instead: ${r.errors.map(e => e.split('\n')[0].slice(0, 110)).join(' ; ')}`);
-		fail++;
-		continue;
+		fail++; failed = true;
 	}
+	// "Saying what must NOT be reported" (see OPEN_WORK §2.5). If any
+	// `NOT-MESSAGE:` pattern matches some actual error, the case fails.
+	if (!failed) {
+		for (const pattern of annotationsOf(src, 'NOT-MESSAGE')) {
+			const re = new RegExp(pattern);
+			const hit = r.errors.find(e => re.test(e));
+			if (hit) {
+				console.log(`FAIL ${f}: must NOT report an error matching /${pattern}/`);
+				console.log(`     offending line: ${hit.split('\n')[0].slice(0, 110)}`);
+				fail++; failed = true;
+				break;
+			}
+		}
+	}
+	if (failed) continue;
+
 	const tag = wanted.length ? `  [${wanted.length} reason(s) checked]` : '';
 	console.log(`ok   ${f}  [${r.errors.map(e => e.split('\n')[0].slice(0, 90)).join(' ; ')}]${tag}`);
 	pass++;

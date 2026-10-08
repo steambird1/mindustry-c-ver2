@@ -1,3 +1,4 @@
+/* MESSAGE: a pointer to 'cvt' hands over a member that carries a NAME, so the par */
 /* Must fail: a pointer to a struct with a name-carrying member has to be declared `byname`, or the callee reads `p->m` as an address that does not exist. */
 #pragma noinline
 #pragma optimize(struct_pointer)

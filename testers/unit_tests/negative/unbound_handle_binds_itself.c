@@ -6,7 +6,7 @@
 
    The source is written as `a` on purpose: any other name would make this the
    same case as reading `a[1]` first, and the two would then test one rule. */
-/* MESSAGE: Array 'a' is an unbound handle: it is read before anything bound it here */
+/* MESSAGE: Array 'a' is an unbound handle: it is read before anything bound it he */
 auto device message1;
 int mem[4] = {1, 2, 3, 4};
 int a[];

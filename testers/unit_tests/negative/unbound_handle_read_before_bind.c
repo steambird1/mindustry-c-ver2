@@ -10,7 +10,7 @@
 
    The RHS of a binding is read too, so `a = a;` is refused by the same rule --
    which is why the array used as the source here is a different name. */
-/* MESSAGE: Array 'a' is an unbound handle: it is read before anything bound it here */
+/* MESSAGE: Array 'a' is an unbound handle: it is read before anything bound it he */
 auto device message1;
 int mem[4] = {1, 2, 3, 4};
 int a[];

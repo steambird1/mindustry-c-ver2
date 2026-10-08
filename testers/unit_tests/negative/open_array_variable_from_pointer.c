@@ -4,7 +4,7 @@
 
    (This is also the reason `int s[]` is a handle rather than a pointer: the
    handle packs the length; a pointer cannot.) */
-/* MESSAGE: write a size, or an initializer that is itself an array */
+/* MESSAGE: The size of array 's' is neither given nor deducible: write a size, or */
 void main() {
     int r[3];
     int *p = r;

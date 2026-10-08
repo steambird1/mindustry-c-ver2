@@ -1,3 +1,4 @@
+/* MESSAGE: 'rc' is itself remote: remote\(\) cannot chain through two processors */
 /* Must fail: remote() cannot chain -- a variable that is itself remote has no
    register of its own on this side to point the second binding at. */
 auto device message1;

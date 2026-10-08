@@ -6,7 +6,7 @@
    the same treatment a `null` block/position gets, one step earlier.
 
    The message says what to write, because the fix is a single statement. */
-/* MESSAGE: Array 'a' is an unbound handle that is never bound */
+/* MESSAGE: Array 'a' is an unbound handle that is never bound: write 'a = someArr */
 auto device message1;
 int a[];
 void main() {

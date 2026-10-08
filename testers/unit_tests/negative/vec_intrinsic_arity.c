@@ -10,7 +10,7 @@
    separately on each side: a check that only ever tested the first argument
    would still pass if the second stopped being examined, and then `veccpy(a, 3)`
    would compile and copy a constant. */
-/* MESSAGE: 'vecalias' takes exactly 2 arguments, but 1 were */
+/* MESSAGE: 'vecalias' takes exactly 2 arguments, but 1 were provided */
 /* MESSAGE: 'vecalias' takes exactly 2 arguments, but 3 were */
 /* MESSAGE: 'veccpy' takes exactly 2 arguments, but 1 were */
 /* MESSAGE: The first argument of veccpy must be an array, as in */

@@ -1,3 +1,4 @@
+/* MESSAGE: Cannot concatenate these strings: only string literals can be joined,  */
 /* Only literals can be joined: the target language has no run time
    concatenation. The value of `s` is not known here. */
 auto device message1;

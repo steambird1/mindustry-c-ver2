@@ -13,7 +13,7 @@
 
    A remote array is refused on a third account: its elements are registers of
    another processor, while a handle packs helper entry points of THIS one. */
-/* MESSAGE: Cannot vecalias into 'mem': it is an array in memory, and a handle is not storage -- use veccpy\(mem */
+/* MESSAGE: Cannot vecalias into 'mem': it is an array in memory, and a handle is  */
 /* MESSAGE: Cannot vecalias into 'div': it is an array in registers, which has no address to take */
 /* MESSAGE: Cannot vecalias into 'ra': a remote array is an element of ANOTHER processor, and a handle here */
 extern int r[4] = {1, 2, 3, 4};

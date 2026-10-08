@@ -11,7 +11,7 @@
    tested: an intrinsic that the read-walker did not know about would compile
    and then trap at run time, and the only symptom would be a machine fault in
    generated code rather than a sentence in the source. */
-/* MESSAGE: Array 'h' is an unbound handle that is never bound: write 'h = someArray;' */
+/* MESSAGE: Array 'h' is an unbound handle that is never bound: write 'h = someArr */
 int dst[4];
 int h[];
 void main() {

@@ -1,3 +1,4 @@
+/* MESSAGE: 'n' does not convert into 'cvt': its 'auto' members settled on a diffe */
 /* Must fail: `n.p` is given an address, so `n` settles on the memory
    representation -- which does not convert into a struct that spells out
    `int *byname p`. */

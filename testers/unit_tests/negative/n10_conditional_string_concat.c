@@ -1,3 +1,4 @@
+/* MESSAGE: Cannot concatenate these strings: only string literals can be joined,  */
 /* Must fail: which of two string literals `s` holds is only known at run
    time, and Mindustry has no instruction that concatenates two strings
    held in registers -- so `s + "c"` cannot be compiled. */

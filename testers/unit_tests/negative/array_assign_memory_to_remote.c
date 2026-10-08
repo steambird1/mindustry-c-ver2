@@ -13,7 +13,7 @@
 extern int r[4] = {1, 2, 3, 4};
 remote int ra[4] = remote(@this, r);
 int mem[4];
-/* MESSAGE: Cannot assign an array in memory to a remote array */
+/* MESSAGE: Cannot assign an array in memory to a remote array: 'mem' and 'ra' are */
 /* MESSAGE: are not the same type */
 void main() {
     mem[0] = 1;

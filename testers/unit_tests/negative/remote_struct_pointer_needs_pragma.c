@@ -1,3 +1,4 @@
+/* MESSAGE: A 'remote' pointer to a struct reaches its members by name, which need */
 /* Must fail: a remote pointer to a struct reaches members by NAME, which needs
    `#pragma optimize(struct_pointer)`. Without it there is no way to step a
    member that lives in another processor. */

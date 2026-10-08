@@ -1,3 +1,4 @@
+/* MESSAGE: Pointer 'p' was declared to hold a register NAME \(int \*byname / byname */
 /* Must fail: an array has no single register to name, so `byname(&a[0])` cannot
    be honoured. */
 auto device message1;

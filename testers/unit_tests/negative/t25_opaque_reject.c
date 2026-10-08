@@ -1,3 +1,4 @@
+/* MESSAGE: Cannot initialize 'item_t' with 'content_t' */
 /* opaque content: an implicit conversion is refused, an explicit cast is
    allowed but cannot be folded away */
 auto device message1;

@@ -1,3 +1,4 @@
+/* MESSAGE: Pointer 'p' needs a real address, but this program has no memory block linked */
 /* Must fail: `*p = 5` through a pointer that was never given a target, with no
    memory block linked, needs a real address and there is nowhere to keep one.
    The diagnostic has to say what to do about it. */

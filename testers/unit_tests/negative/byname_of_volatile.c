@@ -1,3 +1,4 @@
+/* MESSAGE: Pointer 'p' was declared to hold a register NAME \(int \*byname / byname */
 /* Must fail: a `volatile` variable is in memory by definition, so it has no
    register whose name a pointer could store. */
 auto device message1;

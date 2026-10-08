@@ -1,3 +1,4 @@
+/* MESSAGE: Pointer 'p' was declared to hold a register NAME \(int \*byname / byname */
 /* Must fail: pointer arithmetic walks memory, and a name is not an address.
    `p = p + 1` contradicts `int *byname p` explicitly, so the request cannot be
    satisfied and has to be reported rather than silently degraded. */
