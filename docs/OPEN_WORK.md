@@ -21,7 +21,7 @@ Reproduce the baselines from `testers/unit_tests`:
 | runner | result |
 |---|---|
 | `node ../tools/check.mjs` | 176 passed, 0 failed (102 shape assertions, 767 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 54 passed, 0 failed, 2 known gaps |
+| `node ../tools/negative.mjs` | 55 passed, 0 failed, 2 known gaps |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/277 — the 10 misses are reported as known gaps, not failures |
@@ -46,7 +46,7 @@ their work rows read done or struck, and §1.5 records what the closure left ope
 | 3b — `arrayImplementationOf` reads the decision | **done** — `2dc683e` + `8e54302` | §1.2 |
 | 3c — delete the six dead `'remote'` / `'names'` reads | **done** — `2dc683e` | §1.3 |
 | 3d — `isRequireMem()` consults the canonical style | **struck — do not implement** | §1.4 |
-| the `null === null` comparison the payoff left open | **open** — needs a decision | §1.5 |
+| the `null === null` comparison the payoff left open | **done** — `2dbb911`; a named layout answers its own name | §1.5 |
 | Phase 7: `MESSAGE:` on the 28 negative cases | **done** — `1584cf3` | §2.1 |
 | typedef'd data pointer, second half | **done** — `245c163`, `check/t160` | §2.2 |
 | remote-`&x` difference regression | **done** — `245c163`, `check/t161` | §2.3 |
@@ -306,6 +306,18 @@ considers differing layouts a reason to refuse. The decision this needs is small
 belongs with §3.5 and §3.6, which are the same mismatch seen at run time: either `null`
 has to carry the layout it is hiding, or `null === null` has to refuse and the
 identically-named pair gets refused beside it until the comparison can see they match.
+
+**Done in `2dbb911`** — the first option. A request now answers the layout it named:
+`traditional` stays `'memory'` (as does `array("embedded_divided")` — the two reach the
+same divided storage, so one word), `array("encoded")` answers `'encoded'`, and
+`array("embedded")` answers `'embedded'`. `null` is left to what only the generator can
+tell: a `lookup` request, whose category comes from the content table.
+`embedded` = `encoded` is now refused -- `Cannot assign an encoded array to an embedded
+array: … not stored the same way` -- pinned by the new
+`negative/array_assign_embedded_to_encoded.c`; `encoded` = `encoded` (and `embedded` =
+`embedded`) stays admitted, which is exactly the same-layout set §3.6's copy work
+targets. The two register-vs-memory negative cases that quoted the old `undecided
+layout` wording now say `an embedded array`; the negative suite goes 54 to 55.
 
 ---
 

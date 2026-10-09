@@ -14,7 +14,7 @@
 | 命令（从 `testers/unit_tests` 执行） | 读哪个目录 | 当前结果 | 判定标准 |
 |---|---|---|---|
 | `node ..\tools\check.mjs` | `check/` | **176 passed, 0 failed**（102 shape assertions, 767 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
-| `node ..\tools\negative.mjs` | `negative/` | **54 passed, 0 failed, 2 known gaps** | 必须编译失败，**且给出说得清的理由** |
+| `node ..\tools\negative.mjs` | `negative/` | **55 passed, 0 failed, 2 known gaps** | 必须编译失败，**且给出说得清的理由** |
 | `node ..\tools\nomem.mjs` | `nomem/` | **7 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
 | `node ..\tools\loadorder.mjs` | 仓库根的 `mindc*.js` | **12 passed, 0 failed, 2 exempt** | 每个入口单独起一个 `node` 进程导入，不得有循环依赖 |
 | `node ..\tools\runall.mjs` | 14 个目录：`suite/` `mem/` `arr/` `arr2/` `ptr2/` `stack/` `tests/` `uc/` `cases/` `exttests/` `hdr/` `t/` `big/` `u/` | **267/277**（10 个已知坏例以 KNOWN-GAP 如实上报，不算失败） | 能编译、能跑完不崩；带 `EXPECT:` 的还比对输出 |
@@ -67,13 +67,13 @@
 
 ## 目录地图
 
-`testers/unit_tests/` 下共 **526 个 `.c`，全部有 runner**（176 + 10 + 56 + 7 + 277 = 526）：
+`testers/unit_tests/` 下共 **527 个 `.c`，全部有 runner**（176 + 10 + 57 + 7 + 277 = 527）：
 
 | 目录 | 文件数 | 谁来跑 |
 |---|---|---|
 | `check/` | 176 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
 | `t/` | 100 | `runall.mjs`（早期按主题分的用例，`2dc683e` 起纳入） |
-| `negative/` | 56 | `negative.mjs` |
+| `negative/` | 57 | `negative.mjs` |
 | `suite/` | 50 | `runall.mjs` |
 | `mem/` | 25 | `runall.mjs` |
 | `tests/` | 25 | `runall.mjs`（另有手工的 `batch.mjs [baseline]`） |
@@ -172,7 +172,7 @@
 在它想守住的那条检查被删掉之后**依然会通过**——这正是删掉的检查不被发现的方式。
 所以每条 `MESSAGE:` 都必须匹配到编译器真实给出的某一条错误。
 
-**负债已清零**（`1584cf3`）。56 个用例里 54 个带 `MESSAGE:`，剩下 2 个是
+**负债已清零**（`1584cf3`）。57 个用例里 55 个带 `MESSAGE:`，剩下 2 个是
 如实上报的 `KNOWN-GAP`——编译器今天会接受它们，没有错误信息可断言。
 `remote_as_value_refused.c`（§7.3）是第一个真正用上 `NOT-MESSAGE:` 的用例，
 也顺带暴露并修掉了注解解析器的一个潜在冲突：`annotationsOf` 里的 `\bMESSAGE:`
