@@ -3206,6 +3206,17 @@ export class SemanticAnalyzer extends ASTVisitor {
 
 	/**
 	 * 
+	 * @param {CharacterLiteralNode} node
+	 * @remark A single-quoted literal is an `int` holding the character's ASCII
+	 * value, unlike the double-quoted `"a"` which stays a `char`
+	 * (`docs/OPEN_WORK.md` 7.1).
+	 */
+	visitCharacterLiteral(node) {
+		node.dataType = this.typeTable.get('int');
+	}
+
+	/**
+	 * 
 	 * @param {NullLiteralNode} node 
 	 */
 	visitNullLiteral(node) {
@@ -7323,7 +7334,7 @@ export class SemanticAnalyzer extends ASTVisitor {
                 return charPtrType;
 
             case 'CharacterLiteral':
-                return this.typeTable.get('char');
+                return this.typeTable.get('int');
 
 			case 'InitializerList':
             case 'NullLiteral':

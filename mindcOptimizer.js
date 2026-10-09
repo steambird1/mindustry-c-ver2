@@ -5221,7 +5221,7 @@ export class Optimizer extends ASTVisitor {
 	 * @returns {boolean} 
 	 */
 	isLiteralNode(node) {
-		const literalTypes = ['NumericLiteral', 'StringLiteral', 'NullLiteral'];
+		const literalTypes = ['NumericLiteral', 'StringLiteral', 'CharacterLiteral', 'NullLiteral'];
 		if (literalTypes.includes(node.type)) return true;
 		if (node.type === 'Identifier' && node.name[0] === '@' && !this.semantic.specialTypes[node.name]) return true;
 		return false;
@@ -6202,6 +6202,9 @@ export class Optimizer extends ASTVisitor {
         switch (node.type) {
             case 'NumericLiteral': case 'StringLiteral':
                 return node.value;
+            case 'CharacterLiteral':
+                // A single-quoted literal is an `int` holding its ASCII code (7.1).
+                return (node.value ?? '').codePointAt(0) ?? 0;
             case 'Identifier':
 				// Try evaluating in current environment
 				if (node.name[0] === '@' && allowConstants) {
@@ -8277,6 +8280,17 @@ export class Optimizer extends ASTVisitor {
 				break;
 				
 			case 'StringLiteral':
+				clone.value = node.value;
+				clone.raw = node.raw;
+				break;
+				
+			case 'CharacterLiteral':
+				/*
+				The clone is a plain `ASTNode`, so a field the switch does not
+				name is simply absent -- and `visitCharacterLiteral` reads `raw`,
+				so a cloned character literal used to reach codegen textless and
+				crash (docs/OPEN_WORK.md 3.1).
+				*/
 				clone.value = node.value;
 				clone.raw = node.raw;
 				break;

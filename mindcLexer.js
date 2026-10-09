@@ -1265,6 +1265,14 @@ export class Lexer {
         }
         // 原有的 readCharacter 逻辑...
         const startLocation = this.getLocation();
+        /*
+        The literal TEXT is carried on the token, the same way `readString` does
+        it: `visitCharacterLiteral` reads `node.raw`, and without it the node
+        was silently textless (`docs/OPEN_WORK.md` 3.1). The value keeps being
+        the decoded character; the type and the numeric value are decided later
+        (a single-quoted literal is an `int` holding the ASCII code, 7.1).
+        */
+        const rawStart = this.position;
         this.advance(); // 跳过开头的 "'"
         let value = '';
         let escaped = false;
@@ -1295,13 +1303,13 @@ export class Lexer {
             
             if (this.position < this.sourceCode.length && this.sourceCode[this.position] === "'") {
                 this.advance(); // 跳过结尾的 "'"
-                this.tokens.push(new Token(TokenType.CHARACTER, value, startLocation));
+                this.tokens.push(new Token(TokenType.CHARACTER, value, startLocation, this.sourceCode.slice(rawStart, this.position)));
                 return;
             }
         }
 
         this.addError('Unterminated character literal', startLocation);
-        this.tokens.push(new Token(TokenType.CHARACTER, value, startLocation));
+        this.tokens.push(new Token(TokenType.CHARACTER, value, startLocation, this.sourceCode.slice(rawStart, this.position)));
     }
 
     readNumber() {

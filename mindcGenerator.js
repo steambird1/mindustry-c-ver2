@@ -4882,7 +4882,13 @@ export class CodeGenerator extends ASTVisitor {
 	}
 
 	visitCharacterLiteral(node) {
-		return new Instruction([], `${node.raw.replace('"','\\"')}`, new Map([['disallowReplacement', true]]));
+		/*
+		A single-quoted literal is an `int` holding its ASCII code (7.1), so what
+		the program gets is the NUMBER. The `raw` text is kept on the node (and
+		by the optimizer's clone) for diagnostics, not emitted.
+		*/
+		const code = (node.value ?? '').codePointAt(0) ?? 0;
+		return new Instruction([], `${code}`, new Map([['disallowReplacement', true]]));
 	}
 
 	visitNullLiteral(node) {
