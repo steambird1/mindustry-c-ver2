@@ -20,8 +20,8 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 174 passed, 0 failed (102 shape assertions, 757 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 51 passed, 0 failed, 2 known gaps |
+| `node ../tools/check.mjs` | 175 passed, 0 failed (102 shape assertions, 762 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 52 passed, 0 failed, 2 known gaps |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 265/277 — the 12 misses are reported as known gaps, not failures |
@@ -52,7 +52,7 @@ their work rows read done or struck, and §1.5 records what the closure left ope
 | remote-`&x` difference regression | **done** — `245c163`, `check/t161` | §2.3 |
 | out-of-bounds subscript | **deferred by decision** — options written down | §2.4, §7.4 |
 | a case for the zero-candidate overload refusal | **done** — `1584cf3` | §2.5 |
-| `'x'` loses its text (§3.1) | **decided** — `int`, ASCII value; fix after §1–§2 | §7.1 |
+| `'x'` loses its text (§3.1) | **done** — `0784da0`, `check/t162`; int→char is now a clean refusal | §7.1, §3.1 |
 | `for (int i = 0; …)` (§3.2) | **decided** — support it, and the empty clauses; fix after §1–§2 | §7.2 |
 | both `stackcheck` overflow paths trap (§3.3) | **recorded** — no decision yet | §3.3 |
 | `&global_array[i]` / `&global_struct.field` (§3.4) | **recorded** — no decision yet | §3.4 |
@@ -386,7 +386,7 @@ s[5] = 7;      // silently succeeds, and prints 7
 This is C-like permissiveness versus trapping, and it is **not** a blind fix: a bound
 check changes codegen for every subscript in the language, and it changes what existing
 correct programs do. It needs a decision and a scope, not a patch. Whoever takes it should
-start by finding out how many of the 521 driven cases would notice — that number is the
+start by finding out how many of the 523 driven cases would notice — that number is the
 real cost.
 
 **Deferred by decision.** The options, and what each costs, are written down in §7.4.
@@ -451,6 +451,14 @@ generator. Fix the lexer and both failures go at once.
 **This is the only place in the test suite that exercises a `char` parameter**
 (`t117_auto_scalar_overload.c`), and it uses the double-quoted form, which is why the gap
 survived.
+
+**Resolved with §7.1 in `0784da0`.** The lexer now carries the literal text
+(`readCharacter` passes a `raw`, the way `readString` already did), and the
+optimizer's `cloneAST` copies both `value` and `raw` for a `CharacterLiteral` — the
+missing case that silently dropped them and turned a cloned literal into the crash
+at `visitCharacterLiteral`. Both failures are gone: `p('x')` into a `char` parameter
+is now a clean one-line `int`→`char` argument refusal, and `char c = 'x';` refuses
+the same way (`negative/char_literal_is_int_refused.c`).
 
 ### 3.2 `for (int i = 0; …)` is not parseable
 
@@ -681,6 +689,19 @@ This is more than §3.1's "carry the text onto the node". The lexer classifies `
 `char c = 'x';` then becomes an `int`→`char` initialization. Whatever the compiler already
 does for `int`→`char` is the answer; if that is a refusal, it has to be a clear one-line
 message and not a crash. Settle it by testing both when this is implemented.
+
+**Done in `0784da0`.** Both halves landed together. The expression's type is `int`
+(semantic `visitCharacterLiteral` + `getExpressionType`'s case), so `int c = 'x';`
+compiles and prints 120, `'x' - 'a' + 1` is 24, and escapes decode to their codes.
+What codegen emits is the ASCII number (`visitCharacterLiteral` no longer echoes the
+raw text). The node also carries its text — `readCharacter` now gives the token a
+`raw`, the way `readString` always did — and the optimizer's `cloneAST` gained the
+`CharacterLiteral` case (value + raw), which is the half that made `p('x')` reach
+codegen textless and crash: the `raw` was dropped by the clone, not by the lexer.
+`char c = 'x';` is the clean one-line `Cannot initialize 'char' with 'int'` refusal
+from the already-existing int→char rule, not the 3.1 crash or trap. Cases:
+`check/t162_char_literal_is_int.c` (int value, escapes, overload picks `int` for `'x'`
+and `char` for `"a"`) and `negative/char_literal_is_int_refused.c`.
 
 ### 7.2 `for (int i = 0; …)` parses, and every clause may be empty
 
