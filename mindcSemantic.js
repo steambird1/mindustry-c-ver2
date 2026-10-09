@@ -5751,14 +5751,11 @@ export class SemanticAnalyzer extends ASTVisitor {
             if (requested) return 'handle';
             /*
             Nothing was written down, so the layout is chosen automatically --
-            and that choice is not visible here. Guessing would risk a version
-            that expects a pointer for an array that ended up in registers (or
-            the other way round), so refuse instead.
+            and that choice is not visible here. The refusal this spot was
+            written to make was gated on `compiler.arrayOptimize`, which nothing
+            ever sets, so the answer falls to the language default: memory
+            (docs/OPEN_WORK.md 3.5).
             */
-            // Dead: nothing ever sets `compiler.arrayOptimize`, so the refusal
-            // never fires and `return 'memory'` below is what happens
-            // (docs/OPEN_WORK.md 3.5).
-            if (this.compiler?.arrayOptimize === true) return 'ambiguous';
             return 'memory';
         }
         if (type && type.kind === 'pointer') {
@@ -6331,9 +6328,9 @@ export class SemanticAnalyzer extends ASTVisitor {
      * among the questions above (there is no yes/no that says "encoded"), or
      * a `lookup` request whose category comes from the content table. When
      * nothing decided at all the answer is the language default, memory -- a
-     * ruling, not a guess. (The `#pragma optimize(array)` -> `null` branch in
-     * the body is dead: nothing ever sets `compiler.arrayOptimize`;
-     * `docs/OPEN_WORK.md` 3.5.)
+     * ruling, not a guess. (The `#pragma optimize(array)` -> `null` branch the
+     * body used to carry is gone: it was gated on `compiler.arrayOptimize`,
+     * which nothing ever sets; `docs/OPEN_WORK.md` 3.5.)
      *
      * @param {SymbolEntry?} symbol
      * @returns {'memory' | 'handle' | 'remote' | null}
@@ -6357,8 +6354,6 @@ export class SemanticAnalyzer extends ASTVisitor {
         // A `lookup` request also comes back styleless -- the generator picks
         // its category from the content table -- and the request says so.
         if (symbol.requestedArrayImplementation != null) return null;
-        // Dead: nothing ever sets `compiler.arrayOptimize` (docs/OPEN_WORK.md 3.5).
-        if (this.compiler?.arrayOptimize === true) return null;
         return 'memory';
     }
 
