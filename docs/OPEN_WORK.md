@@ -21,7 +21,7 @@ Reproduce the baselines from `testers/unit_tests`:
 | runner | result |
 |---|---|
 | `node ../tools/check.mjs` | 176 passed, 0 failed (102 shape assertions, 767 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 53 passed, 0 failed, 2 known gaps |
+| `node ../tools/negative.mjs` | 54 passed, 0 failed, 2 known gaps |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 265/277 — the 12 misses are reported as known gaps, not failures |
@@ -58,7 +58,7 @@ their work rows read done or struck, and §1.5 records what the closure left ope
 | `&global_array[i]` / `&global_struct.field` (§3.4) | **recorded** — no decision yet | §3.4 |
 | `compiler.arrayOptimize` reads a flag nobody sets (§3.5) | **recorded** — no decision yet | §3.5 |
 | same-layout array assignment does not copy (§3.6) | **recorded** — no decision yet | §3.6 |
-| `m = remote(@this, r)` (§6) | **decided** — fix it; the shape needs analysis first | §7.3 |
+| `m = remote(@this, r)` (§6) | **done** — `be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — fixed in `2dc683e`, §4.4 corrected below | §4 |
 
 ---
@@ -386,7 +386,7 @@ s[5] = 7;      // silently succeeds, and prints 7
 This is C-like permissiveness versus trapping, and it is **not** a blind fix: a bound
 check changes codegen for every subscript in the language, and it changes what existing
 correct programs do. It needs a decision and a scope, not a patch. Whoever takes it should
-start by finding out how many of the 525 driven cases would notice — that number is the
+start by finding out how many of the 526 driven cases would notice — that number is the
 real cost.
 
 **Deferred by decision.** The options, and what each costs, are written down in §7.4.
@@ -613,20 +613,20 @@ their own line instead of failing the run (12 today, `stack/so2` and `stack/so3`
 them). So `#pragma stackcheck` is now driven — one passing case (`so1.c`) and two
 documented failures. What is wrong with the two is recorded as §3.3.
 
-### 4.3 "176 cases have no runner" — stale; re-measured, all 525 are driven
+### 4.3 "176 cases have no runner" — stale; re-measured, all 526 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
-runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; with the §7.1 and §7.2 cases there are 525 under
+runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §7.1–§7.3 cases bring the count to 526 under
 `testers/unit_tests`, every one of them driven —
 
 | runner | cases | covers |
 |---|---|---|
 | `check.mjs` | 176 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 55 | `negative/` |
+| `negative.mjs` | 56 | `negative/` |
 | `nomem.mjs` | 7 | `nomem/` |
 | `runall.mjs` | 277 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-176 + 10 + 55 + 7 + 277 = 525. The caveat that replaces "no runner" is weaker but real:
+176 + 10 + 56 + 7 + 277 = 526. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" — only two files
 in the whole tree carry an `EXPECT:` line. Assertion density per directory is
 `testers/INFO.md`'s subject, not this file's.
@@ -668,17 +668,17 @@ information is how they get broken.
 
 ## 6. Known pre-existing behaviour, not attributable to any phase
 
-Listed so it is not re-investigated. Each was hit while probing and none has a case.
+Listed so it is not re-investigated. Each was hit while probing; where one now has a case, §7.3 says so.
 
 - `int al[] = mem;` alias followed by an inlined write → *"an encoded array is constant
   and cannot be written to"*.
 - A handle parameter that is sized (`int s[4]`) traps; so does an unbound handle sized the
   same way.
-- `m = remote(@this, r)` produces an **empty error list** and then
-  `fatalError: Cannot read properties of undefined (reading 'type')`. The empty list is the
-  dangerous half: it is what makes a crash indistinguishable from a clean refusal to
-  anything reading `errors` alone, which is the same weakness `negative/fn_arity_mismatch.c`
-  was written to close for the one path it covers.
+- `m = remote(@this, r)` produced an **empty error list** and a
+  `fatalError: Cannot read properties of undefined (reading 'type')`. The empty list was
+  the dangerous half: it makes a crash indistinguishable from a clean refusal to
+  anything reading `errors` alone. (§7.3 closes it; the record was already
+  stale — the walk guard was added the same day `94f5737`, before the record.)
 
 ---
 
@@ -776,6 +776,36 @@ Fix it, in two steps, because the failure has two halves.
    deliberately refused (§5). Start from the read that produced the `undefined` — the name
    it was looking for is the fact that is missing, and that says which of the two the
    language already intends.
+
+**Done in `be3aeb8`.** Both halves are closed, and the record of the first was
+wrong in a way that matters: the crash was gone before §7 even started.
+
+1. `94f5737` (the same-day arity fix §2.5 covers) added the walk guard that had
+   been missing, so by the time §6 recorded the crash it had already become a
+   message — "Function 'remote' expects 0 arguments, but 2 were provided" — and
+   `f391690` guarded the type walk too. The empty list was gone. What §6 still
+   got right is the weakness: *nothing here can be allowed to die without saying
+   something*. What it got wrong is the cause — `remote` takes no declared
+   parameters at all, so "expects 0 arguments" states nothing about the call.
+2. The read that used to produce the `undefined` looked for
+   `expectedParams[0].type`, the parameter list of an ordinary call — and that
+   list does not exist, because `remote` is a BINDING FORM: it names another
+   processor's variable, only meaningful as the initializer of a `remote`-
+   qualified declaration (which `consumeRemoteDirective` detaches before the
+   expression walk). Used as a value it is refused in `visitFunctionCall`
+   (`mindcSemantic.js`), at the CALL rather than by the assignment's conversion
+   check: the conversion check cannot see the `void*` case and an array or a
+   struct-pointer target behaves the same way — typing it `void*` let all three
+   reach the generator as `{not_implemented}` when probed.
+
+`negative/remote_as_value_refused.c` pins the refusal for the two shapes the
+record named (`int m` and the looser `void *m`), and its `NOT-MESSAGE:` line
+asserts the bogus arity message is gone. That is the first real use of
+`NOT-MESSAGE:`, which surfaced a latent bug in the shared annotation reader:
+`\bMESSAGE:` matches the `MESSAGE` inside `NOT-MESSAGE:` (the `-` is a word
+boundary), so a case that must stay silent about a pattern could not say so.
+`annotationsOf` (`testers/tools/annotations.mjs`) now requires the marker not
+to follow a word character or `-`.
 
 ### 7.4 Out-of-bounds subscript — deferred, with the options written down
 
