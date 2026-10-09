@@ -117,6 +117,19 @@ function overflowHandlerOf(stackCheck) {
 	if (typeof stackCheck === 'string' && stackCheck.length > 0) {
 		return callHandlerOf(stackCheck);
 	}
+	if (stackCheck === false) {
+		/*
+		`#pragma stackcheck()`: the walker does not WATCH for overflow -- no
+		message is written to `__error` and no handler is called, running out
+		is the program's own contract violation. But it still stops cleanly at
+		the end of the chain instead of crossing into `next block = -1` and
+		reading through the null link (that trap is what "no check" used to
+		produce).
+		*/
+		return [
+			InstructionBuilder.end()
+		];
+	}
 	return [
 		// Nothing is printed: whether a message board is connected is unknown
 		InstructionBuilder.set('__error', '"stack overflow"'),
@@ -127,15 +140,21 @@ function overflowHandlerOf(stackCheck) {
 /**
  * Call `handler` and then leave the walker, whatever it returned.
  *
+ * The frame being allocated is half-consumed when the chain ends (the next
+ * block was read and is unusable), so there is nowhere safe to continue it.
+ * The handler therefore returns straight into the `end` that follows: the
+ * handler reports, and the walker stops. (`@counter` reads as the NEXT
+ * instruction here, so `op add __stackpos @counter 1` from instruction N
+ * points the handler's return address at N+2 -- the `end`.)
+ *
  * @param {string} handler
  * @returns {Instruction[]}
  */
 function callHandlerOf(handler) {
 	return [
-		InstructionBuilder.set('__stackcheck_return', '__stackpos'),
 		InstructionBuilder.op('add', '__stackpos', '@counter', 1),
 		InstructionBuilder.set('@counter', '_' + handler),
-		InstructionBuilder.set('@counter', '__stackcheck_return')
+		InstructionBuilder.end()
 	];
 }
 
@@ -1002,17 +1021,15 @@ export class MemoryManager {
 	 * @param {boolean} removable Drop the helper when nothing calls it
 	 * @param {string|boolean|undefined} stackCheck
 	 *        undefined -- write a fixed message to __error and stop
-	 *        false    -- `#pragma stackcheck()`: no capacity check at all
-	 *        string   -- call that function, then leave the walker
+	 *        false    -- `#pragma stackcheck()`: do not watch; stop cleanly
+	 *        string   -- call that function, then stop
 	 * @returns {void}
 	 */
 	outputPointerForwardFunction(funcReg, name = '__pointerForward', target = '__ptr', removable = true, stackCheck = undefined) {
-		const noCheck = (stackCheck === false);
-		const overflow = noCheck ? [] : overflowHandlerOf(stackCheck);
-		const guardLength = noCheck ? 0 : 1;
-		const OVF = 11 + guardLength + 3;
+		const overflow = overflowHandlerOf(stackCheck);
+		const OVF = 11 + 1 + 3;
 		const RET = OVF + overflow.length;
-		const guard = noCheck ? [] : [
+		const guard = [
 			InstructionBuilder.jump('{0}', 'lessThanEq', `${target}block`, 0, [OVF])
 		];
 		funcReg.addFunction(name, new Instruction([
@@ -1169,15 +1186,16 @@ export class MemoryManager {
 	 * @param {string} target
 	 * @param {boolean} removable
 	 * @param {string|boolean|undefined} stackCheck
+	 *        undefined -- write a fixed message to __error and stop
+	 *        false    -- `#pragma stackcheck()`: do not watch; stop cleanly
+	 *        string   -- call that function, then stop
 	 * @returns {void}
 	 */
 	outputNearFitFunction(funcReg, name = '__nearFit', target = '__ptr', removable = true, stackCheck = undefined) {
-		const noCheck = (stackCheck === false);
-		const overflow = noCheck ? [] : overflowHandlerOf(stackCheck);
-		const guardLength = noCheck ? 0 : 1;
-		const OVF = 5 + guardLength + 2;
+		const overflow = overflowHandlerOf(stackCheck);
+		const OVF = 5 + 1 + 2;
 		const RET = OVF + overflow.length;
-		const guard = noCheck ? [] : [
+		const guard = [
 			InstructionBuilder.jump('{0}', 'lessThanEq', `${target}block`, 0, [OVF])
 		];
 		funcReg.addFunction(name, new Instruction([

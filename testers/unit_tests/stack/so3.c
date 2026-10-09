@@ -1,8 +1,6 @@
-/* #pragma stackcheck(): no capacity check at all. */
-/* KNOWN-GAP: traps when the stack runs out: `#pragma stackcheck()` emits no capacity
-   guard, so the walker follows `next block = -1` off the chain and reads
-   through a null link. Defect: docs/OPEN_WORK.md 3.3.
-*/
+/* #pragma stackcheck(): no overflow watch (no message, no handler); running out is
+   the program's own contract violation, and the walker stops cleanly at the
+   end of the chain instead of reading through the null link. */
 #pragma stackcheck()
 auto device message1;
 int rec(int n) {

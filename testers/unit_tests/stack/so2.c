@@ -1,8 +1,4 @@
-/* #pragma stackcheck(fn): call fn, then leave the frame allocation. */
-/* KNOWN-GAP: traps on the next frame allocation after an overflow: the handler returns
-   with `__stackframe_block` left at -1, the next `getlink` on it yields
-   null, and the walker reads through it. Defect: docs/OPEN_WORK.md 3.3.
-*/
+/* #pragma stackcheck(fn): call fn -- the overflow report -- then stop cleanly. */
 #pragma stackcheck(onOverflow)
 auto device message1;
 void onOverflow() {
