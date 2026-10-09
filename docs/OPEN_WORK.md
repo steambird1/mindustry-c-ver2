@@ -56,7 +56,7 @@ their work rows read done or struck, and §1.5 records what the closure left ope
 | `for (int i = 0; …)` (§3.2) | **done** — `189f546`, `check/t163`; every clause may be empty, the init declaration is scoped to the loop | §7.2, §3.2 |
 | both `stackcheck` overflow paths trap (§3.3) | **recorded** — no decision yet | §3.3 |
 | `&global_array[i]` / `&global_struct.field` (§3.4) | **recorded** — no decision yet | §3.4 |
-| `compiler.arrayOptimize` reads a flag nobody sets (§3.5) | **recorded** — no decision yet | §3.5 |
+| `compiler.arrayOptimize` reads a flag nobody sets (§3.5) | **done** — `c9dd030`; the two dead reads are deleted, the flag is not wired | §3.5 |
 | same-layout array assignment does not copy (§3.6) | **recorded** — no decision yet | §3.6 |
 | `m = remote(@this, r)` (§6) | **done** — `be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — fixed in `2dc683e`, §4.4 corrected below | §4 |
@@ -566,6 +566,17 @@ The fix is a decision, not a deletion: what *should* `optimize(array)` answer he
 `null` (undecided, refuse in both directions) or `'memory'` (what happens today, by
 accident)? The optimizer's own behaviour under the pragma is untouched; only these two
 reads are dead. Deferred, no decision yet.
+
+**Done in `c9dd030`.** The decision made itself: keep today's answer. Under
+`#pragma optimize(array)` a plain array answers `'memory'`, exactly as it always
+actually has — the `null`/`'ambiguous'` branches were gated on
+`compiler.arrayOptimize`, and no assignment to that property exists anywhere, so
+they could not fire. Wiring the flag would be the one thing the invariants
+forbid: a pragma that changes an array's representation answer changes program
+output. So the two dead reads are deleted (both `mindcSemantic.js`), their
+defaults (`'memory'` in `arrayImplementationOf` and in `autoRepresentationOf`)
+are now stated in the comments, and nothing a suite can measure moved — all five
+stayed green.
 
 ### 3.6 Same-layout array assignment is accepted and does not copy
 
