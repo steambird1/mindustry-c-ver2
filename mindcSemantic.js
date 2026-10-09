@@ -4272,7 +4272,9 @@ export class SemanticAnalyzer extends ASTVisitor {
         const saidAs = impl => ({
             memory: 'an array in memory',
             handle: 'an array handle',
-            remote: 'a remote array'
+            remote: 'a remote array',
+            encoded: 'an encoded array',
+            embedded: 'an embedded array'
         })[impl] ?? 'an array in an undecided layout';
         /*
         An UNBOUND handle (`int a[];` declared, not yet bound) is the one array
@@ -6317,23 +6319,23 @@ export class SemanticAnalyzer extends ASTVisitor {
      *
      * The answer is READ, not re-derived: `arrayStyleFor` owns the decision,
      * and this maps its style onto the words the call sites know. A parameter
-     * answers by its representation; a request that named `traditional`
-     * answers `'memory'` while any other NAMED layout answers `null` -- these
-     * call sites ask yes/no questions about four kinds, and there is no word
-     * for "encoded" among them; the remaining styles are settled by the
+     * answers by its representation; a request answers by the layout it named
+     * -- `traditional` as `'memory'`, and any other NAMED layout (`encoded`,
+     * `embedded`) by its OWN name, so the yes/no questions these call sites
+     * ask can tell two differently-named layouts apart instead of reading two
+     * `null`s as the same thing. The remaining styles are settled by the
      * declaration itself (volatile), or are a remote array -- including one
      * reached through an alias, which is where following the alias matters.
      *
-     * `null` when only the generator can tell: a NAMED layout with no word
-     * among the questions above (there is no yes/no that says "encoded"), or
-     * a `lookup` request whose category comes from the content table. When
-     * nothing decided at all the answer is the language default, memory -- a
-     * ruling, not a guess. (The `#pragma optimize(array)` -> `null` branch the
-     * body used to carry is gone: it was gated on `compiler.arrayOptimize`,
-     * which nothing ever sets; `docs/OPEN_WORK.md` 3.5.)
+     * `null` when only the generator can tell: a `lookup` request whose
+     * category comes from the content table. When nothing decided at all the
+     * answer is the language default, memory -- a ruling, not a guess. (The
+     * `#pragma optimize(array)` -> `null` branch the body used to carry is
+     * gone: it was gated on `compiler.arrayOptimize`, which nothing ever sets;
+     * `docs/OPEN_WORK.md` 3.5.)
      *
      * @param {SymbolEntry?} symbol
-     * @returns {'memory' | 'handle' | 'remote' | null}
+     * @returns {'memory' | 'handle' | 'remote' | 'encoded' | 'embedded' | null}
      */
     arrayImplementationOf(symbol) {
         if (!symbol) return null;
@@ -6346,7 +6348,7 @@ export class SemanticAnalyzer extends ASTVisitor {
                 return symbol.arrayParamRep === 'handle' ? 'handle' : 'memory';
             }
             if (style.reason === 'requested') {
-                return style.type === 'traditional' ? 'memory' : null;
+                return style.type === 'traditional' ? 'memory' : style.type;
             }
             if (style.reason === 'remote array') return 'remote';
             return 'memory';    // a volatile array: its declaration settled it

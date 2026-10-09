@@ -7,7 +7,7 @@
 
    So they are different TYPES, which is also why an `auto` parameter asks for
    a version per layout rather than accepting whatever it is given. */
-/* MESSAGE: Cannot assign an array in an undecided layout to an array in memory: ' */
+/* MESSAGE: Cannot assign an embedded array to an array in memory: ' */
 int reg[4] = array("embedded_divided", {0, 0, 0, 0});
 int mem[4];
 void main() {

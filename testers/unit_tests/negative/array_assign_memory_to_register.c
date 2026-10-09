@@ -2,7 +2,7 @@
    in registers. Same reason as `array_assign_register_to_memory`, and kept
    separate for the same reason: the message names the two sides, so this one
    fails if the check only ever reads the right-hand array. */
-/* MESSAGE: Cannot assign an array in memory to an array in an undecided layout: ' */
+/* MESSAGE: Cannot assign an array in memory to an embedded array: ' */
 int reg[4] = array("embedded_divided", {0, 0, 0, 0});
 int mem[4];
 void main() {
