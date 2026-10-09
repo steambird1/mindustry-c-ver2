@@ -24,7 +24,7 @@ Reproduce the baselines from `testers/unit_tests`:
 | `node ../tools/negative.mjs` | 54 passed, 0 failed, 2 known gaps |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
-| `node ../tools/runall.mjs` | 265/277 — the 12 misses are reported as known gaps, not failures |
+| `node ../tools/runall.mjs` | 267/277 — the 10 misses are reported as known gaps, not failures |
 
 The two invariants any new work has to keep:
 
@@ -54,7 +54,7 @@ their work rows read done or struck, and §1.5 records what the closure left ope
 | a case for the zero-candidate overload refusal | **done** — `1584cf3` | §2.5 |
 | `'x'` loses its text (§3.1) | **done** — `0784da0`, `check/t162`; int→char is now a clean refusal | §7.1, §3.1 |
 | `for (int i = 0; …)` (§3.2) | **done** — `189f546`, `check/t163`; every clause may be empty, the init declaration is scoped to the loop | §7.2, §3.2 |
-| both `stackcheck` overflow paths trap (§3.3) | **recorded** — no decision yet | §3.3 |
+| both `stackcheck` overflow paths trap (§3.3) | **done** — `9cbaf8c`; both overflow paths stop cleanly, so1/so2/so3 all clean | §3.3 |
 | `&global_array[i]` / `&global_struct.field` (§3.4) | **recorded** — no decision yet | §3.4 |
 | `compiler.arrayOptimize` reads a flag nobody sets (§3.5) | **done** — `c9dd030`; the two dead reads are deleted, the flag is not wired | §3.5 |
 | same-layout array assignment does not copy (§3.6) | **recorded** — no decision yet | §3.6 |
@@ -509,8 +509,21 @@ Same trap, two different omissions: the overflow handler does not restore the fr
 the no-argument form does not check. The decision to make before fixing is what
 `stackcheck()` with no arguments *promises* — "no check, running out is the contract"
 (and then the crash should still be a clean report, like so1's) or "fall back to the
-default guard". so1's path is the working precedent either way. Annotated and known since
-`2dc683e`; deferred, no decision yet.
+default guard". so1's path is the working precedent either way.
+
+**Done in `9cbaf8c`.** The decision was "running out is the contract". The no-argument
+form still does not WATCH for overflow -- no `__error` message is written and no handler
+is called -- but the walker's chain-end check is unconditional now, and for
+`stackcheck()` it lands in a bare `end`: running out stops the walker cleanly instead
+of following `next block = -1` off the chain and reading through a null link. The
+handler form no longer resumes the walker through the caller's continuation with
+`__stackframe_block` left at -1 either: the handler now returns straight into `end`, so
+it reports and the walker stops -- the half-allocated frame has nowhere safe to continue,
+which is why abandoning it is the only honest outcome. so2 prints `999` and stops, so3
+stops silently, both without a trap; so1 is untouched and so is every non-overflowing
+program, since the chain-end check only fires when the next block is unusable. Runall
+goes 265/277 to 267/277 (12 -> 10 known gaps) and the KNOWN-GAP annotations come out of
+the two cases.
 
 ### 3.4 The address of a global array element or struct field
 

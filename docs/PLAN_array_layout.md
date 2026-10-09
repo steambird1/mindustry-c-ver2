@@ -458,7 +458,7 @@ Reproduce from `testers/unit_tests`:
 | `node ../tools/negative.mjs` | 54 passed, 0 failed, 2 known gaps |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
-| `node ../tools/runall.mjs` | 265/277 — the 12 misses are known gaps, reported on their own line |
+| `node ../tools/runall.mjs` | 267/277 — the 10 misses are known gaps, reported on their own line |
 
 Invariants that must hold at every boundary:
 

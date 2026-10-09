@@ -17,7 +17,7 @@
 | `node ..\tools\negative.mjs` | `negative/` | **54 passed, 0 failed, 2 known gaps** | 必须编译失败，**且给出说得清的理由** |
 | `node ..\tools\nomem.mjs` | `nomem/` | **7 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
 | `node ..\tools\loadorder.mjs` | 仓库根的 `mindc*.js` | **12 passed, 0 failed, 2 exempt** | 每个入口单独起一个 `node` 进程导入，不得有循环依赖 |
-| `node ..\tools\runall.mjs` | 14 个目录：`suite/` `mem/` `arr/` `arr2/` `ptr2/` `stack/` `tests/` `uc/` `cases/` `exttests/` `hdr/` `t/` `big/` `u/` | **265/277**（12 个已知坏例以 KNOWN-GAP 如实上报，不算失败） | 能编译、能跑完不崩；带 `EXPECT:` 的还比对输出 |
+| `node ..\tools\runall.mjs` | 14 个目录：`suite/` `mem/` `arr/` `arr2/` `ptr2/` `stack/` `tests/` `uc/` `cases/` `exttests/` `hdr/` `t/` `big/` `u/` | **267/277**（10 个已知坏例以 KNOWN-GAP 如实上报，不算失败） | 能编译、能跑完不崩；带 `EXPECT:` 的还比对输出 |
 
 默认给两块 64 格内存（`bank1`、`bank2`），目标版本 154.3。
 `loadorder.mjs` 豁免 `mindcCompileWorker.js` 与 `mindcHighlightWorker.js`（它们需要 `self`）。
@@ -87,7 +87,7 @@
 | `u/` | 6 | `runall.mjs` |
 | `exttests/` | 4 | `runall.mjs` |
 | `cases/` | 3 | `runall.mjs` |
-| `stack/` | 3 | `runall.mjs`（`2dc683e` 起纳入；其中 2 个是 KNOWN-GAP，见 `OPEN_WORK.md` §3.3） |
+| `stack/` | 3 | `runall.mjs`（`2dc683e` 起纳入；§3.3 修复后 3 个全部通过） |
 | `arr/` | 2 | `runall.mjs` |
 
 有 runner 不等于断言密：`check/` 每个用例都比对输出，而 `runall.mjs` 那 277 个的
