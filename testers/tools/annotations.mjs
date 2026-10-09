@@ -108,7 +108,15 @@ export function codeOnly(src) {
  */
 export function annotationsOf(src, marker) {
 	const results = [];
-	const re = new RegExp(`\\b${escapeRegExp(marker)}:([^\\n]*)`, 'g');
+	/*
+	The marker must not be the tail of a longer one. `\b` is not enough:
+	`NOT-MESSAGE:` has a word boundary between `-` and `M`, so a bare
+	`\bMESSAGE:` reads the `NOT-MESSAGE:` line as a positive assertion and the
+	runner then demands that a refusal it is supposed to be silent about
+	matches. Requiring the preceding character to be neither a word character
+	nor `-` is what tells the two apart.
+	*/
+	const re = new RegExp(`(?<![\\w-])${escapeRegExp(marker)}:([^\\n]*)`, 'g');
 	for (const comment of commentsOf(src)) {
 		for (const m of comment.matchAll(re)) {
 			const value = m[1].trim();

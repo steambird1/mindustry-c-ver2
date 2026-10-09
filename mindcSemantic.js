@@ -6734,6 +6734,28 @@ export class SemanticAnalyzer extends ASTVisitor {
     }
 
     visitFunctionCall(node) {
+		/*
+		`remote` is a binding form, not a function: it names another
+		processor's variable, and is only meaningful as the initializer of a
+		`remote`-qualified declaration. `consumeRemoteDirective` detaches that
+		initializer before the expression is ever visited, so a `remote(...)`
+		that REACHES here is being used as a value -- and the machine language
+		has no instruction that yields one.
+
+		It used to reach the walk below and read past the end of a parameter
+		list that does not exist (`remote` is a vararg builtin with none),
+		crashing with an empty error list (docs/OPEN_WORK.md 6). Refusing it
+		early is also the only safe answer: typing it `void*` (its declared
+		return) would let `m = remote(...)` through whenever the target accepts
+		`void*` -- `void *m`, an array, or a struct pointer -- and the generator
+		has no code for it, emitting `{not_implemented}`.
+		*/
+		if (node.callee && node.callee.type === 'Identifier' && node.callee.name === 'remote') {
+			(node.arguments ?? []).forEach(arg => this.visit(arg));
+			this.addError(`remote() is a binding form, not a value: write it as the `
+				+ `initializer of a 'remote'-qualified declaration`, node.location);
+			return;
+		}
 		if (node.callee && node.callee.type === 'Identifier' && node.callee.name === 'byname') {
 			// Keep it a call: the generator turns it into the address.
 			this.visit(node.arguments?.[0] ?? null);
