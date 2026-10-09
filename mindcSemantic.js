@@ -4295,6 +4295,25 @@ export class SemanticAnalyzer extends ASTVisitor {
             }
             return false;    // binding: the implementations may differ
         }
+        /*
+        An ENCODED array is a constant table of contents, whatever the
+        declaration said: the layout packs its values into registers or a
+        string, and there is no storage behind the name for a copy to land in.
+        `elems = elems` slicing through the layout check would be admitted --
+        both sides answer 'encoded' -- and then the copy §3.6 emits would have
+        nothing to write to. Refuse before the layout equality is consulted; a
+        target that really is `const` keeps the plain const refusal it gets
+        further down this pass.
+        */
+        if (leftImpl === 'encoded' && !leftType.isConst()) {
+            this.addError(
+                `Cannot assign to '${nameOf(left)}': an encoded array is a constant table `
+                + `of contents -- even without 'const' the layout leaves no cells to write `
+                + `into. Declare it 'array("embedded_divided", ...)' or as a plain array `
+                + `to have cells`,
+                node.location);
+            return true;
+        }
         if (leftImpl === rightImpl) return false;
         this.addError(
             `Cannot assign ${saidAs(rightImpl)} to ${saidAs(leftImpl)}: `

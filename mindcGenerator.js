@@ -2992,7 +2992,8 @@ export class CodeGenerator extends ASTVisitor {
 	 * @returns {VariableRet}
 	 * @remark The LValue is evaluated exactly ONCE. That matters for code size and,
 	 *         more importantly, for expressions with side effects such as `a[i()] += 1`.
-	 * @remark Arrays and pointers are assigned by reference; structs and unions
+	 * @remark Pointers are assigned by reference; ARRAYS are copied element by
+	 *         element (the same loop `veccpy` emits); structs and unions
 	 *         are copied (member-wise for registry structs, by memcpy otherwise).
 	 */
 	visitAssignmentExpression(node) {
@@ -3044,6 +3045,22 @@ export class CodeGenerator extends ASTVisitor {
 		// Initializer lists build the data first, then copy it into the target
 		if (node.right.type === 'InitializerList') {
 			return this.assignInitializerList(node, lval);
+		}
+
+		/*
+		`a = b;` when both sides are arrays is an element copy -- the same loop
+		`veccpy(a, b)` emits -- not the assignment-by-reference the generic
+		lvalue write below would do, which copied nothing at all. The two sides
+		go through the same `element(i)` machinery a subscript uses, so the
+		copy is correct whatever layouts the two arrays settled on; the bound
+		is the smaller of the two lengths, exactly as in `emitElementCopy`.
+		*/
+		if (leftType?.kind === 'array' && rightType?.kind === 'array') {
+			const destination = this.arrayViewForArgument(node.left);
+			const source = this.arrayViewForArgument(node.right);
+			if (destination && source) {
+				return this.emitElementCopy(destination, source);
+			}
 		}
 
 		let value = ExportRet(glob, this.visit(node.right), rightType);
@@ -3249,6 +3266,27 @@ export class CodeGenerator extends ASTVisitor {
 			this.addError(`veccpy: both arguments must be arrays`, node.location);
 			return new Instruction();
 		}
+		return this.emitElementCopy(destination, source);
+	}
+
+	/**
+	 * The element loop that `veccpy(a, b)` and `a = b;` share.
+	 *
+	 * Both sides go through `element(i)`, the same machinery `a[i]` uses, so
+	 * the loop is short and works the same whatever the two layouts are -- a
+	 * loop written per layout would be two loops to keep in step, and one of
+	 * them would rot.
+	 *
+	 * The bound is the SMALLER of the two lengths. When both are written down
+	 * it is a literal; when the count lives in a packed handle it is a run
+	 * time question, and the destination's worth is the only bound that cannot
+	 * run past the end.
+	 *
+	 * @param {import('./mindcInfrastructure.js').ArrayRet} destination
+	 * @param {import('./mindcInfrastructure.js').ArrayRet} source
+	 * @returns {Instruction}
+	 */
+	emitElementCopy(destination, source) {
 		const index = this.getTempSymbol();
 		const indexName = index.getAssemblySymbol();
 		const lengthOf = view => {
