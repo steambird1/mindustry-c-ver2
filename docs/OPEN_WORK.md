@@ -20,8 +20,8 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 175 passed, 0 failed (102 shape assertions, 762 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 52 passed, 0 failed, 2 known gaps |
+| `node ../tools/check.mjs` | 176 passed, 0 failed (102 shape assertions, 767 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 53 passed, 0 failed, 2 known gaps |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 265/277 — the 12 misses are reported as known gaps, not failures |
@@ -53,7 +53,7 @@ their work rows read done or struck, and §1.5 records what the closure left ope
 | out-of-bounds subscript | **deferred by decision** — options written down | §2.4, §7.4 |
 | a case for the zero-candidate overload refusal | **done** — `1584cf3` | §2.5 |
 | `'x'` loses its text (§3.1) | **done** — `0784da0`, `check/t162`; int→char is now a clean refusal | §7.1, §3.1 |
-| `for (int i = 0; …)` (§3.2) | **decided** — support it, and the empty clauses; fix after §1–§2 | §7.2 |
+| `for (int i = 0; …)` (§3.2) | **done** — `189f546`, `check/t163`; every clause may be empty, the init declaration is scoped to the loop | §7.2, §3.2 |
 | both `stackcheck` overflow paths trap (§3.3) | **recorded** — no decision yet | §3.3 |
 | `&global_array[i]` / `&global_struct.field` (§3.4) | **recorded** — no decision yet | §3.4 |
 | `compiler.arrayOptimize` reads a flag nobody sets (§3.5) | **recorded** — no decision yet | §3.5 |
@@ -386,7 +386,7 @@ s[5] = 7;      // silently succeeds, and prints 7
 This is C-like permissiveness versus trapping, and it is **not** a blind fix: a bound
 check changes codegen for every subscript in the language, and it changes what existing
 correct programs do. It needs a decision and a scope, not a patch. Whoever takes it should
-start by finding out how many of the 523 driven cases would notice — that number is the
+start by finding out how many of the 525 driven cases would notice — that number is the
 real cost.
 
 **Deferred by decision.** The options, and what each costs, are written down in §7.4.
@@ -475,6 +475,23 @@ at `:1529`). `int i; for (i = 0; i < 2; i++)` works, and so does `while`.
 Worth deciding deliberately: either the dialect does not support C99-style declarations
 in for-init, in which case the parser should say so in one line instead of four plus a
 crash, or it should support them. What it should not do is both.
+
+**Resolved with §7.2 in `189f546`.** The init now parses non-destructively
+(`parseForInit` tries a declaration first and restores the token stream otherwise),
+and the loop is wrapped so the declaration lives in the loop's OWN scope:
+
+    { int i = 0; for (; test; update) body }
+
+— the inner `for` keeps the shape every pass already knows, and the wrapper block
+gives `i` the same scope a nested block would: gone after the loop (undeclared-
+identifier refusal), and an enclosing `i` is shadowed. The empty-init `;` is now
+consumed in place (it never was, so `for (; test; update)` misread its test as the
+update); every clause may be empty and `for (;;)` runs until a break. Fixing it
+surfaced a PRE-EXISTING optimizer bug — a `for` over a variable that shadows an
+outer one hung in an infinite loop, because the per-scope constant-propagation
+pass folded a shadowed loop variable to the outer value and deleted its own `i++`;
+both writes are fixed in `189f546` (see §7.2). Cases: `check/t163_for_clauses.c`
+and `negative/for_loop_init_scoped_refused.c`.
 
 ### 3.3 Both `stackcheck` overflow paths trap instead of reporting
 
@@ -596,20 +613,20 @@ their own line instead of failing the run (12 today, `stack/so2` and `stack/so3`
 them). So `#pragma stackcheck` is now driven — one passing case (`so1.c`) and two
 documented failures. What is wrong with the two is recorded as §3.3.
 
-### 4.3 "176 cases have no runner" — stale; re-measured, all 521 are driven
+### 4.3 "176 cases have no runner" — stale; re-measured, all 525 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
-runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files under
+runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; with the §7.1 and §7.2 cases there are 525 under
 `testers/unit_tests`, every one of them driven —
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 174 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 53 | `negative/` |
+| `check.mjs` | 176 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `negative.mjs` | 55 | `negative/` |
 | `nomem.mjs` | 7 | `nomem/` |
 | `runall.mjs` | 277 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-174 + 10 + 53 + 7 + 277 = 521. The caveat that replaces "no runner" is weaker but real:
+176 + 10 + 55 + 7 + 277 = 525. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" — only two files
 in the whole tree carry an `EXPECT:` line. Assertion density per directory is
 `testers/INFO.md`'s subject, not this file's.
@@ -721,6 +738,28 @@ scope, and (b) make an absent clause reach `wrapToCompound` as something it can 
 Each empty form needs a case proving it *runs*, because "parses" and "runs" are separate
 claims here: `int i; for (i = 0; …)` and `while` already work, so the generator has an
 existing shape to copy.
+
+**Done in `189f546`.** All four forms parse, run and terminate, and each empty form
+has a case proving it runs (`check/t163_for_clauses.c`):
+
+- the declaration-init is wrapped as `{ int i = 0; for (; test; update) body }`, so
+  `i` is in scope for test / update / body and gone after the loop — an enclosing
+  `i` is shadowed exactly like a nested block (`0 1 2 99` is part of the case);
+- the empty-init `;` is consumed in place — it never was, so `for (; test; update)`
+  mis-parsed its test as the update clause;
+- `for (;;)` runs until a break, and the multi-declarator init
+  (`for (int a = 1, b = 3; …)`) parses too.
+
+Two optimizer fixes ride along, and both fix a PRE-EXISTING defect that §7.2 turns
+into a user-reachable hang: a `for` over a variable that shadows an outer one used
+to run forever. `traverseAndReplaceConstants` (`mindcOptimizer.js`, per-scope pass)
+saw the loop's `i++` with the scope of the scope it started in, and folded a
+shadowed read to the OUTER variable's value; the walk now honours scope boundaries
+(each child scope is walked by its own pass), and the identifier fold requires the
+symbol ITSELF to be a constant (`symbol.isConstant`), not a same-named outer one.
+
+`negative/for_loop_init_scoped_refused.c` pins the scope: using `i` after the loop
+is `Undeclared identifier 'i'`.
 
 ### 7.3 `m = remote(@this, r)`
 
