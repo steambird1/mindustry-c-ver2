@@ -20,8 +20,8 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 176 passed, 0 failed (102 shape assertions, 767 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 55 passed, 0 failed, 2 known gaps |
+| `node ../tools/check.mjs` | 178 passed, 0 failed (108 shape assertions, 777 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 56 passed, 0 failed, 2 known gaps |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/277 — the 10 misses are reported as known gaps, not failures |
@@ -57,7 +57,7 @@ their work rows read done or struck, and §1.5 records what the closure left ope
 | both `stackcheck` overflow paths trap (§3.3) | **done** — `9cbaf8c`; both overflow paths stop cleanly, so1/so2/so3 all clean | §3.3 |
 | `&global_array[i]` / `&global_struct.field` (§3.4) | **recorded** — no decision yet | §3.4 |
 | `compiler.arrayOptimize` reads a flag nobody sets (§3.5) | **done** — `c9dd030`; the two dead reads are deleted, the flag is not wired | §3.5 |
-| same-layout array assignment does not copy (§3.6) | **recorded** — no decision yet | §3.6 |
+| same-layout array assignment does not copy (§3.6) | **done** — `e74df68`; same-layout pairs copy, an encoded target is refused | §3.6 |
 | `m = remote(@this, r)` (§6) | **done** — `be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — fixed in `2dc683e`, §4.4 corrected below | §4 |
 
@@ -314,9 +314,11 @@ same divided storage, so one word), `array("encoded")` answers `'encoded'`, and
 tell: a `lookup` request, whose category comes from the content table.
 `embedded` = `encoded` is now refused -- `Cannot assign an encoded array to an embedded
 array: … not stored the same way` -- pinned by the new
-`negative/array_assign_embedded_to_encoded.c`; `encoded` = `encoded` (and `embedded` =
-`embedded`) stays admitted, which is exactly the same-layout set §3.6's copy work
-targets. The two register-vs-memory negative cases that quoted the old `undecided
+`negative/array_assign_embedded_to_encoded.c`; `embedded` = `embedded` (and `memory` =
+`memory`) stays admitted, which is exactly the same-layout set §3.6's copy work
+targets. The `encoded` pair is settled there too: an encoded array is a constant table
+of contents, so §3.6 refused a whole-array write INTO one rather than copying it.
+The two register-vs-memory negative cases that quoted the old `undecided
 layout` wording now say `an embedded array`; the negative suite goes 54 to 55.
 
 ---
@@ -625,6 +627,25 @@ cases pins what the assignment is *meant* to do (all five suites are green throu
 the parameter form suggests, or refuse outright, which is what C does (arrays are not
 assignable). Distinct from §5's `s = b;` no-op, which is a handle *parameter* and was
 decided there.
+
+**Done in `e74df68`.** The copy. `visitAssignmentExpression` used to send array pairs
+down the generic lvalue write, which held the array "by reference" and wrote nothing;
+the element loop `veccpy` already had is now shared (`emitElementCopy`), and `a = b;`
+runs it with the smaller of the two lengths as the bound, so the sides only need the
+same layout, not the same length. `check/t164` pins the memory copy, `check/t165` the
+register (embedded_divided) copy, with the veccpy-shaped EMITs; the parameter form
+(`x = y` on two array parameters) that already copied keeps copying, through the same
+loop.
+
+One row of the table above did not survive as a COPY. `c = d` on two encoded arrays was
+"accepted" only because the reference-write copied nothing; the copy makes the no-op
+impossible to hide, and the layout settles the question: an encoded array is a constant
+table of contents -- `EncodedSlotRet.set` refuses writes, so there are no cells for the
+copied elements to land in. `refuseIncompatibleArrayAssignment` now refuses a non-const
+encoded DESTINATION with a message that names the layout
+(`negative/array_assign_into_encoded.c`); a target that is genuinely `const` keeps the
+plain "Cannot assign to const variable" refusal it already had. That is why §1.5's note
+above narrows "stays admitted" to `embedded` = `embedded` and `memory` = `memory`.
 
 ---
 
