@@ -1455,6 +1455,14 @@ export class Parser {
      * @param {ASTNode} target 
      */
     wrapToCompound(target) {
+        if (!target) {
+            /*
+            The statement failed to parse -- the errors are already recorded,
+            and asserting `target.type` would turn a refusal into a crash
+            (docs/OPEN_WORK.md 3.2). An empty compound is the safe recovery.
+            */
+            return ASTBuilder.compoundStatement();
+        }
         if (target.type === 'CompoundStatement') {
             return target;
         } else {
@@ -1512,9 +1520,14 @@ export class Parser {
 
         this.expectToken(TokenType.LEFT_PAREN);
         
-        const init = this.matchToken(TokenType.SEMICOLON) 
-            ? null 
-            : this.parseExpressionStatement(true, true);
+        let init = null;
+        if (this.matchToken(TokenType.SEMICOLON)) {
+            // Empty init: the ';' itself is the clause's end, take it now so
+            // the test below sees the right token (docs/OPEN_WORK.md 7.2).
+            this.consumeToken();
+        } else {
+            init = this.parseForInit();
+        }
         
         const test = this.matchToken(TokenType.SEMICOLON)
             ? null
@@ -1530,11 +1543,53 @@ export class Parser {
 
         const forStmt = ASTBuilder.forStatement(init, test, update, body);
         forStmt.location = forToken.location;
+
+        if (init && typeof init.type !== 'string' && init.type.type === 'TypeSpecifier') {
+            /*
+            C99-style `for (int i = 0; ...)`: the declaration's scope is the
+            loop's OWN scope (docs/OPEN_WORK.md 7.2). No pass gives a `for`
+            itself a scope, so the loop is wrapped in a block that holds the
+            declaration and the `for` with an empty init: `i` is in scope for
+            test / update / body and gone after the loop. The inner loop is a
+            plain for again, so every existing pass (the for-to-while
+            conversion, iteration counting, codegen) sees a shape it knows.
+            */
+            const wrapper = ASTBuilder.compoundStatement();
+            wrapper.location = forToken.location;
+            const decl = init;
+            forStmt.init = null;
+            wrapper.statements = [decl, forStmt];
+            decl.parent = wrapper;
+            forStmt.parent = wrapper;
+            return wrapper;
+        }
+
 		if (init) init.parent = forStmt;
 		if (test) test.parent = forStmt;
 		if (update) update.parent = forStmt;
         if (body) body.parent = forStmt;
         return forStmt;
+    }
+
+    /**
+     * The for-init clause: a declaration, or an expression statement (which
+     * may be empty). The declaration is tried FIRST and non-destructively, so
+     * `for (int i = 0; ...)` parses like a statement-level declaration;
+     * anything else (including `for (i = 0; ...)`, where `i` is not a type
+     * name) falls back to the old expression path unchanged.
+     *
+     * @returns {ASTNode?}
+     */
+    parseForInit() {
+        const savedIndex = this.currentTokenIndex;
+        const savedErrorsLength = this.errors.length;
+        const declaration = this.tryParseVariableDeclaration();
+        if (declaration) return declaration;
+        this.currentTokenIndex = savedIndex;
+        if (this.errors.length > savedErrorsLength) {
+            this.errors.splice(savedErrorsLength);
+        }
+        return this.parseExpressionStatement(true, true);
     }
 
     parseReturnStatement() {

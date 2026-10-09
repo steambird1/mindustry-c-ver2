@@ -5291,7 +5291,13 @@ export class Optimizer extends ASTVisitor {
 						&& ((!( symbol.isGlobal || (restrictions && (restrictions === 'strict' || restrictions.has(symbol))) ))
 						 || (symbol.isConst && symbol.type !== 'parameter'))) {
 					const constValue = constants.get(node.name);
-					if (constValue !== undefined) {
+					/*
+					The value must come from THIS symbol's own constant, not a
+					same-named one in an enclosing scope: the map is keyed by
+					name, and a shadowed loop variable would otherwise be folded
+					to the OUTER variable's value (docs/OPEN_WORK.md 7.2).
+					*/
+					if (constValue !== undefined && symbol.isConstant) {
 						// 替换为常量值
 						console.log(`Prepare to replaced identifier as:`,constValue,`at:`,node);
 						const replacement = this.getLiteral(constValue);
@@ -5547,7 +5553,22 @@ export class Optimizer extends ASTVisitor {
 		}
 		if (replaced) return;
 		// this.replaceConstantsAt(node, constants);
-		this.further(node, ast => this.traverseAndReplaceConstants(ast, constants));
+		this.further(node, ast => {
+			/*
+			Never cross a scope boundary here. This pass runs once per scope
+			(`optimizeScope` -> `constantPropagationInScope`), with the
+			`constants` map and `variableCanBeRemoved` lookups keyed to the
+			SCOPE being optimized. Descending into a nested block would
+			resolve every name against the enclosing scope's symbols: a
+			shadowed loop variable would be matched against the outer one,
+			its known constant value folded into the outer symbol, and the
+			loop's own `i++` deleted as a dead write -- leaving an infinite
+			loop (docs/OPEN_WORK.md 7.2). Every child scope is reached by its
+			own `optimizeScope` pass, so stopping here loses nothing.
+			*/
+			if (ast && ast.scope && ast.scope !== this.currentScope) return;
+			this.traverseAndReplaceConstants(ast, constants);
+		});
     }
 
     deadCodeEliminationInScope(scope) {
