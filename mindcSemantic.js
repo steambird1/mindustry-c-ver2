@@ -4690,6 +4690,25 @@ export class SemanticAnalyzer extends ASTVisitor {
             if (indexType && !this.isTypeCompatible(indexType, 'int')) {
                 this.addWarning(`Array index should be of intergal type`, member.location);
             }
+			/*
+			A constant index against an array whose length is known at compile
+			time is refused here, while it is still a source-level fact:
+			`int r[3]; r[5]` cannot mean what it says. A dynamic subscript
+			(`s[i]`) is left alone -- nothing here knows `i` -- and so is a
+			pointer, whose length is not part of its type. This changes no
+			generated code: everything that compiled before still compiles
+			(OPEN_WORK §7.4).
+			*/
+			if (member.type === 'NumericLiteral' && objectType.kind === 'array') {
+				const length = (this.dimensionListOf(objectType) ?? [])[0];
+				if (Number.isFinite(length) && length > 0 && member.value >= length) {
+					const what = object.type === 'Identifier' ? `'${object.name}'` : 'this array';
+					this.addError(
+						`Array subscript ${member.value} is out of bounds: `
+						+ `${what} has only ${length} element(s)`,
+						member.location);
+				}
+			}
 			if (member.type === 'NumericLiteral' && member.value) {
 				/*
 				For a string (`char s`), `s[i]` indexes single characters, and
