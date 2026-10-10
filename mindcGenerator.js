@@ -1503,6 +1503,52 @@ export class CodeGenerator extends ASTVisitor {
 		}
 		
 	}
+	
+	/**
+	 * Store a registry-struct initializer value straight into a GLOBAL struct's
+	 * data cells.
+	 * 
+	 * A global declarator's copy runs at boot, BEFORE the function machinery
+	 * has run, so the member walk of `copyStruct` -- which calls
+	 * `__pointerForward` -- reads a register that is still 0 and jumps back to
+	 * the start of the program (step limit). The cells are compile-time known:
+	 * `X.__pointer` (`extraMemoryLocation`) is the data base every member read
+	 * goes through, so each member is written directly -- exactly like the
+	 * array initializer list stores its elements.
+	 * 
+	 * Only flat scalar members of a registry-VALUED list (`isStructRet`)
+	 * reach here; a bigger struct is assembled in memory by its own list and
+	 * is never copied by the declarator at all.
+	 * 
+	 * @param {SymbolEntry} symbol
+	 * @param {string} source Name whose `.<member>` registers hold the value
+	 * @param {number} [memberLimit] How many members the list assigned
+	 * @returns {Instruction}
+	 */
+	staticStructStores(symbol, source, memberLimit = Infinity) {
+		const result = new Instruction();
+		const type = symbol.myType();
+		const base = symbol.extraMemoryLocation;
+		const flat = (type.members ?? []).every(member => {
+			const kind = member.type?.kind ?? null;
+			return !(kind === 'struct' || kind === 'union'
+				|| kind === 'array' || kind === 'pointer');
+		});
+		if (!flat) {
+			/*
+			A shape this path does not model: hand it to the old walk. A global
+			declarator only builds a REGISTRY value (`isStructRet`) for the flat
+			shapes, so anything else is unreachable in practice.
+			*/
+			return this.copyStruct(symbol.getAssemblySymbol(), source, type, null);
+		}
+		for (let i = 0; i < type.members.length && i < memberLimit; i++) {
+			const member = type.members[i];
+			result.concat(this.memory.outputStorageOf(
+				base.duplicate().forwarding(member.offset), `${source}.${member.name}`));
+		}
+		return result;
+	}
     
 	/**
 	 * 
@@ -2165,6 +2211,25 @@ export class CodeGenerator extends ASTVisitor {
 			if (symbol.extraMemoryLocation) {
 				finalize.concat(this.memory.outputStorageOf(symbol.extraMemoryLocation, `${this.memory.memoryBlocks[symbol.memoryLocation.block].name}_id`));
 				finalize.concat(this.memory.outputStorageOf(symbol.extraMemoryLocation.duplicate().forwarding(1), symbol.memoryLocation.position));
+				/*
+				A GLOBAL access-through-pointer container (array / struct / union)
+				keeps its LIVE address in `X_block` / `X_pos`: the pair `&arr[1]`
+				steps, that `arr[i] = v` writes through, and that the
+				initializer-list copy writes through. Local containers get the
+				pair from the function-stack machinery at function entry; a global
+				has no such step, and the lines above only wrote the `X.__pointer`
+				SLOT -- the live pair stayed an uninitialised register, so
+				`&arr[2]` read the first linked block at a garbage offset (trap)
+				and a global-with-initializer struct walked that same garbage
+				forever (step limit). Writing the pair from the container's own
+				memory location is exactly what the not-access-through-pointer
+				branch below does, and matches what the initializer path repeats.
+				*/
+				const isGlobal = symbol.scope === this.semantic?.globalScope;
+				const containerKind = symbol.myType()?.kind ?? null;
+				if (isGlobal && (containerKind === 'array' || containerKind === 'struct' || containerKind === 'union')) {
+					finalize.concat(symbol.memoryLocation.getAssignmentInstruction(symbol.getAssemblySymbol()));
+				}
 			} else {
 				if (symbol.accessThroughPointer) {
 					finalize.concat(symbol.memoryLocation.getAssignmentInstruction(`${symbol.getAssemblySymbol()}.__pointer`));
@@ -2264,7 +2329,49 @@ export class CodeGenerator extends ASTVisitor {
 					if (!isNamePacket && node.initializer.dataType && (
 						node.initializer.dataType.kind === 'struct' || node.initializer.dataType.kind === 'union' || evaluation.getAttribute('isStructRet')
 					)) {
-						finalize.concat(this.copyStruct(symbol.getAssemblySymbol(), evaluation.instructionReturn ?? 'null', symbol.myType(), node.initializer.dataType));
+						const structValued = node.initializer.dataType.kind === 'struct'
+							|| node.initializer.dataType.kind === 'union';
+						/*
+						A GLOBAL access-through-pointer struct / union is assembled
+						at boot, BEFORE the function machinery has run -- and the
+						member walk of `copyStruct` calls `__pointerForward`, whose
+						register is only initialised by that machinery. The call
+						reads 0 and jumps back to the start of the program (step
+						limit). The struct's data cells are known at compile time
+						(`X.__pointer` -- `extraMemoryLocation` -- is the base every
+						member read goes through), so each member of a registry-
+						valued list (`isStructRet`) is written straight to its cell,
+						the same way the array initializer list writes its elements.
+						*/
+						const isGlobalStruct = structValued
+							&& symbol.scope === this.semantic?.globalScope
+							&& !!symbol.extraMemoryLocation
+							&& evaluation.getAttribute('isStructRet');
+						if (isGlobalStruct) {
+							/*
+							Only the members the list actually initialised hold a
+							value: a UNION's members all sit at offset 0, and
+							`union u = {7}` assigns just the first one -- storing
+							the rest would overwrite it with an unassigned
+							register.
+							*/
+							const memberLimit = Math.min((symbol.myType()?.members ?? []).length,
+								Array.isArray(node.initializer.children)
+									? node.initializer.children.length : Infinity);
+							finalize.concat(this.staticStructStores(symbol, evaluation.instructionReturn ?? 'null', memberLimit));
+						} else {
+							/*
+							An access-through-pointer struct / union is read through
+							its `.__pointer` registers, and its data lives where
+							those point; the live pair `X_block` / `X_pos` is never
+							written for one (locals only get `.__pointer` from the
+							frame machinery). The walk must start from the pointer,
+							not from a pair that is uninitialised at this point.
+							*/
+							const structTarget = structValued && symbol.accessThroughPointer
+								? `${symbol.getAssemblySymbol()}.__pointer` : symbol.getAssemblySymbol();
+							finalize.concat(this.copyStruct(structTarget, evaluation.instructionReturn ?? 'null', symbol.myType(), node.initializer.dataType));
+						}
 					} else {
 						/*
 						Hand the pointer VALUE itself over when it carries names:
@@ -2323,6 +2430,14 @@ export class CodeGenerator extends ASTVisitor {
 		const declaratorTypes = ['VariableDeclarator', 'Declarator'];
 		const realiableTypes = [...declaratorTypes, 'AssignmentExpression', 'CastExpression'];
 		let assignedSpace = node.symbol ? node.symbol.memoryLocation : null, result = new Instruction();
+		/*
+		Set when the parent declarator will hand the initializer VALUE off by
+		register copy instead of renaming its instructions into the symbol (see
+		the `spaceIsOwned` comment below): an `accessThroughPointer` declarator
+		reads the value out of the evaluation temp, so that temp must really
+		hold the address even when the space is the variable's own.
+		*/
+		let valueHandedOff = false;
 		
 		/**
 		 * @type {TypeInfo}
@@ -2330,7 +2445,9 @@ export class CodeGenerator extends ASTVisitor {
 		let knownType = null;
 		if (node.parent) {
 			if (declaratorTypes.includes(node.parent.type)) {
-				const manualSpace = this.currentScope.lookup(node.parent.name).memoryLocation;
+				const manualSymbol = this.currentScope.lookup(node.parent.name);
+				const manualSpace = manualSymbol ? manualSymbol.memoryLocation : null;
+				valueHandedOff = manualSpace != null && manualSymbol.accessThroughPointer === true;
 				assignedSpace = manualSpace ?? assignedSpace;
 				if (manualSpace) {
 					// Actually, the preprocessing has been done in the variable declarator visitor.
@@ -2392,9 +2509,11 @@ export class CodeGenerator extends ASTVisitor {
 			/*
 			When the space is the variable's own memory location the declarator
 			has already written its address out; doing it again here only repeats
-			the same two instructions.
+			the same two instructions -- UNLESS the value is handed off by
+			register copy (`valueHandedOff` above), where the temp both needs
+			the address and is the only place one is ever given to it.
 			*/
-			if (!spaceIsOwned) {
+			if (!spaceIsOwned || valueHandedOff) {
 				result.concat(assignedSpace.getAssignmentInstruction(tmpVar.getAssemblySymbol()));
 			}
 			result.instructionReturn = tmpVar.getAssemblySymbol();

@@ -8,8 +8,8 @@
      &a[2]          -- an element of a local array, read back through p
      pa t = &a;     -- a pointer whose target is itself a typedef'd array
 
-   The global-array shape (&arr[i] where arr is global) is deliberately absent:
-   it traps at run time with or without a typedef, recorded in OPEN_WORK. */
+   The global-array shape (&arr[i] where arr is global) lives in
+   t166_global_element_address.c; this one stays on local arrays. */
 typedef int *p;
 typedef p pp;
 typedef int arr[4];
