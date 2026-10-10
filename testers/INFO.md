@@ -13,7 +13,7 @@
 
 | 命令（从 `testers/unit_tests` 执行） | 读哪个目录 | 当前结果 | 判定标准 |
 |---|---|---|---|
-| `node ..\tools\check.mjs` | `check/` | **178 passed, 0 failed**（108 shape assertions, 777 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
+| `node ..\tools\check.mjs` | `check/` | **179 passed, 0 failed**（111 shape assertions, 782 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
 | `node ..\tools\negative.mjs` | `negative/` | **56 passed, 0 failed, 2 known gaps** | 必须编译失败，**且给出说得清的理由** |
 | `node ..\tools\nomem.mjs` | `nomem/` | **7 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
 | `node ..\tools\loadorder.mjs` | 仓库根的 `mindc*.js` | **12 passed, 0 failed, 2 exempt** | 每个入口单独起一个 `node` 进程导入，不得有循环依赖 |

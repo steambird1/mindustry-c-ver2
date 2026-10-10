@@ -454,7 +454,7 @@ Reproduce from `testers/unit_tests`:
 
 | harness | result |
 |---|---|
-| `node ../tools/check.mjs` | 178 passed, 0 failed (108 shape assertions, 777 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 178 passed, 0 failed (111 shape assertions, 782 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 56 passed, 0 failed, 2 known gaps |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
