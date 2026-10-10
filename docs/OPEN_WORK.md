@@ -20,8 +20,8 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 178 passed, 0 failed (108 shape assertions, 777 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 56 passed, 0 failed, 2 known gaps |
+| `node ../tools/check.mjs` | 179 passed, 0 failed (111 shape assertions, 782 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 57 passed, 0 failed, 2 known gaps |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/277 �?the 10 misses are reported as known gaps, not failures |
@@ -38,7 +38,7 @@ The two invariants any new work has to keep:
 One line per item, so this file can be read a piece at a time. The reasoning is where the
 last column says, and the order of work is the order of the rows: **§1 and §2 are closed** �?
 their work rows read done or struck, and §1.5 records what the closure left open �?so the
-§7 decisions and the §3 defects without a decision are what is left.
+the §3 defects without a decision are what is left.
 
 | item | state | detail |
 |---|---|---|
@@ -50,7 +50,7 @@ their work rows read done or struck, and §1.5 records what the closure left ope
 | Phase 7: `MESSAGE:` on the 28 negative cases | **done** �?`1584cf3` | §2.1 |
 | typedef'd data pointer, second half | **done** �?`245c163`, `check/t160` | §2.2 |
 | remote-`&x` difference regression | **done** �?`245c163`, `check/t161` | §2.3 |
-| out-of-bounds subscript | **deferred by decision** �?options written down | §2.4, §7.4 |
+| out-of-bounds subscript | **done** — `8d8fb43`; a constant index is refused where the length is known at compile time | §7.4 |
 | a case for the zero-candidate overload refusal | **done** �?`1584cf3` | §2.5 |
 | `'x'` loses its text (§3.1) | **done** �?`0784da0`, `check/t162`; int→char is now a clean refusal | §7.1, §3.1 |
 | `for (int i = 0; �?` (§3.2) | **done** �?`189f546`, `check/t163`; every clause may be empty, the init declaration is scoped to the loop | §7.2, §3.2 |
@@ -389,7 +389,7 @@ widths �?1 for the remote address, 2 for a memory pair, where Phase 4's bug ma
 t118 keeps asserting each side's positive form; t161 states the difference with its own
 names, so the guard survives t118 being trimmed and nothing is asserted twice.
 
-### 2.4 Out-of-bounds subscripting �?a design question, not a fix
+### 2.4 Out-of-bounds subscripting — decided in §7.4
 
 ```c
 int r[3];
@@ -400,10 +400,13 @@ s[5] = 7;      // silently succeeds, and prints 7
 This is C-like permissiveness versus trapping, and it is **not** a blind fix: a bound
 check changes codegen for every subscript in the language, and it changes what existing
 correct programs do. It needs a decision and a scope, not a patch. Whoever takes it should
-start by finding out how many of the 526 driven cases would notice �?that number is the
+start by finding out how many of the 532 driven cases would notice �?that number is the
 real cost.
 
-**Deferred by decision.** The options, and what each costs, are written down in §7.4.
+**Decided and done in §7.4** (`8d8fb43`). A constant index is refused only where the
+length is a compile-time fact; the measurement this paragraph asks for came back empty
+(no driven case contained a constant out-of-range index), and the dynamic `s[i]` and
+the length-less pointer/handle stay unchecked, left to run time.
 
 ### 2.5 The zero-candidate overload refusal has no case
 
@@ -683,20 +686,20 @@ their own line instead of failing the run (12 today, `stack/so2` and `stack/so3`
 them). So `#pragma stackcheck` is now driven �?one passing case (`so1.c`) and two
 documented failures. What is wrong with the two is recorded as §3.3.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 526 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 532 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
-runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §7.1–�?.3 cases bring the count to 526 under
+runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §7.1–7.4 and §3.4 cases bring the count to 532 under
 `testers/unit_tests`, every one of them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 176 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 56 | `negative/` |
+| `check.mjs` | 179 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `negative.mjs` | 59 | `negative/` |
 | `nomem.mjs` | 7 | `nomem/` |
 | `runall.mjs` | 277 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-176 + 10 + 56 + 7 + 277 = 526. The caveat that replaces "no runner" is weaker but real:
+179 + 10 + 59 + 7 + 277 = 532. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only two files
 in the whole tree carry an `EXPECT:` line. Assertion density per directory is
 `testers/INFO.md`'s subject, not this file's.
@@ -877,31 +880,34 @@ boundary), so a case that must stay silent about a pattern could not say so.
 `annotationsOf` (`testers/tools/annotations.mjs`) now requires the marker not
 to follow a word character or `-`.
 
-### 7.4 Out-of-bounds subscript �?deferred, with the options written down
+### 7.4 Out-of-bounds subscript — the static check, where the length is known
 
-**Deferred by decision: no code change until it is picked up again.** What the eventual
-choice is between:
+**Decided and done in `8d8fb43`.** Of the four options the record weighed, the one
+taken is the one the compiler can answer for free: a constant subscript against an
+array whose length is a compile-time number is refused while it is still a source-level
+fact.
 
-1. **Leave it, and say so.** `s[5] = 7` on a three-element array is C-like
-   permissiveness, documented as such. Cost: zero, and one known-wrong program keeps
-   printing 7.
-2. **A static check, only where the length is already known.** A constant subscript
-   against an array whose length is a compile-time number (`int r[3]`, an alias of one, a
-   bound handle) is refused at semantic time; a dynamic subscript (`s[i]`) is not looked
-   at. Nothing that compiles today changes its generated code, so the way the driven cases
-   can notice is by containing an out-of-range constant index �?expected to be none, but
-   counting them is the first measurement. Two facts to establish before this can be
-   sized: whether `int s[] = r;` leaves `r`'s length on `s` (Phase 5 says an *unbound*
-   handle has no length �?it is `NaN` �?and it is not obvious a bound one survives the
-   assignment into the symbol), and what a static check is even supposed to say about an
-   unbound handle, where the length does not exist yet.
-3. **A runtime check on every subscript.** The honest fix and the expensive one: it
-   changes the code of every `a[i]` in the language. Its cost is measured the only useful
-   way �?run the driven cases with the check in and count what changes.
-4. **Opt-in** (`#pragma boundscheck`), meaningful only on top of 3. It does not break the
-   no-pragma-may-change-output invariant *by construction* �?a correct program prints the
-   same either way �?but that has to be shown by the suite rather than argued, and a
-   pragma nothing runs is coverage nothing has.
+- `int r[3]` refuses `r[3]`; `int m[2][3]` refuses `m[5]` (the index binds to the
+  outermost dimension, 2) and `m[1][5]` (the inner one, 3). A typedef, or an
+  initializer-bound `int s[] = r;`, carries the length and is checked the same way.
+- A dynamic subscript (`s[i]`) is not looked at: nothing at compile time knows `i`. Nor
+  is a `pointer`, nor an array whose length is not known — an unbound handle, or a
+  parameter, where the length does not exist yet; the existing unbound-handle rules
+  already refuse a read that provably precedes its binding.
+- No generated code changes. The check is purely semantic, so every program that
+  compiled before still compiles and still emits the same instructions. One consequence
+  worth stating: a constant subscript is refused wherever it appears, so the
+  one-past-the-end address `&arr[len]` is refused too. Nothing in the tree uses that
+  idiom; it can be relaxed if it is ever wanted.
 
-2 and 3 are not exclusive: 2 is what the compiler knows for free, 3 what it would have to
-pay for.
+**The two measurements the record asked for**, taken before the check was written:
+
+- `int s[] = r;` DOES leave `r`'s length on `s`: the symbol's array type carries it, so
+  a constant subscript on `s` is checked. A bare `int s[];` bound later (`s = r;` or
+  `vecalias(&s, r)`) keeps an unknown length and is left unchecked.
+- No driven case contained a constant out-of-range index. With the check in, `check`
+  stays 179/0, `nomem` 7/0, `loadorder` 12/0/2 and `runall` 267/277; `negative/` gains
+  the one case (56 → 57).
+
+`negative/array_subscript_out_of_bounds.c` pins it, asking for both refusals by name:
+`r[3]` on length 3 and `m[5]` on length 2.

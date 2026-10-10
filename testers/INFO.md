@@ -14,7 +14,7 @@
 | 命令（从 `testers/unit_tests` 执行） | 读哪个目录 | 当前结果 | 判定标准 |
 |---|---|---|---|
 | `node ..\tools\check.mjs` | `check/` | **179 passed, 0 failed**（111 shape assertions, 782 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
-| `node ..\tools\negative.mjs` | `negative/` | **56 passed, 0 failed, 2 known gaps** | 必须编译失败，**且给出说得清的理由** |
+| `node ..\tools\negative.mjs` | `negative/` | **57 passed, 0 failed, 2 known gaps** | 必须编译失败，**且给出说得清的理由** |
 | `node ..\tools\nomem.mjs` | `nomem/` | **7 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
 | `node ..\tools\loadorder.mjs` | 仓库根的 `mindc*.js` | **12 passed, 0 failed, 2 exempt** | 每个入口单独起一个 `node` 进程导入，不得有循环依赖 |
 | `node ..\tools\runall.mjs` | 14 个目录：`suite/` `mem/` `arr/` `arr2/` `ptr2/` `stack/` `tests/` `uc/` `cases/` `exttests/` `hdr/` `t/` `big/` `u/` | **267/277**（10 个已知坏例以 KNOWN-GAP 如实上报，不算失败） | 能编译、能跑完不崩；带 `EXPECT:` 的还比对输出 |
@@ -67,13 +67,13 @@
 
 ## 目录地图
 
-`testers/unit_tests/` 下共 **530 个 `.c`，全部有 runner**（178 + 10 + 58 + 7 + 277 = 530）：
+`testers/unit_tests/` 下共 **532 个 `.c`，全部有 runner**（179 + 10 + 59 + 7 + 277 = 532）：
 
 | 目录 | 文件数 | 谁来跑 |
 |---|---|---|
-| `check/` | 178 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
+| `check/` | 179 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
 | `t/` | 100 | `runall.mjs`（早期按主题分的用例，`2dc683e` 起纳入） |
-| `negative/` | 58 | `negative.mjs` |
+| `negative/` | 59 | `negative.mjs` |
 | `suite/` | 50 | `runall.mjs` |
 | `mem/` | 25 | `runall.mjs` |
 | `tests/` | 25 | `runall.mjs`（另有手工的 `batch.mjs [baseline]`） |
@@ -95,7 +95,7 @@
 
 ## check/ 的编号约定
 
-`check/` 用 `tNN_主题.c` 命名，**编号 1–163 已用满，没有空号**，下一个用例是 `t164`。
+`check/` 用 `tNN_主题.c` 命名，**编号 1–166 已用满，没有空号**，下一个用例是 `t167`。
 另有 13 个不带编号的（`m1`–`m3`、`n1`–`n2`、`rw1`–`rw2`、`seq1`、`memsp2`–`memsp3`），
 它们早于编号制，保留原名。
 
@@ -157,9 +157,12 @@
 | `t152`–`t156` | **Phase 6**：`vecalias`、`veccpy`（元素循环、handle 源、运行期钳制、remote） |
 | `t157`–`t158` | 优化器 `canOptimize` 回归：循环体内声明必须真的被初始化；崩溃必须报出原因 |
 | `t159` | `auto` 按实参个数的重载分派（`noinline` 防内联掩盖） |
-| `t160`–`t161` | **Phase 7**：typedef 数据指针走别名构造器（`t160`；`&全局数组元素` 一条因 `OPEN_WORK.md` §3.4 缺陷故意缺席）；`&` 对 remote 与非 remote 必须生成不同代码（`t161`，`EMIT` 断宽度、`EMIT-NOT` 断不得互串） |
+| `t160`–`t161` | **Phase 7**：typedef 数据指针走别名构造器（`t160`，`&全局数组元素` 一条已由 §3.4 修好并移入 `t166`）；`&` 对 remote 与非 remote 必须生成不同代码（`t161`，`EMIT` 断宽度、`EMIT-NOT` 断不得互串） |
 | `t162` | **§7.1**：单引号字符字面量是 `int`（取 ASCII 值），双引号 `"a"` 才是 `char`；`'x'` 走 `int` 重载、`"a"` 走 `char` 重载，转义与全局初始化器都按数值来；`char c = 'x'` 现在是干净的 `int`→`char` 拒绝 |
 | `t163` | **§7.2**：`for` 的每个子句都可以为空，init 也可以是声明，且声明活在循环自己的作用域里——循环后名字就没了（`negative/for_loop_init_scoped_refused.c`），外层同名变量被正确遮蔽（`0 1 2 99` 就是遮蔽段）；`for (;;)` 靠 `break` 正常终止 |
+| `t164` | **§3.6**：两边都是数组的 `a = b;` 是逐元素拷贝（与 `veccpy` 同一个循环，取两者长度的较小值）；以前是按引用、什么都不拷，`a[0]` 会读回自己的初值 |
+| `t165` | **§3.6**：寄存器数组也照拷——`array("embedded_divided")` 目标走同一个循环，布局不参与，因为以前根本没写 |
+| `t166` | **§3.4**：全局数组元素地址（`&arr[2]`、`&arr[0]`、经函数传递后解引用）与全局结构体/联合体成员地址（含带初始化器列表的）全部可用；启动时把活地址对 `X_block`/`X_pos` 从容器自己的内存位置写入 |
 
 设计背景见 `docs/PLAN_array_layout.md`。
 
@@ -172,12 +175,16 @@
 在它想守住的那条检查被删掉之后**依然会通过**——这正是删掉的检查不被发现的方式。
 所以每条 `MESSAGE:` 都必须匹配到编译器真实给出的某一条错误。
 
-**负债已清零**（`1584cf3`）。58 个用例里 56 个带 `MESSAGE:`，剩下 2 个是
+**负债已清零**（`1584cf3`）。59 个用例里 57 个带 `MESSAGE:`，剩下 2 个是
 如实上报的 `KNOWN-GAP`——编译器今天会接受它们，没有错误信息可断言。
 `remote_as_value_refused.c`（§7.3）是第一个真正用上 `NOT-MESSAGE:` 的用例，
 也顺带暴露并修掉了注解解析器的一个潜在冲突：`annotationsOf` 里的 `\bMESSAGE:`
 会连 `NOT-MESSAGE:` 里的 `MESSAGE` 一起读进去——「不得出现」的那条于是被当成
 正断言。现在要求标记前既不是字母数字也不是 `-`（`testers/tools/annotations.mjs`）。
+
+`array_subscript_out_of_bounds.c`（§7.4）断言常量下标越界被拒：编译期已知长度时
+按名字要求两条拒绝（`r[3]` 长度 3、`m[5]` 长度 2）；动态下标与长度未知的指针/句柄
+不在这里查。它不增加 `MESSAGE:` 负债。
 
 | 用例 | 理由 |
 |---|---|

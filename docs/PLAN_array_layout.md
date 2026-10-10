@@ -344,8 +344,8 @@ zero-candidate overload case) and `245c163` (the last two tests). As measured:
   accidental coverage: no test from Phases 5 or 6 contains a `typedef` at all. The test
   walks alias-of-alias (copy path, no pointer wrap), the typedef'd pointer as a parameter
   written through, an element of a local array, and a pointer to a typedef'd array. The
-  global-array shape (`&arr[i]` on a global) is excluded on purpose — probing it exposed
-  a pre-existing defect instead (`OPEN_WORK.md` §3.4), and the file's header says so.
+  global-array shape (`&arr[i]` on a global) was excluded on purpose while it was broken;
+  §3.4 has since fixed it and `check/t166` pins it, so `t160`'s header now points there.
 - ~~The width/size matrix from Phase 2.~~ → done, `check/t13`–`t17`, `t25`, `t32`,
   `t39`, `t44`, `t45`.
 - **Remote-`&x` difference regression — done as `check/t161_remote_addr_diff.c`
@@ -354,9 +354,10 @@ zero-candidate overload case) and `245c163` (the last two tests). As measured:
   address, 2 for a memory pair — Phase 4's bug made both `print 2`), and three
   `EMIT-NOT`s forbid either side taking the other's form. `t118` keeps the per-side
   positive assertions; t161 asserts the difference, with distinct names.
-- **Out-of-bounds subscripting — deferred by decision**, options written down in
-  `OPEN_WORK.md` §2.4 and §7.4. Not a blind fix: bounds checking changes codegen for
-  every subscript in the language.
+- **Out-of-bounds subscripting — done (`8d8fb43`)**: the static half, where the length
+  is already known. `OPEN_WORK.md` §7.4 records the measurement (no driven case had a
+  constant out-of-range index) and what stays unchecked — the dynamic subscript, and a
+  pointer or unbound handle whose length does not exist at compile time.
 
 ## 8. Fixes that were not in the plan
 
@@ -454,8 +455,8 @@ Reproduce from `testers/unit_tests`:
 
 | harness | result |
 |---|---|
-| `node ../tools/check.mjs` | 178 passed, 0 failed (111 shape assertions, 782 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 56 passed, 0 failed, 2 known gaps |
+| `node ../tools/check.mjs` | 179 passed, 0 failed (111 shape assertions, 782 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 57 passed, 0 failed, 2 known gaps |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/277 — the 10 misses are known gaps, reported on their own line |
@@ -470,8 +471,8 @@ Invariants that must hold at every boundary:
   (and must stay silent with `NOT-MESSAGE:` where silence is the point) — the
   annotations themselves are the record.
 
-Test numbering: `check/` runs `t1`–`t163` with **no free slot**, so the next case is
-`t164`. (`negative/` is named by behaviour, not by number.)
+Test numbering: `check/` runs `t1`–`t166` with **no free slot**, so the next case is
+`t167`. (`negative/` is named by behaviour, not by number.)
 
 ### The Phase 7 `MESSAGE:` debt — cleared in `1584cf3`
 
