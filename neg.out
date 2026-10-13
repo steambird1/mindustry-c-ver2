@@ -1,0 +1,61 @@
+ok   array_assign_memory_to_register.c  [Cannot assign an array in memory to an array in an undecided layout: 'mem' and 'reg' are n]  [1 reason(s) checked]
+ok   array_assign_memory_to_remote.c  [Cannot assign an array in memory to a remote array: 'mem' and 'ra' are not the same type, ]  [2 reason(s) checked]
+ok   array_assign_register_to_memory.c  [Cannot assign an array in an undecided layout to an array in memory: 'reg' and 'mem' are n]  [1 reason(s) checked]
+ok   array_assign_remote_to_memory.c  [Cannot assign a remote array to an array in memory: 'ra' and 'mem' are not the same type, ]  [1 reason(s) checked]
+ok   array_no_address_to_function_pointer.c  [Internal parser error: Array 'reg' has no address, so it cannot be handed to a function po]
+ok   array_param_too_small.c  [Argument 1 of 'test' has 2 element(s) in dimension 1, but the parameter needs at least 4]
+ok   byname_needs_v150.c  ['s' holds a register NAME ('int *byname' / 'byname(&x)'), which needs target version 150 o]
+ok   byname_of_array_element.c  [Pointer 'p' was declared to hold a register NAME (int *byname / byname(&x)), which is not ]
+ok   byname_of_volatile.c  [Pointer 'p' was declared to hold a register NAME (int *byname / byname(&x)), which is not ]
+ok   byname_pointer_arithmetic.c  [Pointer 'p' was declared to hold a register NAME (int *byname / byname(&x)), which is not ]
+ok   byname_target_needs_two_representations.c  [Pointer 'q' was asked to hold the name of 'w', but that variable also has to be reachable ]
+ok   fn_arity_mismatch.c  [Function 'add' expects 2 arguments, but 3 were provided ; Function 'add' expects 2 arguments, but 1 were provided]  [2 reason(s) checked]
+ok   fnptr_auto_parameter.c  [A function pointer cannot have an 'auto' parameter: its value is a line number, so nothing ; A function pointer cannot have an 'auto' parameter: its value is a line number, so nothing]  [2 reason(s) checked]
+ok   fnptr_byname_parameter.c  [Cannot initialize 'cb{void || int*}' with 'setp{void || int* byname}' ; 'setp' is given to a function pointer, and a function pointer's parameter type cannot say ]  [2 reason(s) checked]
+ok   lookup_capacity.c  [Array 'u' has 30 elements, but the 'item' lookup table only names 20: use at most 20, or a]
+ok   n05_const_pointer_qualifiers.c  [Const variable 'q' must be initialized or be an automatically-linked device ; Const variable 'r' must be initialized or be an automatically-linked device]
+ok   n06_variable_length_array.c  [Variable length arrays are not supported: the size of 'a' must be a compile time constant]
+ok   n07_runtime_string_concat.c  [Cannot concatenate these strings: only string literals can be joined, because the target l]
+ok   n08_string_concat_runtime.c  [Cannot concatenate these strings: only string literals can be joined, because the target l]
+ok   n09_lenof_pointer.c  [lenof() needs an array, but 'p' is not one]
+ok   n10_conditional_string_concat.c  [Cannot concatenate these strings: only string literals can be joined, because the target l]
+ok   nomem_pointer_needs_memory.c  [Pointer 'p' needs a real address, but this program has no memory block linked, so there is]
+ok   nomem_storage_class_pointer.c  [Pointer 'p' needs a real address ('x' is static), but this program has no memory block lin]
+ok   nomem_undereferenced_pointer.c  [Pointer 'p' needs a real address, but this program has no memory block linked, so there is]
+ok   open_array_variable_from_open.c  [Neither 'b' nor what it is given says how many elements there are: one of them has to]  [1 reason(s) checked]
+ok   open_array_variable_from_pointer.c  [The size of array 's' is neither given nor deducible: write a size, or an initializer that]  [1 reason(s) checked]
+ok   open_array_variable_reassigned.c  [Cannot assign to 's': it is not an array of its own, it is 'r' itself. Write `int s[] = r;]  [1 reason(s) checked]
+FAIL ovl_shared_noversion.c: refused, but not for this reason: no message matches /No version of 'add' accepts these arguments (int, int, int, int)/
+     said instead: No version of 'add' accepts these arguments (int, int, int, int)
+ok   remote_array_no_length.c  ['u' is not declared here, so remote() cannot know how long the array on the other processo]
+ok   remote_array_two_dimensions.c  [A 'remote' array can only have one dimension: its elements are single registers of the oth]
+ok   remote_of_remote.c  ['rc' is itself remote: remote() cannot chain through two processors]
+ok   remote_struct_pointer_needs_pragma.c  [A 'remote' pointer to a struct reaches its members by name, which needs '#pragma optimize(]
+ok   struct_name_packet_needs_byname.c  ['&s' hands a struct pointer that carries member NAMES, so the parameter has to be declared]
+ok   struct_template_conversion_mismatch.c  ['n' does not convert into 'cvt': its 'auto' members settled on a different representation ]
+ok   struct_template_pointer_needs_byname.c  [a pointer to 'cvt' hands over a member that carries a NAME, so the parameter has to be dec]
+ok   t25_opaque_reject.c  [Cannot initialize 'item_t' with 'content_t']
+ok   t32_encoded_bad.c  [An encoded array can only hold numbers; element 1 ('"two"') is not one]
+ok   template_struct_in_function_pointer.c  ['fptr' is a function pointer type, and its signature names a struct with 'auto' members --]
+ok   typedef_array_variable_length.c  [Variable length arrays are not supported: the size of 'arr' must be a compile time constan]
+ok   unbound_handle_bind_remote.c  [Cannot bind a remote array to 'a': a handle packs helper entry points of THIS processor, w]  [1 reason(s) checked]
+ok   unbound_handle_binds_itself.c  [Array 'a' is an unbound handle: it is read before anything bound it here (write 'a = someA]  [1 reason(s) checked]
+ok   unbound_handle_never_bound.c  [Array 'a' is an unbound handle that is never bound: write 'a = someArray;' somewhere befor]  [1 reason(s) checked]
+ok   unbound_handle_read_before_bind.c  [Array 'a' is an unbound handle: it is read before anything bound it here (write 'a = someA]  [1 reason(s) checked]
+ok   vec_intrinsic_arity.c  ['vecalias' takes exactly 2 arguments, but 1 were provided ; 'vecalias' takes exactly 2 arguments, but 3 were provided ; 'veccpy' takes exactly 2 arguments, but 1 were provided ; The first argument of veccpy must be an array, as in 'veccpy(a, b)' ; The second argument of veccpy must be an array, as in 'veccpy(a, b)' ; The second argument of vecalias must be an array, as in 'vecalias(&a, b)']  [6 reason(s) checked]
+ok   vecalias_into_parameter.c  [Cannot vecalias into 's': it is an array PARAMETER, and the handle in it is a COPY -- the ]  [3 reason(s) checked]
+ok   vecalias_into_storage.c  [Cannot vecalias into 'mem': it is an array in memory, and a handle is not storage -- use v ; Cannot vecalias into 'div': it is an array in registers, which has no address to take the  ; Cannot vecalias into 'ra': a remote array is an element of ANOTHER processor, and a handle]  [3 reason(s) checked]
+ok   vecalias_needs_address.c  [The first argument of vecalias must be the address of a handle, as in 'vecalias(&a, b)': a ; The first argument of vecalias must be the address of a handle, as in 'vecalias(&a, b)': a]  [2 reason(s) checked]
+ok   vecalias_remote_source.c  [Cannot bind a remote array by vecalias: a handle packs helper entry points of THIS process]  [2 reason(s) checked]
+ok   veccpy_into_handle.c  [Cannot veccpy into 'h': a handle is a NAME, not storage, so it has no elements to write. W ; Cannot veccpy into 'e': a handle is a NAME, not storage, so it has no elements to write. W]  [3 reason(s) checked]
+ok   veccpy_never_bound_source.c  [Array 'h' is an unbound handle that is never bound: write 'h = someArray;' somewhere befor]  [1 reason(s) checked]
+ok   veccpy_source_too_long.c  [The second argument of veccpy has 8 element(s) in dimension 1, but the destination 'dst' h]  [1 reason(s) checked]
+
+known gaps (the compiler accepts these today):
+   ovl_auto.c: accepted today -- the argument is resolved to one representation instead of being refused, so this case documents the missing check.
+   ovl_pragma.c: accepted today -- the pragma for a feature that does not exist yet is accepted and ignored instead of being refused.
+
+30 case(s) say nothing about WHICH refusal they want, so they would pass on any error at all:
+   array_no_address_to_function_pointer.c array_param_too_small.c byname_needs_v150.c byname_of_array_element.c byname_of_volatile.c byname_pointer_arithmetic.c byname_target_needs_two_representations.c lookup_capacity.c n05_const_pointer_qualifiers.c n06_variable_length_array.c n07_runtime_string_concat.c n08_string_concat_runtime.c n09_lenof_pointer.c n10_conditional_string_concat.c nomem_pointer_needs_memory.c nomem_storage_class_pointer.c nomem_undereferenced_pointer.c ovl_auto.c ovl_pragma.c remote_array_no_length.c remote_array_two_dimensions.c remote_of_remote.c remote_struct_pointer_needs_pragma.c struct_name_packet_needs_byname.c struct_template_conversion_mismatch.c struct_template_pointer_needs_byname.c t25_opaque_reject.c t32_encoded_bad.c template_struct_in_function_pointer.c typedef_array_variable_length.c
+
+50 passed, 1 failed, 2 known gaps
