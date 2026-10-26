@@ -319,7 +319,8 @@ export class Compiler {
 	 * 
 	 * @param {List<Object>} memoryInfo 
 	 * @param {AttributeClass} config 
-	 * @param {CompilerExtensionBase[]} extensions (Currently not working!!!)
+	 * @param {CompilerExtensionBase[]} extensions extensions the caller embeds; `compile()`
+	 *        merges them with any `#include "*.js"` modules the source names
 	 */
     constructor(sourceCode, memoryInfo, config, extensions = defaultExtensions) {
 

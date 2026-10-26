@@ -213,9 +213,11 @@ control/radar/ubind/ucontrol/...`，并可注入 `sensorProvider`、`actions()`�
 `compileAndRun` 会预先处理 `#include "*.js"`（编译器扩展），把该行注释掉以保住行号，
 再把扩展挂到 `Compiler` 上。**`2dc683e` 起 `EXT_ROOT` / `INCLUDE_ROOT` 指向仓库根的
 `include/`**（真实存在，里面有 `.h` 和 `.js`），`exttests/` 那 4 个用例因此都能走通
-include→扩展这条路径，不再被静默跳过。仍未对上的是 `mindc.js:322` 那句
-`extensions (Currently not working!!!)`：要么它过期了，要么这 4 个用例没碰到它警告的
-那部分——哪个对，读那句话写下的语境才知道，结论记在 `docs/OPEN_WORK.md` §4.4。
+include→扩展这条路径，不再被静默跳过。`mindc.js:322` 那句
+`extensions (Currently not working!!!)` 已确认是过期注释（初始上传 `d98dd2b` 时留下的）：
+constructor 的 `extensions` 会进入 `embeddedExtensions`，`compile()` 把它们与
+`#include "*.js"` 导入的扩展合并进 parser 的类型 / 函数 / handler 表；`exttests/` 的 4 个
+用例就是证据。注释已改成说明这个参数实际做什么，§4.4 关闭。
 
 ## 已知的坏工具
 

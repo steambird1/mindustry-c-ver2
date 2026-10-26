@@ -38,7 +38,7 @@ The two invariants any new work has to keep:
 One line per item, so this file can be read a piece at a time. The reasoning is where the
 last column says, and the order of work is the order of the rows: **§1, §2 and §3 are
 closed** — their work rows read done or struck, and §1.5 records what the closure left
-open. What remains is §4.4 plus the known gaps recorded in §6 and `testers/INFO.md`.
+open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 
 | item | state | detail |
 |---|---|---|
@@ -61,7 +61,7 @@ open. What remains is §4.4 plus the known gaps recorded in §6 and `testers/INF
 | assigning an open-dimension array parameter (§3.7) | **done** — `613cafa`; refused at semantic time, element writes stay supported | §7.5, §3.7 |
 | sized array parameter receiving a bound handle (§3.8) | **done** — `f970d51`; the call-site note follows the argument's packed handle | §7.6, §3.8 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
-| §4 harness debt | **closed** �?fixed in `2dc683e`, §4.4 corrected below | §4 |
+| §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
 ---
 
@@ -756,7 +756,7 @@ most of those directories are driven *by runall*, whose bar is "it ran" �?only
 in the whole tree carry an `EXPECT:` line. Assertion density per directory is
 `testers/INFO.md`'s subject, not this file's.
 
-### 4.4 Extension loading: roots fixed in `2dc683e`, the warning note unreconciled
+### 4.4 Extension loading: roots fixed in `2dc683e`, the warning note was stale
 
 The original claim was that `runsim.mjs` pointed `EXT_ROOT` at `testers/tools/src/ext/`,
 which does not exist, so `collectExtensions` found nothing, `#include "*.js"` was
@@ -766,10 +766,13 @@ silently skipped, and a case relying on an extension would pass by accident. Fix
 pass through the include→extension path �?the silent-skip scenario no longer holds for
 them.
 
-Still unreconciled: `mindc.js:322` says `extensions (Currently not working!!!)`. Either
-that note is stale or the four tests do not reach the part it warns about; resolving it
-needs someone to read what "not working" meant when it was written, and no suite can
-settle it. Recorded, deferred.
+**The note was stale.** It dates from the initial upload (`d98dd2b "Upload New File"`),
+before the merge existed. The constructor's `extensions` parameter is used
+(`embeddedExtensions`), and `compile()` merges it with the `#include "*.js"` modules the
+lexer imports (`mindcLexer.js:1131`, `mindc.js:350-368`) into the parser's
+type/function/handler tables. The four `exttests/` are the proof: `ex1`/`ex2` include
+`archon.js`, `ex3`/`ex4` include `sharelist.js`, and all four pass in `runall`. The comment
+now says what the parameter does; nothing is deferred.
 
 ---
 
