@@ -14,7 +14,7 @@
 | 命令（从 `testers/unit_tests` 执行） | 读哪个目录 | 当前结果 | 判定标准 |
 |---|---|---|---|
 | `node ..\tools\check.mjs` | `check/` | **180 passed, 0 failed**（111 shape assertions, 787 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
-| `node ..\tools\negative.mjs` | `negative/` | **58 passed, 0 failed, 2 known gaps** | 必须编译失败，**且给出说得清的理由** |
+| `node ..\tools\negative.mjs` | `negative/` | **58 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
 | `node ..\tools\nomem.mjs` | `nomem/` | **7 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
 | `node ..\tools\loadorder.mjs` | 仓库根的 `mindc*.js` | **12 passed, 0 failed, 2 exempt** | 每个入口单独起一个 `node` 进程导入，不得有循环依赖 |
 | `node ..\tools\runall.mjs` | 14 个目录：`suite/` `mem/` `arr/` `arr2/` `ptr2/` `stack/` `tests/` `uc/` `cases/` `exttests/` `hdr/` `t/` `big/` `u/` | **267/277**（10 个已知坏例以 KNOWN-GAP 如实上报，不算失败） | 能编译、能跑完不崩；带 `EXPECT:` 的还比对输出 |
@@ -67,13 +67,13 @@
 
 ## 目录地图
 
-`testers/unit_tests/` 下共 **534 个 `.c`，全部有 runner**（180 + 10 + 60 + 7 + 277 = 534）：
+`testers/unit_tests/` 下共 **532 个 `.c`，全部有 runner**（180 + 10 + 58 + 7 + 277 = 532）：
 
 | 目录 | 文件数 | 谁来跑 |
 |---|---|---|
 | `check/` | 180 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
 | `t/` | 100 | `runall.mjs`（早期按主题分的用例，`2dc683e` 起纳入） |
-| `negative/` | 60 | `negative.mjs` |
+| `negative/` | 58 | `negative.mjs` |
 | `suite/` | 50 | `runall.mjs` |
 | `mem/` | 25 | `runall.mjs` |
 | `tests/` | 25 | `runall.mjs`（另有手工的 `batch.mjs [baseline]`） |
@@ -176,8 +176,9 @@
 在它想守住的那条检查被删掉之后**依然会通过**——这正是删掉的检查不被发现的方式。
 所以每条 `MESSAGE:` 都必须匹配到编译器真实给出的某一条错误。
 
-**负债已清零**（`1584cf3`）。60 个用例里 58 个带 `MESSAGE:`，剩下 2 个是
-如实上报的 `KNOWN-GAP`——编译器今天会接受它们，没有错误信息可断言。
+**负债已清零**（`1584cf3`）。`negative/` 的 58 个用例全部带 `MESSAGE:`，没有
+`KNOWN-GAP`：原先那两个（`ovl_auto.c`、`ovl_pragma.c`）已删除——自动模板 / 重载
+已经实现，`check/t109`、`check/t110` 用正向用例断言同一事实。
 `remote_as_value_refused.c`（§7.3）是第一个真正用上 `NOT-MESSAGE:` 的用例，
 也顺带暴露并修掉了注解解析器的一个潜在冲突：`annotationsOf` 里的 `\bMESSAGE:`
 会连 `NOT-MESSAGE:` 里的 `MESSAGE` 一起读进去——「不得出现」的那条于是被当成
@@ -191,10 +192,7 @@
 整体赋值被拒：它按值收到调用方 handle 的副本，赋值只会改本函数的副本。写元素
 （`s[i] = ...`）是受支持的路径，`check/t167` 在五种不变性 pragma 下都要求它到达调用方。
 
-| 用例 | 理由 |
-|---|---|
-| `ovl_auto.c` | 实参被解析到某一种表示，而不是被拒绝；这个用例记录的是缺失的检查 |
-| `ovl_pragma.c` | 为尚未存在的特性写的 pragma 被接受并忽略，而不是被拒绝 |
+`negative/` 目前没有 `KNOWN-GAP`。
 
 `1584cf3` 之前哪 28 个缺注解，记在 `docs/PLAN_array_layout.md` §9；每个用例文件里
 则是它自己那条注解为什么这么写。

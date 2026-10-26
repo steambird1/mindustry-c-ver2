@@ -338,9 +338,10 @@ Commits `1584cf3` (the `MESSAGE:` annotations, the runner's `NOT-MESSAGE:`, the
 zero-candidate overload case) and `245c163` (the last two tests). As measured:
 
 - **`MESSAGE:` debt — cleared.** All 28 carry `MESSAGE:` lines taken from the compiler's
-  own wording (regex-escaped, short unique prefixes); the two `KNOWN-GAP`s (`ovl_auto.c`,
-  `ovl_pragma.c`) stay annotated as gaps — the compiler accepts those programs, so there
-  is no message to match. `negative.mjs` gained `NOT-MESSAGE:`, and
+  own wording (regex-escaped, short unique prefixes); the two `KNOWN-GAP`s that stood
+  then (`ovl_auto.c`, `ovl_pragma.c`) have since been removed — auto templates made those
+  programs legal and `check/t109`/`t110` cover them, so `negative/` states a reason for
+  every case. `negative.mjs` gained `NOT-MESSAGE:`, and
   `negative/ovl_shared_noversion.c` uses it to pin the zero-candidate refusal's silence
   about the count message. The list is in §9 and in
   [`testers/INFO.md`](../testers/INFO.md).
@@ -461,7 +462,7 @@ Reproduce from `testers/unit_tests`:
 | harness | result |
 |---|---|
 | `node ../tools/check.mjs` | 180 passed, 0 failed (111 shape assertions, 787 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 58 passed, 0 failed, 2 known gaps |
+| `node ../tools/negative.mjs` | 58 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/277 — the 10 misses are known gaps, reported on their own line |
@@ -472,7 +473,7 @@ Invariants that must hold at every boundary:
   `optimize(...)` variant; none currently opts out.
 - Never record the same fact twice, and never let a test assert a fact another test
   already asserts.
-- Every `negative/` case except the two known gaps states its refusal with `MESSAGE:`
+- Every `negative/` case states its refusal with `MESSAGE:`
   (and must stay silent with `NOT-MESSAGE:` where silence is the point) — the
   annotations themselves are the record.
 
@@ -485,8 +486,8 @@ The list below is the 28 that had no annotation when Phase 7 closed; each now ca
 `MESSAGE:` line. The reasoning behind each annotation is in
 [`testers/INFO.md`](../testers/INFO.md).
 
-**2 remain the reported `KNOWN-GAP`s** — the compiler accepts them today, so there is no
-message to match: `ovl_auto.c`, `ovl_pragma.c`.
+**No `KNOWN-GAP`s remain.** The two that stood (`ovl_auto.c`, `ovl_pragma.c`) were
+removed once auto templates made them legal; `check/t109` / `t110` cover them.
 
 **The other 28, then without annotations:**
 

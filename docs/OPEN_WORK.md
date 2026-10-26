@@ -21,7 +21,7 @@ Reproduce the baselines from `testers/unit_tests`:
 | runner | result |
 |---|---|
 | `node ../tools/check.mjs` | 180 passed, 0 failed (111 shape assertions, 787 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 58 passed, 0 failed, 2 known gaps |
+| `node ../tools/negative.mjs` | 58 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/277 �?the 10 misses are reported as known gaps, not failures |
@@ -334,11 +334,13 @@ layout` wording now say `an embedded array`; the negative suite goes 54 to 55.
 
 **30 of the 52 cases then in `testers/unit_tests/negative/` had no `MESSAGE:`**; 22 did.
 They pass on "did it fail" alone, so deleting the check that refuses them turns the case
-green rather than red. (53 files there today: `ovl_shared_noversion.c` joined in §2.5.)
+green rather than red. The directory has grown since; §4.3 has the current count.
 
-Two of the 30 are the reported `KNOWN-GAP`s �?`ovl_auto.c` and `ovl_pragma.c`, where the
-compiler accepts the program today, so there is no message to match. The other 28 are
-listed with per-file reasoning in the plan's §9 and in
+The two `KNOWN-GAP`s this list started with (`ovl_auto.c`, `ovl_pragma.c`) have since
+been removed: the auto-template / overload work made those programs legal, and
+`check/t109` / `t110` now pin them as positive cases, so an "accepted today" gap would
+assert the same fact twice. `negative/` has no known gaps left. The other 28 are listed
+with per-file reasoning in the plan's §9 and in
 [`../testers/INFO.md`](../testers/INFO.md); they are not repeated here.
 
 `negative/fn_arity_mismatch.c` is the worked example of why this matters. It was written
@@ -353,11 +355,10 @@ message it happens to produce stops discriminating the moment an unrelated error
 alongside.
 
 **Done in `1584cf3`.** All 28 carry `MESSAGE:` lines taken from the compiler's own
-wording (regex-escaped, short unique prefixes), the runner gained `NOT-MESSAGE:` so a
-case can also forbid an error, and the two known gaps stand: the compiler accepts those
-programs, so there is no message to match, and the runner reports them on their own line
-instead of passing them quietly. The rule applied throughout is the one above �?one
-`MESSAGE:` per distinct refusal reason.
+wording (regex-escaped, short unique prefixes), and the runner gained `NOT-MESSAGE:` so
+a case can also forbid an error. The two `KNOWN-GAP`s that stood then have since been
+removed (see above), so `negative/` now states a reason for every case. The rule
+applied throughout is the one above — one `MESSAGE:` per distinct refusal reason.
 
 ### 2.2 Typedef'd **data** pointer, the second half
 
@@ -713,21 +714,21 @@ their own line instead of failing the run (10 today). So `#pragma stackcheck` is
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 534 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 532 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §7.1–7.5,
-§3.4 and §3.7 cases bring the count to 534 under `testers/unit_tests`, every one of
+§3.4 and §3.7 cases bring the count to 532 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
 | `check.mjs` | 180 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 60 | `negative/` |
+| `negative.mjs` | 58 | `negative/` |
 | `nomem.mjs` | 7 | `nomem/` |
 | `runall.mjs` | 277 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-180 + 10 + 60 + 7 + 277 = 534. The caveat that replaces "no runner" is weaker but real:
+180 + 10 + 58 + 7 + 277 = 532. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only two files
 in the whole tree carry an `EXPECT:` line. Assertion density per directory is
 `testers/INFO.md`'s subject, not this file's.
