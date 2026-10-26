@@ -5506,6 +5506,17 @@ export class SemanticAnalyzer extends ASTVisitor {
             const requested = argSymbol.requestedArrayImplementation ?? null;
             if (argSymbol.isRemote === true) {
                 notes.remote = true;
+            } else if (argSymbol.isUnboundHandle === true) {
+                /*
+                A bound unbound-handle (`int h[]; h = someArray;`) holds a PACKED
+                HANDLE in its one cell, whatever it was bound to. Passing it has
+                to say "handle", not "traditional pointer": a two-word pointer
+                shape built from that one-word value is garbage, and a SIZED
+                parameter (which trusts the call-site note, unlike an open one)
+                would read through it and trap -- the case recorded in
+                OPEN_WORK §6.
+                */
+                notes.register = true;
             } else if (requested && requested !== 'traditional') {
                 notes.register = true;
                 notes.requested.add(requested);
