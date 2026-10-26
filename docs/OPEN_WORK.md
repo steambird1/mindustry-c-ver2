@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 180 passed, 0 failed (111 shape assertions, 787 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 181 passed, 0 failed (111 shape assertions, 792 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 58 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
@@ -59,6 +59,7 @@ open. What remains is §4.4 plus the known gaps recorded in §6 and `testers/INF
 | `compiler.arrayOptimize` reads a flag nobody sets (§3.5) | **done** �?`c9dd030`; the two dead reads are deleted, the flag is not wired | §3.5 |
 | same-layout array assignment does not copy (§3.6) | **done** �?`e74df68`; same-layout pairs copy, an encoded target is refused | §3.6 |
 | assigning an open-dimension array parameter (§3.7) | **done** — `613cafa`; refused at semantic time, element writes stay supported | §7.5, §3.7 |
+| sized array parameter receiving a bound handle (§3.8) | **done** — `f970d51`; the call-site note follows the argument's packed handle | §7.6, §3.8 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** �?fixed in `2dc683e`, §4.4 corrected below | §4 |
 
@@ -691,6 +692,28 @@ changing program output.
 `negative/vecalias_into_parameter.c` had already refused the intrinsic form
 (`vecalias(&s, b)`) for the same reason. The decision is §7.5.
 
+### 3.8 A sized array parameter that receives a bound handle traps
+
+`void f(int s[4])` is a SIZED parameter, so it trusts the call-site note to pick
+its representation. A bound unbound handle (`int h[]; h = e;`) holds a packed handle
+in its ONE cell, but `arrayArgumentNotes` classified it by
+`requestedArrayImplementation` alone -- null for `h` -- so the note said
+"traditional", and the callee was built as a two-word pointer from a one-word value.
+Reading it walked through garbage:
+
+| program | outcome |
+|---|---|
+| `f(int s[4])` called with `h` (bound to an embedded array) | trapped: `memory index 0 out of range` |
+| the same, writing `s[1]` | trapped the same way |
+| `f(int s[])` called with the same `h` | worked (`1 4`) |
+| `f(int s[4])` called with the embedded array directly | worked (`1`) |
+| `f(int s[4])` called with a memory array | worked (`1`) |
+
+The open-dimension parameter never had the bug because `hasOpenDimension` forces it
+to a handle before the notes are read. The fix makes the note follow the argument: a
+symbol that is `isUnboundHandle` says "handle", whatever it was bound to. The decision
+is §7.6.
+
 ---
 
 ## 4. Harness debt
@@ -714,21 +737,21 @@ their own line instead of failing the run (10 today). So `#pragma stackcheck` is
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 532 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 533 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
-runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §7.1–7.5,
-§3.4 and §3.7 cases bring the count to 532 under `testers/unit_tests`, every one of
+runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §7.1–7.6,
+§3.4, §3.7 and §3.8 cases bring the count to 533 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 180 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `check.mjs` | 181 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
 | `negative.mjs` | 58 | `negative/` |
 | `nomem.mjs` | 7 | `nomem/` |
 | `runall.mjs` | 277 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-180 + 10 + 58 + 7 + 277 = 532. The caveat that replaces "no runner" is weaker but real:
+181 + 10 + 58 + 7 + 277 = 533. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only two files
 in the whole tree carry an `EXPECT:` line. Assertion density per directory is
 `testers/INFO.md`'s subject, not this file's.
@@ -772,8 +795,8 @@ Listed so it is not re-investigated. Each was hit while probing; where one now h
 
 - `int al[] = mem;` alias followed by an inlined write �?*"an encoded array is constant
   and cannot be written to"*.
-- A handle parameter that is sized (`int s[4]`) traps; so does an unbound handle sized the
-  same way.
+- ~~A handle parameter that is sized (`int s[4]`) traps; so does an unbound handle sized
+  the same way.~~ → fixed in `f970d51`; §3.8/§7.6, `check/t168`.
 - `m = remote(@this, r)` produced an **empty error list** and a
   `fatalError: Cannot read properties of undefined (reading 'type')`. The empty list was
   the dangerous half: it makes a crash indistinguishable from a clean refusal to
@@ -785,7 +808,7 @@ Listed so it is not re-investigated. Each was hit while probing; where one now h
 ## 7. Decisions on the defects in §3 and §6
 
 Recorded so these are not re-opened, in the order they were given. **§1, §2 and §3 are
-closed**: their defects have decisions either in their own §3 record or below; §7.5 is the last one added.
+closed**: their defects have decisions either in their own §3 record or below; §7.6 is the last one added.
 
 ### 7.1 `'x'` is an `int` holding its ASCII value
 
@@ -960,3 +983,23 @@ Cases: `negative/array_parameter_assignment_refused.c` (both spellings) and
 `check/t167_handle_param_element_write.c` (the supported element-write path,
 re-run under all five invariance pragmas). Nothing else in the driven corpus
 assigned to an open-dimension parameter, so no expected output moved.
+
+### 7.6 A sized parameter receiving a handle
+
+**Done in `f970d51`.** Trust the argument, not the declaration.
+
+A sized array parameter cannot force a handle the way an open one does: its declared
+length is a compile-time fact, so it takes the shape the call site hands it. A bound
+unbound handle is one register holding a packed handle (get / set / length / size), so
+`arrayArgumentNotes` now records "handle" for an `isUnboundHandle` argument. The
+parameter arrives as a handle, and reads, `lenof` and element writes all go through
+the packed helpers.
+
+A function called with BOTH a memory array and a handle keeps the existing refusal --
+`Parameter 's' is passed both an array held in registers and an ordinary in-memory
+array; they have no layout in common` -- which is the honest answer: one parameter
+cannot be two shapes.
+
+Cases: `check/t168_sized_param_receives_handle.c` binds the handle to an embedded
+array and to a memory one, reads both, writes through the handle, and checks the
+caller sees the write, under all five invariance pragmas.

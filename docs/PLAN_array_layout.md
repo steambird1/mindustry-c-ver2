@@ -325,6 +325,10 @@ Decisions taken (all were flagged in the plan rather than guessed):
   (`s[i] = ...`) is the supported path, and a sized parameter (`int s[4]`) keeps the
   §3.6 element copy. `check/t167` pins the element-write path under every invariance
   pragma.
+- A **sized** array parameter that receives a bound unbound handle arrives as a handle
+  too (`check/t168`): the call-site note follows the argument's one-word packed value
+  instead of assuming a traditional pointer. A function passed both a memory array and
+  a handle is refused with the existing "no layout in common" message.
 
 Tests: `check/t152`–`t156` and `t167` for the working forms, and nine
 `negative/vec*` / `array_*` cases for the refusals — `vecalias_into_parameter`,
@@ -461,7 +465,7 @@ Reproduce from `testers/unit_tests`:
 
 | harness | result |
 |---|---|
-| `node ../tools/check.mjs` | 180 passed, 0 failed (111 shape assertions, 787 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 181 passed, 0 failed (111 shape assertions, 792 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 58 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
@@ -477,8 +481,8 @@ Invariants that must hold at every boundary:
   (and must stay silent with `NOT-MESSAGE:` where silence is the point) — the
   annotations themselves are the record.
 
-Test numbering: `check/` runs `t1`–`t167` with **no free slot**, so the next case is
-`t168`. (`negative/` is named by behaviour, not by number.)
+Test numbering: `check/` runs `t1`–`t168` with **no free slot**, so the next case is
+`t169`. (`negative/` is named by behaviour, not by number.)
 
 ### The Phase 7 `MESSAGE:` debt — cleared in `1584cf3`
 

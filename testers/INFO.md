@@ -13,7 +13,7 @@
 
 | 命令（从 `testers/unit_tests` 执行） | 读哪个目录 | 当前结果 | 判定标准 |
 |---|---|---|---|
-| `node ..\tools\check.mjs` | `check/` | **180 passed, 0 failed**（111 shape assertions, 787 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
+| `node ..\tools\check.mjs` | `check/` | **181 passed, 0 failed**（111 shape assertions, 792 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
 | `node ..\tools\negative.mjs` | `negative/` | **58 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
 | `node ..\tools\nomem.mjs` | `nomem/` | **7 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
 | `node ..\tools\loadorder.mjs` | 仓库根的 `mindc*.js` | **12 passed, 0 failed, 2 exempt** | 每个入口单独起一个 `node` 进程导入，不得有循环依赖 |
@@ -67,11 +67,11 @@
 
 ## 目录地图
 
-`testers/unit_tests/` 下共 **532 个 `.c`，全部有 runner**（180 + 10 + 58 + 7 + 277 = 532）：
+`testers/unit_tests/` 下共 **533 个 `.c`，全部有 runner**（181 + 10 + 58 + 7 + 277 = 533）：
 
 | 目录 | 文件数 | 谁来跑 |
 |---|---|---|
-| `check/` | 180 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
+| `check/` | 181 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
 | `t/` | 100 | `runall.mjs`（早期按主题分的用例，`2dc683e` 起纳入） |
 | `negative/` | 58 | `negative.mjs` |
 | `suite/` | 50 | `runall.mjs` |
@@ -95,7 +95,7 @@
 
 ## check/ 的编号约定
 
-`check/` 用 `tNN_主题.c` 命名，**编号 1–167 已用满，没有空号**，下一个用例是 `t168`。
+`check/` 用 `tNN_主题.c` 命名，**编号 1–168 已用满，没有空号**，下一个用例是 `t169`。
 另有 13 个不带编号的（`m1`–`m3`、`n1`–`n2`、`rw1`–`rw2`、`seq1`、`memsp2`–`memsp3`），
 它们早于编号制，保留原名。
 
@@ -164,6 +164,7 @@
 | `t165` | **§3.6**：寄存器数组也照拷——`array("embedded_divided")` 目标走同一个循环，布局不参与，因为以前根本没写 |
 | `t166` | **§3.4**：全局数组元素地址（`&arr[2]`、`&arr[0]`、经函数传递后解引用）与全局结构体/联合体成员地址（含带初始化器列表的）全部可用；启动时把活地址对 `X_block`/`X_pos` 从容器自己的内存位置写入 |
 | `t167` | **§3.7**：open-dimension 数组参数（`int s[]`）是按值传的 packed handle；写元素（`s[i] = ...`）能到调用方数组，runner 用 `#pragma noinline` 等五种不变性 pragma 重跑也一致 |
+| `t168` | **§3.8**：有尺寸参数（`int s[4]`）接收已绑定的 unbound handle（`int h[]; h = e;`）时按 handle 传递；读元素、`lenof`、写穿到调用方都正确，五种不变性 pragma 下一致 |
 
 设计背景见 `docs/PLAN_array_layout.md`。
 
