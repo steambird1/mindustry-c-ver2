@@ -313,19 +313,24 @@ Implementation notes worth keeping:
   both sides go through the same `element(i)` machinery a subscript uses.
 - Jump conditions are comparisons, not bare registers: `equal <verdict> false`.
 
-Decisions taken (both were flagged in the plan rather than guessed):
+Decisions taken (all were flagged in the plan rather than guessed):
 
 - `b = a` with `a` remote and `b` local stays **refused**. A handle's helper line
   numbers mean nothing on another processor, so a remote→local handle copy yields a
   local handle whose get/set helpers are wrong.
 - `veccpy` stays element-wise into owned storage, and a handle **destination is
   refused**. `vecalias` into a handle *parameter* is refused too.
+- Assigning an **open-dimension array parameter** (`int s[]`, a by-value handle) is
+  **refused** (§3.7/§7.5): it can only rebind the callee's copy. Writing elements
+  (`s[i] = ...`) is the supported path, and a sized parameter (`int s[4]`) keeps the
+  §3.6 element copy. `check/t167` pins the element-write path under every invariance
+  pragma.
 
-Tests: `check/t152`–`t156` for the working forms, and eight
-`negative/vec*` cases for the refusals — `vecalias_into_parameter`,
+Tests: `check/t152`–`t156` and `t167` for the working forms, and nine
+`negative/vec*` / `array_*` cases for the refusals — `vecalias_into_parameter`,
 `vecalias_into_storage`, `vecalias_needs_address`, `vecalias_remote_source`,
-`veccpy_into_handle`, `veccpy_never_bound_source`, `veccpy_source_too_long` and
-`vec_intrinsic_arity`.
+`veccpy_into_handle`, `veccpy_never_bound_source`, `veccpy_source_too_long`,
+`vec_intrinsic_arity` and `array_parameter_assignment_refused`.
 
 ## Phase 7 — Test debt — DONE
 
@@ -455,8 +460,8 @@ Reproduce from `testers/unit_tests`:
 
 | harness | result |
 |---|---|
-| `node ../tools/check.mjs` | 179 passed, 0 failed (111 shape assertions, 782 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 57 passed, 0 failed, 2 known gaps |
+| `node ../tools/check.mjs` | 180 passed, 0 failed (111 shape assertions, 787 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 58 passed, 0 failed, 2 known gaps |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/277 — the 10 misses are known gaps, reported on their own line |
@@ -471,8 +476,8 @@ Invariants that must hold at every boundary:
   (and must stay silent with `NOT-MESSAGE:` where silence is the point) — the
   annotations themselves are the record.
 
-Test numbering: `check/` runs `t1`–`t166` with **no free slot**, so the next case is
-`t167`. (`negative/` is named by behaviour, not by number.)
+Test numbering: `check/` runs `t1`–`t167` with **no free slot**, so the next case is
+`t168`. (`negative/` is named by behaviour, not by number.)
 
 ### The Phase 7 `MESSAGE:` debt — cleared in `1584cf3`
 

@@ -20,8 +20,8 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 179 passed, 0 failed (111 shape assertions, 782 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 57 passed, 0 failed, 2 known gaps |
+| `node ../tools/check.mjs` | 180 passed, 0 failed (111 shape assertions, 787 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 58 passed, 0 failed, 2 known gaps |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/277 �?the 10 misses are reported as known gaps, not failures |
@@ -36,9 +36,9 @@ The two invariants any new work has to keep:
 ## Where everything stands
 
 One line per item, so this file can be read a piece at a time. The reasoning is where the
-last column says, and the order of work is the order of the rows: **§1 and §2 are closed** �?
-their work rows read done or struck, and §1.5 records what the closure left open �?so the
-the §3 defects without a decision are what is left.
+last column says, and the order of work is the order of the rows: **§1, §2 and §3 are
+closed** — their work rows read done or struck, and §1.5 records what the closure left
+open. What remains is §4.4 plus the known gaps recorded in §6 and `testers/INFO.md`.
 
 | item | state | detail |
 |---|---|---|
@@ -58,6 +58,7 @@ the §3 defects without a decision are what is left.
 | &global_array[i] / &global_struct.field (§3.4) | **done** — mindcGenerator.js pair init + static struct-store at boot | §3.4 |
 | `compiler.arrayOptimize` reads a flag nobody sets (§3.5) | **done** �?`c9dd030`; the two dead reads are deleted, the flag is not wired | §3.5 |
 | same-layout array assignment does not copy (§3.6) | **done** �?`e74df68`; same-layout pairs copy, an encoded target is refused | §3.6 |
+| assigning an open-dimension array parameter (§3.7) | **done** — `613cafa`; refused at semantic time, element writes stay supported | §7.5, §3.7 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** �?fixed in `2dc683e`, §4.4 corrected below | §4 |
 
@@ -608,7 +609,7 @@ versions always take the `'memory'` guess the comment directly above it says to 
 The fix is a decision, not a deletion: what *should* `optimize(array)` answer here �?
 `null` (undecided, refuse in both directions) or `'memory'` (what happens today, by
 accident)? The optimizer's own behaviour under the pragma is untouched; only these two
-reads are dead. Deferred, no decision yet.
+reads are dead. The answer was to keep today's behaviour; `c9dd030` deleted them (below).
 
 **Done in `c9dd030`.** The decision made itself: keep today's answer. Under
 `#pragma optimize(array)` a plain array answers `'memory'`, exactly as it always
@@ -663,6 +664,32 @@ encoded DESTINATION with a message that names the layout
 plain "Cannot assign to const variable" refusal it already had. That is why §1.5's note
 above narrows "stays admitted" to `embedded` = `embedded` and `memory` = `memory`.
 
+### 3.7 Assigning an open-dimension array parameter
+
+`int s[]` is an open-dimension array parameter. It arrives as a packed handle
+**by value** — a copy of the caller's handle, with the length inside the packed
+value. So `s = b;` has neither a stored length to copy against nor a cell of
+its own to rebind:
+
+| program | outcome |
+|---|---|
+| `void rebind(int s[]) { s = other; }` called with a memory array, default | the caller's array is overwritten (`1 2 3`) |
+| the same with `#pragma noinline` | the caller's array is untouched (`5 6 7`) |
+| `void f(int a[], int b[]) { a = b; }` | the same split |
+| a SIZED parameter `void g(int s[3]) { s = other; }` | copies `1 2 3` in both modes |
+
+The first two rows are the same program; only the pragma differs. §3.6 made
+`a = b;` an element copy, and that is what exposed it: at `e74df68^` both modes
+printed `5 6 7`, because the assignment copied nothing anywhere. With the copy
+in, inlining replaces `s` with the caller's array and the line becomes a real
+copy, while the out-of-line parameter still has a static destination length of
+0 (`emitElementCopy` takes `min(destinationLength, sourceLength)`, and a
+handle's length is a run-time fact). The two modes then disagree — a pragma
+changing program output.
+
+`negative/vecalias_into_parameter.c` had already refused the intrinsic form
+(`vecalias(&s, b)`) for the same reason. The decision is §7.5.
+
 ---
 
 ## 4. Harness debt
@@ -676,30 +703,31 @@ same-shaped files under `testers/unit_tests/tools/`, which import `'../sim.mjs'`
 `sim.mjs` exists; they are not entry points of any runner and nothing imports them, so
 there is nothing to fix for.
 
-### 4.2 `runall.mjs` omitted `stack/` �?fixed in `2dc683e`, the gap is §3.3
+### 4.2 `runall.mjs` omitted `stack/` �?fixed in `2dc683e`, the gap was §3.3
 
 `runall.mjs:3` walked `['suite', 'mem', 'arr', 'arr2', 'ptr2']` �?101 cases �?while the
 three cases in `testers/unit_tests/stack/` (`so1.c`, `so2.c`, `so3.c`, the last two using
 `#pragma stackcheck`) were in no runner at all. Fixed in `2dc683e`: the directory list
 carries 14 directories and 277 cases, and `KNOWN-GAP:` lines report known-broken cases on
-their own line instead of failing the run (12 today, `stack/so2` and `stack/so3` among
-them). So `#pragma stackcheck` is now driven �?one passing case (`so1.c`) and two
-documented failures. What is wrong with the two is recorded as §3.3.
+their own line instead of failing the run (10 today). So `#pragma stackcheck` is driven
+in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
+so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 532 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 534 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
-runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §7.1–7.4 and §3.4 cases bring the count to 532 under
-`testers/unit_tests`, every one of them driven �?
+runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §7.1–7.5,
+§3.4 and §3.7 cases bring the count to 534 under `testers/unit_tests`, every one of
+them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 179 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 59 | `negative/` |
+| `check.mjs` | 180 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `negative.mjs` | 60 | `negative/` |
 | `nomem.mjs` | 7 | `nomem/` |
 | `runall.mjs` | 277 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-179 + 10 + 59 + 7 + 277 = 532. The caveat that replaces "no runner" is weaker but real:
+180 + 10 + 60 + 7 + 277 = 534. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only two files
 in the whole tree carry an `EXPECT:` line. Assertion density per directory is
 `testers/INFO.md`'s subject, not this file's.
@@ -736,8 +764,6 @@ information is how they get broken.
   one-store body.
 - `&` on a handle is **not** refused.
 - `remote` / register / embedded arrays are handles unless inlined.
-- `s = b;` on a handle **parameter** is a silent no-op, pre-existing at `daf1eb0` and
-  left unfixed; `negative/vecalias_into_parameter.c` records it.
 
 ## 6. Known pre-existing behaviour, not attributable to any phase
 
@@ -757,9 +783,8 @@ Listed so it is not re-investigated. Each was hit while probing; where one now h
 
 ## 7. Decisions on the defects in §3 and §6
 
-Recorded so these are not re-opened, in the order they were given. **§1 and §2 are
-closed**, so the four below are now eligible in their own order. The defects §3.3–�?.6
-arrived later and carry no decision yet �?do not start any of them without one.
+Recorded so these are not re-opened, in the order they were given. **§1, §2 and §3 are
+closed**: their defects have decisions either in their own §3 record or below; §7.5 is the last one added.
 
 ### 7.1 `'x'` is an `int` holding its ASCII value
 
@@ -911,3 +936,26 @@ fact.
 
 `negative/array_subscript_out_of_bounds.c` pins it, asking for both refusals by name:
 `r[3]` on length 3 and `m[5]` on length 2.
+
+### 7.5 Assignment to an array parameter
+
+**Done in `613cafa`.** Refuse it, for the open-dimension shape only.
+
+`int s[]` arrives as a by-value handle: assigning it can only rebind the
+callee's copy, and that copy has no static length for the element loop to
+stop at. Both facts say the same thing — the caller's array cannot change —
+so `s = b;` is refused at semantic time, in
+`refuseIncompatibleArrayAssignment`, with the same advice
+`vecalias_into_parameter.c` gives: write the elements (`s[i] = ...`) or bind
+a handle you own.
+
+A SIZED parameter (`int s[4]`) is left alone: its outer length is a
+compile-time fact, so §3.6's element copy has a bound and reaches the caller's
+storage in every compile mode (measured `1 2 3` with and without
+`#pragma noinline`). Refusing it too would be a larger semantic change than
+this defect needs.
+
+Cases: `negative/array_parameter_assignment_refused.c` (both spellings) and
+`check/t167_handle_param_element_write.c` (the supported element-write path,
+re-run under all five invariance pragmas). Nothing else in the driven corpus
+assigned to an open-dimension parameter, so no expected output moved.
