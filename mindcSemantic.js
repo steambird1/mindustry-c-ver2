@@ -4248,6 +4248,33 @@ export class SemanticAnalyzer extends ASTVisitor {
         const right = this.symbolOfArrayExpression?.(node.right) ?? null;
         const nameOf = side => side?.name ?? 'an array';
         /*
+        An array PARAMETER whose type has an OPEN dimension (`int s[]`) arrives
+        as a packed handle BY VALUE -- a copy of the caller's handle, with the
+        length inside the packed value. Two things therefore cannot happen:
+        there is no stored length for the copy to stop at (see
+        `emitElementCopy`, which would use 0), and writing a handle over the
+        parameter's register would only rebind this function's private copy.
+        Either way `s = b;` leaves the caller's array exactly as it was, so the
+        spelling promises "s is b now" and delivers nothing. It is the same
+        hole `vecalias_into_parameter.c` names from the intrinsic's side, so it
+        gets the same answer: refuse it and point at what does work.
+
+        A SIZED array parameter (`int s[4]`) is not refused here: its outer
+        length is a compile-time fact, so the element copy §3.6 emits has a
+        bound and reaches the caller's storage. Only the open case has no
+        length to copy against.
+        */
+        if (left?.kind === 'parameter' && this.hasOpenDimension(leftType)) {
+            this.addError(
+                `Cannot assign to array parameter '${nameOf(left)}': it arrives as a handle `
+                + `BY VALUE, a copy of the caller's, so the assignment would only change this `
+                + `function's copy and leave the caller's array as it was. Write the elements `
+                + `instead (\`${nameOf(left)}[i] = ...\`); for a handle you own, declare `
+                + `\`int h[];\` and bind that`,
+                node.location);
+            return true;
+        }
+        /*
         A symbol with `arrayAliasOf` does not HOLD an array -- it IS one, the one
         it names. There is nothing behind it to rebind: the storage is the other
         array's, and the code that reaches it was generated for the other array.
