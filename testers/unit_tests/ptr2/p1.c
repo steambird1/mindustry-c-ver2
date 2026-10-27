@@ -1,3 +1,4 @@
+/* EXPECT: 5 5 */
 #pragma optimize(pointer)
 auto device message1;
 struct point { int x; int y; };

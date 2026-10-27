@@ -1,3 +1,4 @@
+/* EXPECT: 1 7 */
 auto device message1;
 struct inner { int a; int b; };
 struct outer { struct inner i; int c; };

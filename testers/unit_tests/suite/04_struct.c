@@ -1,3 +1,4 @@
+/* EXPECT: 6 14 */
 /* Structs: one member per line, nesting, and whole-struct assignment. */
 auto device message1;
 

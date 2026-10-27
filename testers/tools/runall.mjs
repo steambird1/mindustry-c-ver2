@@ -19,7 +19,7 @@ Annotations this runner reads:
                             annotation is called out as stale rather than
                             quietly left behind.
   /* EXPECT: a b c *​/      the printed output, one line per value, compared
-                            the same way `check.mjs` compares it. Only two
+                            the same way `check.mjs` compares it. Six
                             files carry it, but an annotation no runner reads
                             is an assertion nobody makes.
 

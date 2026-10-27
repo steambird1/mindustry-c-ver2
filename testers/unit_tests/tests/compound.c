@@ -1,3 +1,4 @@
+/* EXPECT: 7 6 3 21 */
 auto device message1;
 int arr[4];
 volatile int vv;
