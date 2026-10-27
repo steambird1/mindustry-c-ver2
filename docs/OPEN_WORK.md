@@ -779,8 +779,9 @@ them driven �?
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
 182 + 10 + 57 + 7 + 275 = 531. The caveat that replaces "no runner" is weaker but real:
-most of those directories are driven *by runall*, whose bar is "it ran" �?only two files
-in the whole tree carry an `EXPECT:` line. Assertion density per directory is
+most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
+in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
+`ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
 `testers/INFO.md`'s subject, not this file's.
 
 ### 4.4 Extension loading: roots fixed in `2dc683e`, the warning note was stale

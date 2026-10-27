@@ -55,7 +55,7 @@
 | `NOMEM` | `negative/` | 这个用例在无内存块下编译 |
 | `VERSION: 140` | `negative/` | 用旧目标版本编译 |
 | `KNOWN-GAP: <理由>` | `negative/`、`runall/` | 今天达不到标准（`negative/` 是编译器接受它）；如实上报，不算通过。`runall.mjs` 还会在它开始通过时点名注解过期 |
-| `EXPECT: a b c` | `runall/` | 期望输出，与 `check.mjs` 同样的逐行比对；全树只有 2 个文件带它 |
+| `EXPECT: a b c` | `runall/` | 期望输出，与 `check.mjs` 同样的逐行比对；runall 目录里只有 6 个文件带它 |
 
 `check/` 的 pragma 不变性：每个用例都会被加上各种 `optimize(...)` 变体**重跑一遍**，
 输出必须完全一致。**任何 pragma 都不得改变程序输出。** 目前 176 个用例里
@@ -91,7 +91,7 @@
 | `arr/` | 2 | `runall.mjs` |
 
 有 runner 不等于断言密：`check/` 每个用例都比对输出，而 `runall.mjs` 那 275 个的
-门槛只是「能编译、跑完不崩」，全树只有 2 个文件带 `EXPECT:`。
+门槛只是「能编译、跑完不崩」，runall 目录里只有 6 个文件带 `EXPECT:`（`suite/04_struct`、`mem/d1`、`ptr2/p1`、`tests/compound` 是最近补的四个）。
 
 ## check/ 的编号约定
 
