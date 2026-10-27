@@ -466,10 +466,10 @@ Reproduce from `testers/unit_tests`:
 | harness | result |
 |---|---|
 | `node ../tools/check.mjs` | 181 passed, 0 failed (111 shape assertions, 792 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 58 passed, 0 failed |
+| `node ../tools/negative.mjs` | 56 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
-| `node ../tools/runall.mjs` | 267/277 — the 10 misses are known gaps, reported on their own line |
+| `node ../tools/runall.mjs` | 267/275 — the 8 misses are known gaps, reported on their own line |
 
 Invariants that must hold at every boundary:
 

@@ -21,10 +21,10 @@ Reproduce the baselines from `testers/unit_tests`:
 | runner | result |
 |---|---|
 | `node ../tools/check.mjs` | 181 passed, 0 failed (111 shape assertions, 792 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 58 passed, 0 failed |
+| `node ../tools/negative.mjs` | 56 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
-| `node ../tools/runall.mjs` | 267/277 �?the 10 misses are reported as known gaps, not failures |
+| `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
 
 The two invariants any new work has to keep:
 
@@ -732,26 +732,26 @@ there is nothing to fix for.
 `runall.mjs:3` walked `['suite', 'mem', 'arr', 'arr2', 'ptr2']` �?101 cases �?while the
 three cases in `testers/unit_tests/stack/` (`so1.c`, `so2.c`, `so3.c`, the last two using
 `#pragma stackcheck`) were in no runner at all. Fixed in `2dc683e`: the directory list
-carries 14 directories and 277 cases, and `KNOWN-GAP:` lines report known-broken cases on
-their own line instead of failing the run (10 today). So `#pragma stackcheck` is driven
+carries 14 directories and 275 cases, and `KNOWN-GAP:` lines report known-broken cases on
+their own line instead of failing the run (8 today). So `#pragma stackcheck` is driven
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 533 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 529 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §7.1–7.6,
-§3.4, §3.7 and §3.8 cases bring the count to 533 under `testers/unit_tests`, every one of
+§3.4, §3.7 and §3.8 cases bring the count to 529 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
 | `check.mjs` | 181 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 58 | `negative/` |
+| `negative.mjs` | 56 | `negative/` |
 | `nomem.mjs` | 7 | `nomem/` |
-| `runall.mjs` | 277 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
+| `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-181 + 10 + 58 + 7 + 277 = 533. The caveat that replaces "no runner" is weaker but real:
+181 + 10 + 56 + 7 + 275 = 529. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only two files
 in the whole tree carry an `EXPECT:` line. Assertion density per directory is
 `testers/INFO.md`'s subject, not this file's.
