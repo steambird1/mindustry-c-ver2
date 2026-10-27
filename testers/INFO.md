@@ -13,8 +13,8 @@
 
 | 命令（从 `testers/unit_tests` 执行） | 读哪个目录 | 当前结果 | 判定标准 |
 |---|---|---|---|
-| `node ..\tools\check.mjs` | `check/` | **181 passed, 0 failed**（111 shape assertions, 792 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
-| `node ..\tools\negative.mjs` | `negative/` | **56 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
+| `node ..\tools\check.mjs` | `check/` | **182 passed, 0 failed**（111 shape assertions, 797 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
+| `node ..\tools\negative.mjs` | `negative/` | **57 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
 | `node ..\tools\nomem.mjs` | `nomem/` | **7 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
 | `node ..\tools\loadorder.mjs` | 仓库根的 `mindc*.js` | **12 passed, 0 failed, 2 exempt** | 每个入口单独起一个 `node` 进程导入，不得有循环依赖 |
 | `node ..\tools\runall.mjs` | 14 个目录：`suite/` `mem/` `arr/` `arr2/` `ptr2/` `stack/` `tests/` `uc/` `cases/` `exttests/` `hdr/` `t/` `big/` `u/` | **267/275**（8 个已知坏例以 KNOWN-GAP 如实上报，不算失败） | 能编译、能跑完不崩；带 `EXPECT:` 的还比对输出 |
@@ -67,13 +67,13 @@
 
 ## 目录地图
 
-`testers/unit_tests/` 下共 **529 个 `.c`，全部有 runner**（181 + 10 + 56 + 7 + 275 = 529）：
+`testers/unit_tests/` 下共 **531 个 `.c`，全部有 runner**（182 + 10 + 57 + 7 + 275 = 531）：
 
 | 目录 | 文件数 | 谁来跑 |
 |---|---|---|
-| `check/` | 181 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
+| `check/` | 182 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
 | `t/` | 98 | `runall.mjs`（早期按主题分的用例，`2dc683e` 起纳入） |
-| `negative/` | 56 | `negative.mjs` |
+| `negative/` | 57 | `negative.mjs` |
 | `suite/` | 50 | `runall.mjs` |
 | `mem/` | 25 | `runall.mjs` |
 | `tests/` | 25 | `runall.mjs`（另有手工的 `batch.mjs [baseline]`） |
@@ -95,7 +95,7 @@
 
 ## check/ 的编号约定
 
-`check/` 用 `tNN_主题.c` 命名，**编号 1–168 已用满，没有空号**，下一个用例是 `t169`。
+`check/` 用 `tNN_主题.c` 命名，**编号 1–169 已用满，没有空号**，下一个用例是 `t170`。
 另有 13 个不带编号的（`m1`–`m3`、`n1`–`n2`、`rw1`–`rw2`、`seq1`、`memsp2`–`memsp3`），
 它们早于编号制，保留原名。
 
@@ -165,6 +165,7 @@
 | `t166` | **§3.4**：全局数组元素地址（`&arr[2]`、`&arr[0]`、经函数传递后解引用）与全局结构体/联合体成员地址（含带初始化器列表的）全部可用；启动时把活地址对 `X_block`/`X_pos` 从容器自己的内存位置写入 |
 | `t167` | **§3.7**：open-dimension 数组参数（`int s[]`）是按值传的 packed handle；写元素（`s[i] = ...`）能到调用方数组，runner 用 `#pragma noinline` 等五种不变性 pragma 重跑也一致 |
 | `t168` | **§3.8**：有尺寸参数（`int s[4]`）接收已绑定的 unbound handle（`int h[]; h = e;`）时按 handle 传递；读元素、`lenof`、写穿到调用方都正确，五种不变性 pragma 下一致 |
+| `t169` | **§3.9**：数组别名（`int a[] = mem;`）的元素写会到达目标；genuine memory、常量初始化的自动 encoded、embedded、别名套别名都覆盖，runner 在五种不变性 pragma 下重跑 |
 
 设计背景见 `docs/PLAN_array_layout.md`。
 
@@ -177,7 +178,7 @@
 在它想守住的那条检查被删掉之后**依然会通过**——这正是删掉的检查不被发现的方式。
 所以每条 `MESSAGE:` 都必须匹配到编译器真实给出的某一条错误。
 
-**负债已清零**（`1584cf3`）。`negative/` 的 56 个用例全部带 `MESSAGE:`，没有
+**负债已清零**（`1584cf3`）。`negative/` 的 57 个用例全部带 `MESSAGE:`，没有
 `KNOWN-GAP`：原先那两个（`ovl_auto.c`、`ovl_pragma.c`）已删除——自动模板 / 重载
 已经实现，`check/t109`、`check/t110` 用正向用例断言同一事实。
 `remote_as_value_refused.c`（§7.3）是第一个真正用上 `NOT-MESSAGE:` 的用例，
@@ -192,6 +193,10 @@
 `array_parameter_assignment_refused.c`（§3.7）断言 open-dimension 数组参数（`int s[]`）的
 整体赋值被拒：它按值收到调用方 handle 的副本，赋值只会改本函数的副本。写元素
 （`s[i] = ...`）是受支持的路径，`check/t167` 在五种不变性 pragma 下都要求它到达调用方。
+
+`alias_write_into_constant_refused.c`（§3.9）断言别名写入常量目标被拒：显式
+`array("encoded")` 目标是正常语义错误（不再出现 `Internal parser error`），`const`
+目标仍走既有的 `Cannot assign to const variable`。
 
 `negative/` 目前没有 `KNOWN-GAP`。
 

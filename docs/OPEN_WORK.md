@@ -20,8 +20,8 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 181 passed, 0 failed (111 shape assertions, 792 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 56 passed, 0 failed |
+| `node ../tools/check.mjs` | 182 passed, 0 failed (111 shape assertions, 797 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 57 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
@@ -60,6 +60,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | same-layout array assignment does not copy (§3.6) | **done** �?`e74df68`; same-layout pairs copy, an encoded target is refused | §3.6 |
 | assigning an open-dimension array parameter (§3.7) | **done** — `613cafa`; refused at semantic time, element writes stay supported | §7.5, §3.7 |
 | sized array parameter receiving a bound handle (§3.8) | **done** — `f970d51`; the call-site note follows the argument's packed handle | §7.6, §3.8 |
+| element writes through an array alias (§3.9) | **done** — `e13d454`; the optimizer follows `arrayAliasOf`, encoded/const targets are refused cleanly | §7.7, §3.9 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -714,6 +715,32 @@ to a handle before the notes are read. The fix makes the note follow the argumen
 symbol that is `isUnboundHandle` says "handle", whatever it was bound to. The decision
 is §7.6.
 
+### 3.9 Element writes through an array alias
+
+`int al[] = mem;` is an alias: the declaration makes `al` the same array as
+`mem`, not a copy. Reads went through the target, but writes were wrong in
+three ways:
+
+| program | outcome |
+|---|---|
+| `int mem[4] = {1,2,3,4}; int al[] = mem; al[0] = 9;` | crashed: `Internal parser error: an encoded array is constant and cannot be written to` |
+| the same on an `array("embedded_divided", ...)` target | `al[0]` read 9 but `mem[0]` stayed 1 |
+| `int a[] = mem; int b[] = a; b[0] = 9;` | the root was never reached |
+| `int mem[4];` (no initializer) + the same write | worked |
+
+Two independent causes:
+
+- the optimizer's constant bookkeeping looked at the ALIAS symbol, which has
+  no constant contents, never at the target. A small constant target was
+  promoted to an encoded table (`finalizeConstantArrays`), so the real write
+  had no cells; or the target's known elements were kept and `mem[0]` folded
+  back to its initial value (`applyArrayWrite`).
+- an explicit `array("encoded", ...)` target has no cells at all, and the
+  write reached the generator, which threw an `InfrastructureNotImplemented`
+  that surfaces as `Internal parser error`.
+
+The decision is §7.7.
+
 ---
 
 ## 4. Harness debt
@@ -737,21 +764,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 529 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 531 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §7.1–7.6,
-§3.4, §3.7 and §3.8 cases bring the count to 529 under `testers/unit_tests`, every one of
+§3.4, §3.7 and §3.8 cases bring the count to 531 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 181 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 56 | `negative/` |
+| `check.mjs` | 182 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `negative.mjs` | 57 | `negative/` |
 | `nomem.mjs` | 7 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-181 + 10 + 56 + 7 + 275 = 529. The caveat that replaces "no runner" is weaker but real:
+182 + 10 + 57 + 7 + 275 = 531. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only two files
 in the whole tree carry an `EXPECT:` line. Assertion density per directory is
 `testers/INFO.md`'s subject, not this file's.
@@ -794,10 +821,10 @@ information is how they get broken.
 
 ## 6. Known pre-existing behaviour, not attributable to any phase
 
-Listed so it is not re-investigated. Each was hit while probing; where one now has a case, §7.3 says so.
+Every item here is now fixed or closed; each points at the record and the case that pins it.
 
-- `int al[] = mem;` alias followed by an inlined write �?*"an encoded array is constant
-  and cannot be written to"*.
+- ~~`int al[] = mem;` alias followed by an inlined write — *"an encoded array is
+  constant and cannot be written to"*.~~ → fixed in `e13d454`; §3.9/§7.7, `check/t169`.
 - ~~A handle parameter that is sized (`int s[4]`) traps; so does an unbound handle sized
   the same way.~~ → fixed in `f970d51`; §3.8/§7.6, `check/t168`.
 - `m = remote(@this, r)` produced an **empty error list** and a
@@ -811,7 +838,7 @@ Listed so it is not re-investigated. Each was hit while probing; where one now h
 ## 7. Decisions on the defects in §3 and §6
 
 Recorded so these are not re-opened, in the order they were given. **§1, §2 and §3 are
-closed**: their defects have decisions either in their own §3 record or below; §7.6 is the last one added.
+closed**: their defects have decisions either in their own §3 record or below; §7.7 is the last one added.
 
 ### 7.1 `'x'` is an `int` holding its ASCII value
 
@@ -1006,3 +1033,27 @@ cannot be two shapes.
 Cases: `check/t168_sized_param_receives_handle.c` binds the handle to an embedded
 array and to a memory one, reads both, writes through the handle, and checks the
 caller sees the write, under all five invariance pragmas.
+
+### 7.7 Writes through an array alias
+
+**Done in `e13d454`.** Follow the alias; refuse only what has no cells.
+
+`applyArrayWrite` now follows the `arrayAliasOf` chain to the target before
+touching the constant table, and marks the target `arrayHasRuntimeWrite` even
+when the value or index is unknown. That keeps a constant-initialized target
+in memory (instead of promoting it to an encoded table) and stops its known
+elements from folding back after a write through the alias.
+
+An explicit `array("encoded", ...)` target is different: it has no cells, so
+no alias can write it. That is refused in `visitAssignmentExpression`, by a
+new `arrayAliasOfElement` helper that resolves the chain, with a message that
+names both the alias and the target; it no longer reaches the generator's
+`Internal parser error`. A `const` target keeps the ordinary
+`Cannot assign to const variable` refusal, which now also fires through the
+alias.
+
+Cases: `check/t169_alias_element_write.c` (genuine memory, a small
+initializer, embedded, alias-of-alias; each written through the alias and
+read through the owner) and
+`negative/alias_write_into_constant_refused.c` (encoded and const, with
+`NOT-MESSAGE: Internal parser error`).

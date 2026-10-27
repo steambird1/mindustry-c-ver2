@@ -329,6 +329,10 @@ Decisions taken (all were flagged in the plan rather than guessed):
   too (`check/t168`): the call-site note follows the argument's one-word packed value
   instead of assuming a traditional pointer. A function passed both a memory array and
   a handle is refused with the existing "no layout in common" message.
+- Writing through an array **alias** (`int al[] = mem;`) follows `arrayAliasOf` to the
+  target in the optimizer, so a constant-initialized target is not promoted to an
+  encoded table and its elements do not fold back; an explicit encoded target is
+  refused semantically (`check/t169`, `negative/alias_write_into_constant_refused`).
 
 Tests: `check/t152`–`t156` and `t167` for the working forms, and nine
 `negative/vec*` / `array_*` cases for the refusals — `vecalias_into_parameter`,
@@ -465,8 +469,8 @@ Reproduce from `testers/unit_tests`:
 
 | harness | result |
 |---|---|
-| `node ../tools/check.mjs` | 181 passed, 0 failed (111 shape assertions, 792 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 56 passed, 0 failed |
+| `node ../tools/check.mjs` | 182 passed, 0 failed (111 shape assertions, 797 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 57 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are known gaps, reported on their own line |
@@ -481,8 +485,8 @@ Invariants that must hold at every boundary:
   (and must stay silent with `NOT-MESSAGE:` where silence is the point) — the
   annotations themselves are the record.
 
-Test numbering: `check/` runs `t1`–`t168` with **no free slot**, so the next case is
-`t169`. (`negative/` is named by behaviour, not by number.)
+Test numbering: `check/` runs `t1`–`t169` with **no free slot**, so the next case is
+`t170`. (`negative/` is named by behaviour, not by number.)
 
 ### The Phase 7 `MESSAGE:` debt — cleared in `1584cf3`
 
