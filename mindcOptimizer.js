@@ -2514,7 +2514,14 @@ export class Optimizer extends ASTVisitor {
 		const owner = left.children?.[0] ?? left.object ?? null;
 		const subscript = left.children?.[1] ?? left.property ?? null;
 		if (!owner || owner.type !== 'Identifier' || !subscript) return;
-		const symbol = this.currentScope.lookup(owner.name);
+		let symbol = this.currentScope.lookup(owner.name);
+		/*
+		`int al[] = mem;` is an ALIAS: a write through `al` is a write to
+		`mem`. Follow the chain before touching the constant bookkeeping, or
+		the target keeps its constant contents -- and may even be promoted to
+		an encoded table -- while the real write lands in it at run time.
+		*/
+		while (symbol?.arrayAliasOf) symbol = symbol.arrayAliasOf;
 		if (!symbol || !this.isFoldableArray(symbol)) return;
 		if (!this.getConstantArray(symbol)) return;
 
@@ -2539,6 +2546,12 @@ export class Optimizer extends ASTVisitor {
 		}
 		// Unknown subscript, unknown value, or an unsure write
 		this.invalidateConstantArray(symbol);
+		/*
+		The value is unknown, but the write is real: keep the array out of the
+		"nothing writes to it, so store it as a constant" promotion too. (The
+		definite branch above already does this.)
+		*/
+		symbol.arrayHasRuntimeWrite = true;
 	}
 
 	// !! This has manual changes !!

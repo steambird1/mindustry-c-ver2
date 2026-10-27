@@ -4572,6 +4572,25 @@ export class SemanticAnalyzer extends ASTVisitor {
         return Number((this.dimensionListOf(type) ?? [])[0]);
     }
 
+    /**
+     * The target an array-element lvalue writes through when its object is an
+     * alias: `int al[] = mem; al[i] = ...;` writes `mem`, not `al`.
+     * @param {any} left
+     * @returns {{alias: SymbolEntry, target: SymbolEntry}?}
+     */
+    arrayAliasOfElement(left) {
+        if (!left || left.type !== 'MemberExpression') return null;
+        const object = left.children?.[0] ?? left.object ?? null;
+        if (!object || object.type !== 'Identifier') return null;
+        const alias = object.symbol
+            ?? this.currentScope?.lookup?.(object.name)
+            ?? this.globalScope?.lookup?.(object.name) ?? null;
+        if (!alias?.arrayAliasOf) return null;
+        let target = alias.arrayAliasOf;
+        while (target?.arrayAliasOf) target = target.arrayAliasOf;
+        return { alias, target };
+    }
+
     visitAssignmentExpression(node) {
         this.visit(node.left);
         this.visit(node.right, {
@@ -4584,6 +4603,27 @@ export class SemanticAnalyzer extends ASTVisitor {
 
         if (!leftType || !rightType) {
             return;
+        }
+
+        /*
+        Writing through an alias of an ENCODED array (`int al[] = mem;` where
+        `mem` was requested `array("encoded", ...)`). The alias has no storage
+        of its own and an encoded table has no cells, so the write could only
+        crash the generator (`Internal parser error: an encoded array is
+        constant...`). Say it here as a normal semantic refusal. A `const`
+        target is already caught by the element type's const check below.
+        */
+        if (!leftType.isConst()) {
+            const aliasWrite = this.arrayAliasOfElement(node.left);
+            if (aliasWrite && aliasWrite.target.requestedArrayImplementation === 'encoded') {
+                const { alias, target } = aliasWrite;
+                this.addError(
+                    `Cannot assign to '${alias.name}': it is an alias of '${target.name}', which is `
+                    + `an encoded constant table with no cells for the write to land in. Give `
+                    + `'${alias.name}' its own storage instead of aliasing a constant`,
+                    node.location);
+                return;
+            }
         }
 
 		let compatible = false;
