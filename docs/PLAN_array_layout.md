@@ -469,7 +469,7 @@ Reproduce from `testers/unit_tests`:
 
 | harness | result |
 |---|---|
-| `node ../tools/check.mjs` | 182 passed, 0 failed (111 shape assertions, 797 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 184 passed, 0 failed (114 shape assertions, 807 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 59 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
@@ -485,8 +485,8 @@ Invariants that must hold at every boundary:
   (and must stay silent with `NOT-MESSAGE:` where silence is the point) — the
   annotations themselves are the record.
 
-Test numbering: `check/` runs `t1`–`t169` with **no free slot**, so the next case is
-`t170`. (`negative/` is named by behaviour, not by number.)
+Test numbering: `check/` runs `t1`–`t171` with **no free slot**, so the next case is
+`t172`. (`negative/` is named by behaviour, not by number.)
 
 ### The Phase 7 `MESSAGE:` debt — cleared in `1584cf3`
 

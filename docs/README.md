@@ -53,7 +53,6 @@ The following codes are **invalid**:
 - `int a[5] = {};` (Empty initializer list **(This will currently result in compiler crash!)**)
 - `int a[] = {1,2,3};` (Unclear length of array)
 - `struct a { struct b {} c; };` (Embedded struct or union structure)
-- There's no `do-while` loop so far
 
 There are some additional features:
 
@@ -61,6 +60,7 @@ There are some additional features:
 - `int a[];` — an array declared with no size and no initializer — is a one-word **cell** that later names an array. Bind it with `a = b;` or `vecalias(&a, b);` before using it. See [Array Handles](TYPES_AND_FUNCTIONS.md#array-handles)
 - `widthof(x)` tells you how many **registers** a value occupies, which is not the same question as `sizeof(x)` (memory cells) for arrays and for `*byname` pointers
 - `vecalias(&a, b)` and `veccpy(a, b)` bind and copy arrays at the intrinsic level
+- `do { ... } while (...)` loops are supported: the body runs once before the test
 
 *Note: `int a[] = {1, 2, 3};` — an initializer with no size — is still not allowed. The
 size has to come from somewhere.*

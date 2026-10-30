@@ -5,7 +5,7 @@
 - Mindustry 的单个内存元容量很小，所以在定义数组和指针时有 `near`（没有 `far`）。
 - 大部分变量都会直接存储在寄存器中。
 - 只有数值可以放到内存中（游戏限制）。Mindustry-C 对此进行了一定的扩展，表示类型的枚举（如 `@mono`、`@conveyor`）也可以放入内存。
-- 不支持 do-while 循环与 switch-case。
+- 支持 do-while 循环；暂不支持 switch-case。
 - 尽量不要使用递归。
 
 ## Hello World

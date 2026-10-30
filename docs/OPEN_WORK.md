@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 182 passed, 0 failed (111 shape assertions, 797 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 184 passed, 0 failed (114 shape assertions, 807 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 59 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
@@ -62,6 +62,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | sized array parameter receiving a bound handle (§3.8) | **done** — `f970d51`; the call-site note follows the argument's packed handle | §7.6, §3.8 |
 | element writes through an array alias (§3.9) | **done** — `e13d454`; the optimizer follows `arrayAliasOf`, encoded/const targets are refused cleanly | §7.7, §3.9 |
 | `break` / `continue` outside a loop (§3.10) | **done** — `d34951c`; semantic context counters | §7.8, §3.10 |
+| `do ... while` (§3.11) | **done** — `4f44071`; parser/semantic/generator + deterministic optimization | §7.9, §3.11 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -756,6 +757,15 @@ program then ran away:
 
 The decision is §7.8.
 
+### 3.11 `do ... while` was not parseable
+
+The lexer had the `do` token and `DoWhileStatement` existed as a node type,
+but the parser had no `DO` branch, so a do-while failed with
+`Unexpected token in expression: DO 'do'`. The semantic analyzer and the
+generator had no visitor either.
+
+The decision is §7.9.
+
 ---
 
 ## 4. Harness debt
@@ -779,21 +789,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 533 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 535 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §7.1–7.6,
-§3.4, §3.7 and §3.8 cases bring the count to 533 under `testers/unit_tests`, every one of
+§3.4, §3.7 and §3.8 cases bring the count to 535 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 182 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `check.mjs` | 184 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
 | `negative.mjs` | 59 | `negative/` |
 | `nomem.mjs` | 7 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-182 + 10 + 59 + 7 + 275 = 533. The caveat that replaces "no runner" is weaker but real:
+184 + 10 + 59 + 7 + 275 = 535. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -854,7 +864,7 @@ Every item here is now fixed or closed; each points at the record and the case t
 ## 7. Decisions on the defects in §3 and §6
 
 Recorded so these are not re-opened, in the order they were given. **§1, §2 and §3 are
-closed**: their defects have decisions either in their own §3 record or below; §7.8 is the last one added.
+closed**: their defects have decisions either in their own §3 record or below; §7.9 is the last one added.
 
 ### 7.1 `'x'` is an `int` holding its ASCII value
 
@@ -1087,3 +1097,24 @@ half -- `continue` inside a switch still belongs to the enclosing loop.
 Cases: `negative/break_outside_loop_refused.c` and
 `negative/continue_outside_loop_refused.c`. Break/continue inside for/while
 and nested loops are unchanged.
+
+### 7.9 `do ... while`
+
+**Done in `4f44071`.**
+
+- parser: `parseDoWhileStatement` for `do <stmt> while ( <expr> ) ;`, plus
+  `DoWhileStatementNode` and `ASTBuilder.doWhileStatement`;
+- semantic: `visitDoWhileStatement` visits the body with the loop context
+  (break/continue work) and then the test;
+- generator: `visitDoWhileStatement` emits body -> test -> jump back to the
+  BODY; `continue` targets the test. A while's back-edge targets the test.
+- optimizer: `analyzeDoWhileStatement` analyzes the body/test. The
+  deterministic while model is reused only when the ENTRY test is true -- the
+  one case where the body/test sequence and final values are a while's.
+  `simulateLoop` no longer applies the separate `for`-style update to a
+  do-while (it double-stepped the loop variable). A false entry test, a body
+  with side effects, break/continue or a nested loop keep the loop as it is.
+
+Cases: `check/t170_do_while.c` (body-first, continue->test, break, nesting)
+and `check/t171_do_while_optimized.c` (a do-while and a while with the same
+trip count both fold; `EMIT-NOT: op lessThan`).
