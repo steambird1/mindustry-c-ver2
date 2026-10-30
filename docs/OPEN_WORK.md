@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 185 passed, 0 failed (114 shape assertions, 812 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 186 passed, 0 failed (114 shape assertions, 817 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 64 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
@@ -798,21 +798,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 541 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 542 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 541 under `testers/unit_tests`, every one of
+bring the count to 542 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 185 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `check.mjs` | 186 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
 | `negative.mjs` | 64 | `negative/` |
 | `nomem.mjs` | 7 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-185 + 10 + 64 + 7 + 275 = 541. The caveat that replaces "no runner" is weaker but real:
+186 + 10 + 64 + 7 + 275 = 542. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -1147,10 +1147,13 @@ trip count both fold; `EMIT-NOT: op lessThan`).
   analysis; `cloneAST` / scope / collect lists know `discriminant`;
   `replaceNode` replaces the discriminant (an inlined parameter); `caseValue`
   is an ATTRIBUTE so a cloned switch keeps it; loops containing a switch are
-  kept out of the deterministic loop optimizations.
+  kept out of the deterministic loop optimizations, including `do-while`
+  (`tryOptimizeDoWhile` checks `containsSwitch` too).
 
 Cases: `check/t172_switch.c` (fallthrough, default in the middle, two labels
 on one statement, case expressions, char case, continue-through-switch,
-nested switches, inlined function with a switch) and five negative cases
-(duplicate case, non-constant case, duplicate default, float discriminant,
-continue outside a loop).
+nested switches, inlined function with a switch);
+`check/t173_switch_loop_nesting.c` (do-while containing a switch, a switch
+case containing for/while/do-while, and while -> switch -> for); and five
+negative cases (duplicate case, non-constant case, duplicate default, float
+discriminant, continue outside a loop).
