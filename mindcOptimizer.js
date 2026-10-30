@@ -3155,6 +3155,12 @@ export class Optimizer extends ASTVisitor {
 			|| node.getAttribute('conditionHasSideEffects')) return false;
 		/* The first test is true, so the body/test sequence is a while's. */
 		if (!entryTest) return false;
+		/*
+		A switch's own break targets and dispatch are not modelled by the
+		do-while simulation; keep such a loop as it is, as the while/for
+		optimizers do.
+		*/
+		if (this.containsSwitch(node.body)) return false;
 		if (this.containsLoopJumpOrLoop(node.body)) return false;
 		let loopVarName = null;
 		let comparisonOp = null;
