@@ -1824,6 +1824,15 @@ export class CodeGenerator extends ASTVisitor {
 		const result = new Instruction();
 		result.concat(disc);
 
+		/*
+		The body is one block scope (C's rule). The case statements are emitted
+		here rather than through `visitCompoundStatement`, so the scope has to
+		be entered explicitly -- otherwise a declaration at the switch's flat
+		level is invisible to a case that uses it.
+		*/
+		const previousScope = this.currentScope;
+		if (node.body?.scope) this.currentScope = node.body.scope;
+
 		this.enterSwitch();
 
 		const statements = node.body?.statements ?? [];
@@ -1865,6 +1874,7 @@ export class CodeGenerator extends ASTVisitor {
 
 		this.currentBreaks.forEach(breaks => result.concat(new InstructionReferrer(breaks, 'loop_break')));
 		this.exitSwitch();
+		this.currentScope = previousScope;
 		return result;
 	}
 

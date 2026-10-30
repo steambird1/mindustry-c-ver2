@@ -3047,6 +3047,13 @@ export class Optimizer extends ASTVisitor {
 	 */
 	analyzeSwitchStatement(node, info = null) {
 		if (node.discriminant) this.analyzeNode(node.discriminant, info);
+		/*
+		A constant discriminant means only one path can run. Replace the switch
+		with that path before the conservative whole-body analysis; the loop
+		optimizers then see straight-line code and `containsSwitch` no longer
+		has anything to disable.
+		*/
+		if (this.foldConstantSwitch(node, info)) return;
 		if (node.body) {
 			/*
 			A switch is a set of mutually-exclusive branches that the linear
@@ -3065,6 +3072,108 @@ export class Optimizer extends ASTVisitor {
 				parentInfo: info
 			});
 		}
+	}
+
+	/**
+	 * Replace a switch whose discriminant is a known constant with the path it
+	 * actually takes. Kept deliberately narrow:
+	 *
+	 *  - a declaration at the switch's FLAT level keeps the switch (the jump
+	 *    would skip its initializer and dropping it could lose storage);
+	 *  - a `break` that belongs to this switch must be a top-level statement
+	 *    (a conditional break cannot be removed without a goto);
+	 *  - nested loops/switches are kept whole; their breaks are their own.
+	 *
+	 * @param {ASTNode} node
+	 * @param {*} info
+	 * @returns {boolean} Whether the switch was replaced.
+	 */
+	foldConstantSwitch(node, info) {
+		if (info && info.optimizingLoop) return false;
+		let disc = this.evaluateConstantExpression(node.discriminant);
+		if (typeof disc === 'boolean') disc = disc ? 1 : 0;
+		if (typeof disc !== 'number' || !Number.isFinite(disc)) return false;
+		if (this.hasSideEffects(node.discriminant)) return false;
+		const body = node.body;
+		if (!body || !Array.isArray(body.statements)) return false;
+		const statements = body.statements;
+		/*
+		A declaration's `type` is a TypeSpecifier OBJECT, not the string
+		'VariableDeclaration' (the visitor translates it). Treat any non-string
+		type in a statement list as a declaration.
+		*/
+		const isDeclaration = s => s.type === 'VariableDeclaration'
+			|| (s.type && typeof s.type === 'object');
+		if (statements.some(isDeclaration)) return false;
+
+		let taken = -1;
+		let fallback = -1;
+		for (let i = 0; i < statements.length; i++) {
+			const s = statements[i];
+			if (s.type !== 'CaseClause') continue;
+			if (!s.test) { fallback = i; continue; }
+			if (taken < 0 && s.getAttribute('caseValue') === disc) taken = i;
+		}
+		if (taken < 0) taken = fallback;
+		if (taken < 0) {
+			/* Nothing matches and there is no default: the switch does nothing. */
+			this.replaceNode(node, null);
+			return true;
+		}
+
+		const takenStatements = [];
+		for (let i = taken + 1; i < statements.length; i++) {
+			const s = statements[i];
+			if (s.type === 'CaseClause') continue;
+			if (s.type === 'BreakStatement') break;
+			if (this.containsSwitchOwnedBreak(s)) return false;
+			takenStatements.push(s);
+		}
+		if (takenStatements.length === 0) {
+			this.replaceNode(node, null);
+			return true;
+		}
+
+		const replacement = ASTBuilder.compoundStatement();
+		replacement.location = node.location;
+		/* Keep the switch body's scope: the moved statements point at it. */
+		replacement.scope = body.scope ?? node.scope;
+		for (const s of takenStatements) {
+			s.parent = replacement;
+			replacement.statements.push(s);
+		}
+		this.replaceNode(node, replacement);
+		this.analyzeNode(replacement, info);
+		return true;
+	}
+
+	/**
+	 * Whether a statement contains a `break` that would belong to a switch
+	 * being removed. Breaks inside a nested loop or switch belong to those,
+	 * so the walk stops there.
+	 * @param {ASTNode} node
+	 * @returns {boolean}
+	 */
+	containsSwitchOwnedBreak(node) {
+		let found = false;
+		const walk = n => {
+			if (!n || typeof n !== 'object' || found) return;
+			if (Array.isArray(n)) { n.forEach(walk); return; }
+			if (n.type === 'WhileStatement' || n.type === 'ForStatement'
+				|| n.type === 'DoWhileStatement' || n.type === 'SwitchStatement') {
+				return;
+			}
+			if (n.type === 'BreakStatement') { found = true; return; }
+			for (const key of ['children', 'statements', 'body', 'consequent',
+				'alternate', 'test', 'update', 'init', 'expression', 'argument',
+				'left', 'right']) {
+				const c = n[key];
+				if (Array.isArray(c)) c.forEach(walk);
+				else if (c && typeof c === 'object') walk(c);
+			}
+		};
+		walk(node);
+		return found;
 	}
 
 	/**
