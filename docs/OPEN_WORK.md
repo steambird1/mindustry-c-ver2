@@ -20,8 +20,8 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 184 passed, 0 failed (114 shape assertions, 807 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 59 passed, 0 failed |
+| `node ../tools/check.mjs` | 185 passed, 0 failed (114 shape assertions, 812 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 64 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
@@ -63,6 +63,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | element writes through an array alias (§3.9) | **done** — `e13d454`; the optimizer follows `arrayAliasOf`, encoded/const targets are refused cleanly | §7.7, §3.9 |
 | `break` / `continue` outside a loop (§3.10) | **done** — `d34951c`; semantic context counters | §7.8, §3.10 |
 | `do ... while` (§3.11) | **done** — `4f44071`; parser/semantic/generator + deterministic optimization | §7.9, §3.11 |
+| `switch ... case` (§3.12) | **done** — `eaa54f6`; fallthrough + comparison dispatch, break/continue contexts | §7.10, §3.12 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -766,6 +767,14 @@ generator had no visitor either.
 
 The decision is §7.9.
 
+### 3.12 `switch ... case` was not parseable
+
+The lexer had `switch` / `case` / `default` tokens (with a `/* Unsupported */`
+note on `switch`), but the parser had no branch for them. A switch failed at
+the parser, and the semantic analyzer and generator had no node for it.
+
+The decision is §7.10.
+
 ---
 
 ## 4. Harness debt
@@ -789,21 +798,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 535 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 541 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
-runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §7.1–7.6,
-§3.4, §3.7 and §3.8 cases bring the count to 535 under `testers/unit_tests`, every one of
+runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
+bring the count to 541 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 184 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 59 | `negative/` |
+| `check.mjs` | 185 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `negative.mjs` | 64 | `negative/` |
 | `nomem.mjs` | 7 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-184 + 10 + 59 + 7 + 275 = 535. The caveat that replaces "no runner" is weaker but real:
+185 + 10 + 64 + 7 + 275 = 541. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -864,7 +873,7 @@ Every item here is now fixed or closed; each points at the record and the case t
 ## 7. Decisions on the defects in §3 and §6
 
 Recorded so these are not re-opened, in the order they were given. **§1, §2 and §3 are
-closed**: their defects have decisions either in their own §3 record or below; §7.9 is the last one added.
+closed**: their defects have decisions either in their own §3 record or below; §7.10 is the last one added.
 
 ### 7.1 `'x'` is an `int` holding its ASCII value
 
@@ -1118,3 +1127,30 @@ and nested loops are unchanged.
 Cases: `check/t170_do_while.c` (body-first, continue->test, break, nesting)
 and `check/t171_do_while_optimized.c` (a do-while and a while with the same
 trip count both fold; `EMIT-NOT: op lessThan`).
+
+### 7.10 `switch ... case`
+
+**Done in `eaa54f6`.** C semantics: fallthrough unless `break`.
+
+- parser: `switch ( expr ) { ... }`; the body is a FLAT compound statement
+  with `CaseClause` markers (a null test is `default`). One block scope for
+  the whole switch, and source order is fallthrough order.
+- semantic: integer discriminant; case labels are integer constant
+  expressions (literals, arithmetic, chars -- identifiers are rejected, as C
+  requires); duplicate case/default checks. The body is one BREAKABLE
+  context, while `continue` still needs an enclosing loop.
+- generator: evaluate the discriminant once, compare and jump to the matching
+  case, emit the cases in source order, and place `break` targets at the end;
+  `continue` is inherited from the enclosing loop.
+- optimizer: the body is analysed `isUnsure` (like an unknown `if`), so a
+  value is not folded to whichever case was analysed last; `CaseClause`
+  analysis; `cloneAST` / scope / collect lists know `discriminant`;
+  `replaceNode` replaces the discriminant (an inlined parameter); `caseValue`
+  is an ATTRIBUTE so a cloned switch keeps it; loops containing a switch are
+  kept out of the deterministic loop optimizations.
+
+Cases: `check/t172_switch.c` (fallthrough, default in the middle, two labels
+on one statement, case expressions, char case, continue-through-switch,
+nested switches, inlined function with a switch) and five negative cases
+(duplicate case, non-constant case, duplicate default, float discriminant,
+continue outside a loop).

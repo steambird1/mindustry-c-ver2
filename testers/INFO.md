@@ -13,8 +13,8 @@
 
 | 命令（从 `testers/unit_tests` 执行） | 读哪个目录 | 当前结果 | 判定标准 |
 |---|---|---|---|
-| `node ..\tools\check.mjs` | `check/` | **184 passed, 0 failed**（114 shape assertions, 807 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
-| `node ..\tools\negative.mjs` | `negative/` | **59 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
+| `node ..\tools\check.mjs` | `check/` | **185 passed, 0 failed**（114 shape assertions, 812 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
+| `node ..\tools\negative.mjs` | `negative/` | **64 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
 | `node ..\tools\nomem.mjs` | `nomem/` | **7 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
 | `node ..\tools\loadorder.mjs` | 仓库根的 `mindc*.js` | **12 passed, 0 failed, 2 exempt** | 每个入口单独起一个 `node` 进程导入，不得有循环依赖 |
 | `node ..\tools\runall.mjs` | 14 个目录：`suite/` `mem/` `arr/` `arr2/` `ptr2/` `stack/` `tests/` `uc/` `cases/` `exttests/` `hdr/` `t/` `big/` `u/` | **267/275**（8 个已知坏例以 KNOWN-GAP 如实上报，不算失败） | 能编译、能跑完不崩；带 `EXPECT:` 的还比对输出 |
@@ -67,13 +67,13 @@
 
 ## 目录地图
 
-`testers/unit_tests/` 下共 **535 个 `.c`，全部有 runner**（184 + 10 + 59 + 7 + 275 = 535）：
+`testers/unit_tests/` 下共 **541 个 `.c`，全部有 runner**（185 + 10 + 64 + 7 + 275 = 541）：
 
 | 目录 | 文件数 | 谁来跑 |
 |---|---|---|
-| `check/` | 184 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
+| `check/` | 185 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
 | `t/` | 98 | `runall.mjs`（早期按主题分的用例，`2dc683e` 起纳入） |
-| `negative/` | 59 | `negative.mjs` |
+| `negative/` | 64 | `negative.mjs` |
 | `suite/` | 50 | `runall.mjs` |
 | `mem/` | 25 | `runall.mjs` |
 | `tests/` | 25 | `runall.mjs`（另有手工的 `batch.mjs [baseline]`） |
@@ -95,7 +95,7 @@
 
 ## check/ 的编号约定
 
-`check/` 用 `tNN_主题.c` 命名，**编号 1–171 已用满，没有空号**，下一个用例是 `t172`。
+`check/` 用 `tNN_主题.c` 命名，**编号 1–172 已用满，没有空号**，下一个用例是 `t173`。
 另有 13 个不带编号的（`m1`–`m3`、`n1`–`n2`、`rw1`–`rw2`、`seq1`、`memsp2`–`memsp3`），
 它们早于编号制，保留原名。
 
@@ -168,6 +168,7 @@
 | `t169` | **§3.9**：数组别名（`int a[] = mem;`）的元素写会到达目标；genuine memory、常量初始化的自动 encoded、embedded、别名套别名都覆盖，runner 在五种不变性 pragma 下重跑 |
 | `t170` | **§3.11**：do-while 语义——body 至少执行一次、`continue` 跳到 test、`break`、嵌套；五种不变性 pragma 下一致 |
 | `t171` | **§7.9**：与相同 trip count 的 while 对比，两者都被完全优化掉（`EMIT: print 3`、`EMIT-NOT: op lessThan`） |
+| `t172` | **§7.10**：switch-case（C fallthrough、`break`、`default` 位置、case 常量、char、switch 内 `continue`、嵌套、内联函数中的 switch）；五种不变性 pragma 下一致 |
 
 设计背景见 `docs/PLAN_array_layout.md`。
 
@@ -180,7 +181,7 @@
 在它想守住的那条检查被删掉之后**依然会通过**——这正是删掉的检查不被发现的方式。
 所以每条 `MESSAGE:` 都必须匹配到编译器真实给出的某一条错误。
 
-**负债已清零**（`1584cf3`）。`negative/` 的 59 个用例全部带 `MESSAGE:`，没有
+**负债已清零**（`1584cf3`）。`negative/` 的 64 个用例全部带 `MESSAGE:`，没有
 `KNOWN-GAP`：原先那两个（`ovl_auto.c`、`ovl_pragma.c`）已删除——自动模板 / 重载
 已经实现，`check/t109`、`check/t110` 用正向用例断言同一事实。
 `remote_as_value_refused.c`（§7.3）是第一个真正用上 `NOT-MESSAGE:` 的用例，
@@ -199,6 +200,9 @@
 `alias_write_into_constant_refused.c`（§3.9）断言别名写入常量目标被拒：显式
 `array("encoded")` 目标是正常语义错误（不再出现 `Internal parser error`），`const`
 目标仍走既有的 `Cannot assign to const variable`。
+
+五条 `switch_*` negative 用例（§7.10）断言：重复 case、非常量 case、重复 default、
+float discriminant，以及 switch 内没有外层 loop 的 `continue`。
 
 `negative/` 目前没有 `KNOWN-GAP`。
 

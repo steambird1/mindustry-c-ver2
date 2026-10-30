@@ -61,6 +61,7 @@ There are some additional features:
 - `widthof(x)` tells you how many **registers** a value occupies, which is not the same question as `sizeof(x)` (memory cells) for arrays and for `*byname` pointers
 - `vecalias(&a, b)` and `veccpy(a, b)` bind and copy arrays at the intrinsic level
 - `do { ... } while (...)` loops are supported: the body runs once before the test
+- `switch (x) { case ...: ... default: ... }` follows C: fallthrough unless `break`
 
 *Note: `int a[] = {1, 2, 3};` — an initializer with no size — is still not allowed. The
 size has to come from somewhere.*
