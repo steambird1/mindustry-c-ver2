@@ -823,6 +823,13 @@ export class SemanticAnalyzer extends ASTVisitor {
 		this.globalScope = null;	// ???
 		this.scopeCounter = 0;
 		this.virtualCounter = 0;
+		/*
+		Break/continue context. A loop provides both; a `switch` (when it
+		exists) will provide only the breakable half. Counters, so a nested
+		loop or switch restores the outer context on exit.
+		*/
+		this.loopDepth = 0;
+		this.breakableDepth = 0;
 		// Cannot do initialization in construction !!!
     }
 
@@ -7225,6 +7232,33 @@ export class SemanticAnalyzer extends ASTVisitor {
 		node.dataType = consequentType;
 	}
 
+    /**
+     * Visit a loop body with the break/continue context it provides.
+     * `break` needs a loop or a switch; `continue` needs a loop.
+     */
+    visitLoopBody(body) {
+        this.loopDepth += 1;
+        this.breakableDepth += 1;
+        try {
+            if (body) this.visit(body);
+        } finally {
+            this.loopDepth -= 1;
+            this.breakableDepth -= 1;
+        }
+    }
+
+    visitBreakStatement(node) {
+        if (this.breakableDepth === 0) {
+            this.addError(`'break' can only be used inside a loop or switch`, node.location);
+        }
+    }
+
+    visitContinueStatement(node) {
+        if (this.loopDepth === 0) {
+            this.addError(`'continue' can only be used inside a loop`, node.location);
+        }
+    }
+
     visitWhileStatement(node) {
         this.visit(node.test);
         
@@ -7234,7 +7268,7 @@ export class SemanticAnalyzer extends ASTVisitor {
             this.addWarning(`Loop condition should be of type 'bool'`, node.test.location);
         }
 
-        this.visit(node.body);
+        this.visitLoopBody(node.body);
     }
 
 	// FOR LOOP DOESN'T HAVE ITS SCOPE
@@ -7253,7 +7287,7 @@ export class SemanticAnalyzer extends ASTVisitor {
             }
         }
         if (node.update) this.visit(node.update);
-        if (node.body) this.visit(node.body);
+        this.visitLoopBody(node.body);
 
         // 退出作用域
         //this.currentScope = this.currentScope.parent;
