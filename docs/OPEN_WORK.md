@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 186 passed, 0 failed (114 shape assertions, 817 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 188 passed, 0 failed (118 shape assertions, 827 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 64 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
@@ -64,6 +64,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | `break` / `continue` outside a loop (§3.10) | **done** — `d34951c`; semantic context counters | §7.8, §3.10 |
 | `do ... while` (§3.11) | **done** — `4f44071`; parser/semantic/generator + deterministic optimization | §7.9, §3.11 |
 | `switch ... case` (§3.12) | **done** — `eaa54f6`; fallthrough + comparison dispatch, break/continue contexts | §7.10, §3.12 |
+| constant switch folding (§7.11) | **done** — `e7a89be`; a constant discriminant is replaced by the taken path | §7.11 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -798,21 +799,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 542 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 544 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 542 under `testers/unit_tests`, every one of
+bring the count to 544 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 186 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `check.mjs` | 188 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
 | `negative.mjs` | 64 | `negative/` |
 | `nomem.mjs` | 7 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-186 + 10 + 64 + 7 + 275 = 542. The caveat that replaces "no runner" is weaker but real:
+188 + 10 + 64 + 7 + 275 = 544. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -873,7 +874,7 @@ Every item here is now fixed or closed; each points at the record and the case t
 ## 7. Decisions on the defects in §3 and §6
 
 Recorded so these are not re-opened, in the order they were given. **§1, §2 and §3 are
-closed**: their defects have decisions either in their own §3 record or below; §7.10 is the last one added.
+closed**: their defects have decisions either in their own §3 record or below; §7.11 is the last one added.
 
 ### 7.1 `'x'` is an `int` holding its ASCII value
 
@@ -1141,7 +1142,9 @@ trip count both fold; `EMIT-NOT: op lessThan`).
   context, while `continue` still needs an enclosing loop.
 - generator: evaluate the discriminant once, compare and jump to the matching
   case, emit the cases in source order, and place `break` targets at the end;
-  `continue` is inherited from the enclosing loop.
+  `continue` is inherited from the enclosing loop. The body's block scope
+  is entered explicitly, so a declaration at the switch's flat level is
+  visible to the cases.
 - optimizer: the body is analysed `isUnsure` (like an unknown `if`), so a
   value is not folded to whichever case was analysed last; `CaseClause`
   analysis; `cloneAST` / scope / collect lists know `discriminant`;
@@ -1157,3 +1160,33 @@ nested switches, inlined function with a switch);
 case containing for/while/do-while, and while -> switch -> for); and five
 negative cases (duplicate case, non-constant case, duplicate default, float
 discriminant, continue outside a loop).
+
+### 7.11 Constant switch folding
+
+**Done in `e7a89be`.** A constant discriminant means one path.
+
+`analyzeSwitchStatement` now, before the conservative whole-body analysis,
+tries `foldConstantSwitch`:
+
+- the discriminant must be a finite number (`bool` normalized to 0/1) with
+  no side effects;
+- the matching `CaseClause` (or `default`) is selected; if neither matches,
+  the switch is removed;
+- the statements from that label onward are moved into a new compound
+  (fallthrough), stopping at a top-level `break` of this switch;
+- the compound keeps the switch body's scope, so the moved statements'
+  symbols still resolve;
+- the fold is skipped when a declaration sits at the switch's FLAT level, or
+  when a switch-owned `break` is nested inside another statement (it cannot
+  be removed without a goto). Nested loops/switches are kept whole; their
+  breaks are theirs.
+
+The generator now enters the switch body's scope explicitly, so a flat-level
+declaration is visible to the cases (it used to fail with `Could not get
+symbol t`).
+
+Cases: `check/t174_switch_const_fold.c` (a top-level constant switch folds
+to `print 5`; `while ... switch(0)` folds to `print 3`; `EMIT-NOT: op
+lessThan`) and `check/t175_switch_no_fold.c` (a conditional break and a flat
+declaration keep the switch; a declaration inside a case block folds;
+outputs `1 5 7`).
