@@ -7271,6 +7271,15 @@ export class SemanticAnalyzer extends ASTVisitor {
         this.visitLoopBody(node.body);
     }
 
+    visitDoWhileStatement(node) {
+        this.visitLoopBody(node.body);
+        this.visit(node.test);
+        const testType = this.getExpressionType(node.test);
+        if (testType && testType.name !== 'bool') {
+            this.addWarning(`Loop condition should be of type 'bool'`, node.test.location);
+        }
+    }
+
 	// FOR LOOP DOESN'T HAVE ITS SCOPE
     visitForStatement(node) {
         // 进入新的作用域

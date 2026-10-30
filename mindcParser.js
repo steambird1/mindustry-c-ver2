@@ -1243,6 +1243,9 @@ export class Parser {
             case TokenType.WHILE:
                 return this.parseWhileStatement();
             
+            case TokenType.DO:
+                return this.parseDoWhileStatement();
+            
             case TokenType.FOR:
                 return this.parseForStatement();
             
@@ -1512,6 +1515,25 @@ export class Parser {
 		test.parent = whileStmt;
 		body.parent = whileStmt;
         return whileStmt;
+    }
+
+    parseDoWhileStatement() {
+        const doToken = this.expectToken(TokenType.DO);
+        if (!doToken) return null;
+
+        const body = this.wrapToCompound(this.parseStatement());
+
+        this.expectToken(TokenType.WHILE);
+        this.expectToken(TokenType.LEFT_PAREN);
+        const test = this.parseExpression();
+        this.expectToken(TokenType.RIGHT_PAREN);
+        this.expectToken(TokenType.SEMICOLON);
+
+        const doStmt = ASTBuilder.doWhileStatement(body, test);
+        doStmt.location = doToken.location;
+        body.parent = doStmt;
+        test.parent = doStmt;
+        return doStmt;
     }
 
     parseForStatement() {

@@ -1825,6 +1825,44 @@ export class CodeGenerator extends ASTVisitor {
 	}
 
 	/**
+	 * `do body while (test);` -- the body runs first, then the test decides
+	 * whether to go round again.
+	 *
+	 * The loop-back jump targets the BODY start (a `while` targets the test),
+	 * and `continue` targets the TEST: in C a `continue` in a do-while
+	 * evaluates the condition before the next iteration.
+	 *
+	 * @param {DoWhileStatementNode} node
+	 */
+	visitDoWhileStatement(node) {
+		this.enterLoop();
+		const body = node.body ? this.visit(node.body) : new Instruction();
+		const tester = this.visitToCondition(node.test, true);
+		const conditBreak = InstructionBuilder.jumpx('{loop_break}', tester.instructionReturn);
+		this.currentBreaks.push(conditBreak);
+		const backJumper = InstructionBuilder.jump('{goto_body}', 'always', null, null);
+		const result = new Instruction();
+		/*
+		The zero-size referrer at the body start is the target of the loop-back
+		jump. The `continue` referrers sit between the body and the test, so
+		they re-evaluate the condition -- exactly where C puts them.
+		*/
+		result.concat(new InstructionReferrer(backJumper, 'goto_body'));
+		result.concat(body);
+		this.currentContinues.forEach(conts => {
+			result.concat(new InstructionReferrer(conts, 'loop_continue'));
+		});
+		result.concat(tester);
+		result.concat(conditBreak);
+		result.concat(backJumper);
+		this.currentBreaks.forEach(breaks => {
+			result.concat(new InstructionReferrer(breaks, 'loop_break'));
+		});
+		this.exitLoop();
+		return result;
+	}
+
+	/**
 	 * 
 	 * @param {ForStatementNode} node 
 	 */

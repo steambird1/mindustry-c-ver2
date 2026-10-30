@@ -1739,6 +1739,10 @@ export class Optimizer extends ASTVisitor {
 				case 'WhileStatement':
 					this.analyzeWhileStatement(node, info);
 					break;
+
+				case 'DoWhileStatement':
+					this.analyzeDoWhileStatement(node, info);
+					break;
 					
 				case 'ForStatement':
 					this.analyzeForStatement(node, info);
@@ -3023,6 +3027,156 @@ export class Optimizer extends ASTVisitor {
 	
 
 	/**
+	 * `do body while (test);`
+	 *
+	 * The body runs at least once, so it is analyzed as a loop body (writes,
+	 * break/continue). The deterministic while model is reused only when the
+	 * entry test is TRUE: then the body/test sequence and the final values are
+	 * exactly a while loop's, and `simulateLoop` can be used unchanged.
+	 * When the entry test is false the body still runs once, which the while
+	 * model does not express; the loop is left alone.
+	 *
+	 * @param {ASTNode} node
+	 * @param {*} info
+	 */
+	analyzeDoWhileStatement(node, info = null) {
+		node.setAttribute('hasSideEffects', false);
+		let entryTest = undefined;
+		if (node.test) {
+			/*
+			Evaluate the ENTRY condition before analyzing the test: the analysis
+			can set `restrictiveVariables` (cannotCascade) and make a known loop
+			variable look unknown. This value decides whether the while model
+			applies.
+			*/
+			entryTest = this.evaluateConstantExpression(node.test);
+			this.analyzeNode(node.test, {
+				isLoop: true,
+				firstLoopRun: true,
+				parentLoop: node,
+				cannotCascade: true,
+				optimizingLoop: false,
+				parentInfo: info
+			});
+			if (this.hasSideEffects(node.test)) {
+				node.setAttribute('conditionHasSideEffects', true);
+			}
+		}
+		if (node.body) {
+			/*
+			Also cached before analysis, for the same reason -- this is the
+			value `analyzeWhileStatement` reads for its bodyHasSideEffects.
+			*/
+			node.setAttribute('bodyHasSideEffects',
+				node.getAttribute('confirmedSideEffects') || this.hasSideEffects(node.body));
+			const modifieds = (info ? info.modifiedVars : null) ?? this.collectModifiedVariablesInLoop(node);
+			let weird = false;
+			if (modifieds.has('unrecognized')) {
+				weird = true;
+				modifieds.delete('unrecognized');
+			}
+			this.analyzeNode(node.body, {
+				isLoop: true,
+				firstLoopRun: true,
+				parentLoop: node,
+				atLoop: weird ? null : (node.body.scope ?? node.scope),
+				strangeLoop: node.getAttribute('hasUnknownSideEffects') || weird,
+				modifiedVars: modifieds,
+				/*
+				An outer loop being simulated must not mistake this loop's
+				`break` for its own; `optimizingLoop` is inherited otherwise.
+				*/
+				optimizingLoop: false,
+				parentInfo: info
+			});
+		}
+		let optimized = false;
+		if (!(info && info.optimizingLoop)) {
+			optimized = this.tryOptimizeDoWhile(node, info, entryTest);
+		}
+		if (!optimized) this.markLoopAsPotentiallyWithSideEffects(node);
+	}
+
+	/**
+	 * Try the deterministic model on a `do ... while` loop.
+	 *
+	 * Only the case where the FIRST test is true is a plain while loop; a
+	 * false first test runs the body once and then leaves. Break/continue and
+	 * nested loops make the update search unreliable, so they keep the loop.
+	 *
+	 * @param {ASTNode} node
+	 * @param {*} info
+	 * @returns {boolean}
+	 */
+	tryOptimizeDoWhile(node, info, entryTest) {
+		if (!node.test || node.test.type !== 'BinaryExpression') return false;
+		if (node.getAttribute('bodyHasSideEffects')
+			|| node.getAttribute('conditionHasSideEffects')) return false;
+		/* The first test is true, so the body/test sequence is a while's. */
+		if (!entryTest) return false;
+		if (this.containsLoopJumpOrLoop(node.body)) return false;
+		let loopVarName = null;
+		let comparisonOp = null;
+		let constValue = null;
+		if (node.test.left.type === 'Identifier') {
+			loopVarName = node.test.left.name;
+			comparisonOp = node.test.operator;
+			constValue = this.evaluateConstantExpression(node.test.right);
+		} else if (node.test.right.type === 'Identifier') {
+			loopVarName = node.test.right.name;
+			comparisonOp = this.reverseComparisonOperator(node.test.operator);
+			constValue = this.evaluateConstantExpression(node.test.left);
+		}
+		if (!loopVarName) return false;
+		const updateInfo = this.findLoopVariableUpdateInBody(node.body, loopVarName);
+		if (!updateInfo) return false;
+		const scope = this.currentScope.lookupScopeOf(loopVarName);
+		if (!scope) return false;
+		const localConstants = this.localConstants.get(scope.getPath());
+		if (!localConstants) return false;
+		const initValue = localConstants.get(loopVarName);
+		if (initValue === undefined) return false;
+		const conditionInfo = { comparisonOp, constValue };
+		const iterationCount = (constValue === undefined) ? null
+			: this.calculateLoopIterations(initValue, conditionInfo, updateInfo);
+		if (iterationCount === null || iterationCount < 1 || iterationCount > 250) return false;
+		node.setAttribute('loopVarName', loopVarName);
+		const tried = this.runWhileSimulation(node, loopVarName, initValue,
+			conditionInfo, updateInfo, iterationCount, info);
+		if (!tried) return false;
+		return this.optimizeDeterministicWhileLoop(node);
+	}
+
+	/**
+	 * Whether a loop body contains a break/continue or a nested loop. The
+	 * do-while deterministic model only handles a straight-line body.
+	 * @param {ASTNode} node
+	 * @returns {boolean}
+	 */
+	containsLoopJumpOrLoop(node) {
+		let found = false;
+		const walk = n => {
+			if (!n || typeof n !== 'object' || found) return;
+			if (Array.isArray(n)) { n.forEach(walk); return; }
+			if (n.type === 'BreakStatement' || n.type === 'ContinueStatement'
+				|| n.type === 'WhileStatement' || n.type === 'ForStatement'
+				|| n.type === 'DoWhileStatement') {
+				found = true;
+				return;
+			}
+			for (const key of ['children', 'statements', 'body', 'consequent',
+				'alternate', 'test', 'update', 'init', 'expression', 'argument',
+				'left', 'right']) {
+				const c = n[key];
+				if (Array.isArray(c)) c.forEach(walk);
+				else if (c && typeof c === 'object') walk(c);
+			}
+		};
+		walk(node);
+		return found;
+	}
+
+	/**
 	 * 分析while循环是否可以优化
 	 * @param {ASTNode} whileNode - while语句节点
 	 */
@@ -3820,7 +3974,12 @@ export class Optimizer extends ASTVisitor {
 				}
 				
 				// 更新循环变量
-				if (loopNode.type !== 'WhileStatement') {
+				/*
+				Only a `for` keeps its update OUTSIDE the body. `while` and
+				`do-while` already applied it by analysing the body; applying it
+				again would double-step them.
+				*/
+				if (loopNode.type !== 'WhileStatement' && loopNode.type !== 'DoWhileStatement') {
 					currentValue = localConstants.get(loopVarName) || initValue;
 					const newValue = currentValue + updateInfo.step;
 					localConstants.set(loopVarName, newValue);	// Should be done inside otherwise!
@@ -4258,7 +4417,8 @@ export class Optimizer extends ASTVisitor {
 		(Must fetch the variable index)
 	 */
 	optimizeDeterministicWhileLoop(whileNode) {
-		if (!whileNode || whileNode.type !== 'WhileStatement') return false;
+		if (!whileNode || (whileNode.type !== 'WhileStatement'
+			&& whileNode.type !== 'DoWhileStatement')) return false;
 		
 		// 检查循环是否可优化
 		const canOptimize = whileNode.getAttribute('canOptimize');
@@ -4271,6 +4431,11 @@ export class Optimizer extends ASTVisitor {
 		
 		// 如果循环永远不会执行
 		if (neverExecuted) {
+			/*
+			A do-while always runs its body once. `neverExecuted` should not be
+			set for one, but deleting it here would be wrong if it ever were.
+			*/
+			if (whileNode.type === 'DoWhileStatement') return false;
 			// while循环没有初始化部分，直接删除
 			// 但需要保留条件的副作用（如果有）
 			const conditionHasSideEffects = whileNode.getAttribute('conditionHasSideEffects');
@@ -4288,6 +4453,12 @@ export class Optimizer extends ASTVisitor {
 		
 		// 如果循环有副作用，不能完全删除
 		if (hasSideEffects || whileNode.getAttribute('maybeHasSideEffects')) {
+			/*
+			Trimming a do-while's iteration count would still have to keep the
+			first, mandatory pass; leave it to the full path (which requires a
+			side-effect-free body) or to the loop.
+			*/
+			if (whileNode.type === 'DoWhileStatement') return false;
 			// 检查是否可以部分优化（减少循环次数）
 			const done = this.partiallyOptimizeLoop(whileNode, loopVarName, iterationCount);
 			if (!done) this.restoreLoopConstants(whileNode);
@@ -8343,6 +8514,9 @@ export class Optimizer extends ASTVisitor {
 				break;
 				
 			case 'WhileStatement':
+				break;
+				
+			case 'DoWhileStatement':
 				break;
 				
 			case 'ForStatement':

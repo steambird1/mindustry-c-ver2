@@ -426,6 +426,14 @@ export class WhileStatementNode extends ASTNode {
     }
 }
 
+export class DoWhileStatementNode extends ASTNode {
+    constructor(body, test) {
+        super(ASTNodeType.DO_WHILE_STATEMENT);
+        this.body = body;
+        this.test = test;
+    }
+}
+
 export class ForStatementNode extends ASTNode {
     constructor(init, test, update, body) {
         super(ASTNodeType.FOR_STATEMENT);
@@ -646,6 +654,10 @@ export class ASTBuilder {
     
     static whileStatement(test, body) {
         return new WhileStatementNode(test, body);
+    }
+    
+    static doWhileStatement(body, test) {
+        return new DoWhileStatementNode(body, test);
     }
     
     static forStatement(init, test, update, body) {
