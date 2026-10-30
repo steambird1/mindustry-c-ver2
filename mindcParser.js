@@ -1240,6 +1240,9 @@ export class Parser {
             case TokenType.IF:
                 return this.parseIfStatement();
             
+            case TokenType.SWITCH:
+                return this.parseSwitchStatement();
+            
             case TokenType.WHILE:
                 return this.parseWhileStatement();
             
@@ -1498,6 +1501,56 @@ export class Parser {
 		if (alternate) alternate.parent = ifStmt;
         ifStmt.location = ifToken.location;
         return ifStmt;
+    }
+
+    parseSwitchStatement() {
+        const switchToken = this.expectToken(TokenType.SWITCH);
+        if (!switchToken) return null;
+
+        this.expectToken(TokenType.LEFT_PAREN);
+        const discriminant = this.parseExpression();
+        this.expectToken(TokenType.RIGHT_PAREN);
+
+        const leftBrace = this.expectToken(TokenType.LEFT_BRACE);
+        const body = ASTBuilder.compoundStatement();
+        body.location = leftBrace ? leftBrace.location : switchToken.location;
+
+        /*
+        The body is a FLAT statement list: `case`/`default` are markers, and
+        the statements after them are the case bodies. That keeps one block
+        scope for the whole switch (C's rule), makes fallthrough the natural
+        order, and reuses the compound-statement scope machinery.
+        */
+        while (!this.matchToken(TokenType.RIGHT_BRACE) && !this.matchToken(TokenType.EOF)) {
+            if (this.matchToken(TokenType.CASE)) {
+                this.expectToken(TokenType.CASE);
+                const test = this.parseExpression();
+                this.expectToken(TokenType.COLON);
+                const clause = ASTBuilder.caseClause(test);
+                clause.location = test?.location ?? switchToken.location;
+                clause.parent = body;
+                body.statements.push(clause);
+            } else if (this.matchToken(TokenType.DEFAULT)) {
+                const defaultToken = this.expectToken(TokenType.DEFAULT);
+                this.expectToken(TokenType.COLON);
+                const clause = ASTBuilder.caseClause(null);
+                clause.location = defaultToken?.location ?? switchToken.location;
+                clause.parent = body;
+                body.statements.push(clause);
+            } else {
+                const statement = this.parseStatement();
+                if (!statement) break;
+                statement.parent = body;
+                body.statements.push(statement);
+            }
+        }
+
+        this.expectToken(TokenType.RIGHT_BRACE);
+        const switchStmt = ASTBuilder.switchStatement(discriminant, body);
+        switchStmt.location = switchToken.location;
+        discriminant.parent = switchStmt;
+        body.parent = switchStmt;
+        return switchStmt;
     }
 
     parseWhileStatement() {

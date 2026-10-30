@@ -1743,6 +1743,14 @@ export class Optimizer extends ASTVisitor {
 				case 'DoWhileStatement':
 					this.analyzeDoWhileStatement(node, info);
 					break;
+
+				case 'SwitchStatement':
+					this.analyzeSwitchStatement(node, info);
+					break;
+
+				case 'CaseClause':
+					if (node.test) this.analyzeNode(node.test, info);
+					break;
 					
 				case 'ForStatement':
 					this.analyzeForStatement(node, info);
@@ -3027,6 +3035,39 @@ export class Optimizer extends ASTVisitor {
 	
 
 	/**
+	 * `switch (disc) { ... }`
+	 *
+	 * The body is a block; analyze it so its writes invalidate outer constants.
+	 * `break` belongs to the switch, so it must not throw a loop
+	 * `BreakException` even when the switch is inside a simulated loop; loops
+	 * containing a switch are kept conservative (see `containsSwitch`).
+	 *
+	 * @param {ASTNode} node
+	 * @param {*} info
+	 */
+	analyzeSwitchStatement(node, info = null) {
+		if (node.discriminant) this.analyzeNode(node.discriminant, info);
+		if (node.body) {
+			/*
+			A switch is a set of mutually-exclusive branches that the linear
+			constant pass cannot order: which case runs depends on the
+			discriminant at run time. `isUnsure` is the same treatment `if`
+			gives an unknown condition -- writes inside become UNKNOWN instead
+			of "the last one wins", so a `print(r)` after the switch is not
+			folded to whichever case happened to be analysed last.
+			*/
+			this.analyzeNode(node.body, {
+				...(info ?? {}),
+				isLoop: false,
+				optimizingLoop: false,
+				isUnsure: true,
+				hasNoCondit: true,
+				parentInfo: info
+			});
+		}
+	}
+
+	/**
 	 * `do body while (test);`
 	 *
 	 * The body runs at least once, so it is analyzed as a loop body (writes,
@@ -3177,12 +3218,42 @@ export class Optimizer extends ASTVisitor {
 	}
 
 	/**
+	 * Whether a loop body contains a switch. A switch's `break` belongs to the
+	 * switch, and its dispatch is not part of the loop simulation, so a loop
+	 * containing one is kept out of the deterministic loop optimizations.
+	 * @param {ASTNode} node
+	 * @returns {boolean}
+	 */
+	containsSwitch(node) {
+		let found = false;
+		const walk = n => {
+			if (!n || typeof n !== 'object' || found) return;
+			if (Array.isArray(n)) { n.forEach(walk); return; }
+			if (n.type === 'SwitchStatement') { found = true; return; }
+			for (const key of ['children', 'statements', 'body', 'consequent',
+				'alternate', 'test', 'update', 'init', 'expression', 'argument',
+				'left', 'right', 'discriminant']) {
+				const c = n[key];
+				if (Array.isArray(c)) c.forEach(walk);
+				else if (c && typeof c === 'object') walk(c);
+			}
+		};
+		walk(node);
+		return found;
+	}
+
+	/**
 	 * 分析while循环是否可以优化
 	 * @param {ASTNode} whileNode - while语句节点
 	 */
 	analyzeWhileLoopForOptimization(whileNode, info) {
 		// while循环的优化比for循环更复杂
 		// 这里我们只处理简单情况：条件中的变量在循环体中被简单修改
+		/*
+		A switch in the body has its own break targets and a dispatch the loop
+		simulation does not model; keep the loop as it is.
+		*/
+		if (this.containsSwitch(whileNode.body)) return false;
 		
 		// 检查条件是否为简单比较
 		if (whileNode.test.type === 'BinaryExpression') {
@@ -3333,7 +3404,7 @@ export class Optimizer extends ASTVisitor {
 				const fields = [
 					'functions', 'globalDeclarations', 'typeDefinitions',
 					'statements', 'expression', 'test', 'consequent', 'alternate',
-					'body', 'init', 'update', 'argument', 'left', 'right',
+					'body', 'discriminant', 'init', 'update', 'argument', 'left', 'right',
 					'declarators', 'arguments', 'callee', 'initializer'
 				];
 				
@@ -4234,7 +4305,7 @@ export class Optimizer extends ASTVisitor {
 			const fieldsToCheck = [
 				'functions', 'globalDeclarations', 'typeDefinitions',
 				'statements', 'expression', 'test', 'consequent', 'alternate',
-				'body', 'init', 'update', 'argument', 'left', 'right',
+				'body', 'discriminant', 'init', 'update', 'argument', 'left', 'right',
 				'declarators', 'arguments', 'callee', 'initializer'
 			];
 
@@ -4268,6 +4339,10 @@ export class Optimizer extends ASTVisitor {
 				
 			case 'WhileStatement':
 				modified = this.optimizeDeterministicWhileLoop(node);
+				break;
+				
+			case 'SwitchStatement':
+				modified = this.optimizeDeterministicLoops(node.body);
 				break;
 				
 			case 'CompoundStatement':
@@ -5968,6 +6043,7 @@ export class Optimizer extends ASTVisitor {
 	 * @returns {boolean}
 	 */
 	analyzeEndlessLoopForOptimization(whileNode, info) {
+		if (this.containsSwitch(whileNode.body)) return false;
 		const test = whileNode.test;
 		// Only for a condition that is plainly true (or absent)
 		if (test) {
@@ -7038,6 +7114,26 @@ export class Optimizer extends ASTVisitor {
 				}
 				break;
 			
+			case 'SwitchStatement':
+				if (oldNode === parent.discriminant) {
+					if (newNode) {
+						newNode.parent = parent;
+						parent.discriminant = newNode;
+					}
+					return;
+				}
+				break;
+
+			case 'CaseClause':
+				if (oldNode === parent.test) {
+					if (newNode) {
+						newNode.parent = parent;
+						parent.test = newNode;
+					}
+					return;
+				}
+				break;
+
 			case 'VariableDeclarator':
 			case 'Declarator':
 				if (oldNode === parent.initializer) {
@@ -7228,7 +7324,7 @@ export class Optimizer extends ASTVisitor {
 			const fieldsToCheck = [
 				'functions', 'globalDeclarations', 'typeDefinitions',
 				'statements', 'expression', 'test', 'consequent', 'alternate',
-				'body', 'init', 'update', 'argument', 'left', 'right',
+				'body', 'discriminant', 'init', 'update', 'argument', 'left', 'right',
 				'declarators', 'arguments', 'callee', 'initializer'
 			];
 
@@ -7350,7 +7446,7 @@ export class Optimizer extends ASTVisitor {
 		const fieldsToCheck = [
 			'functions', 'globalDeclarations', 'typeDefinitions',
 			'statements', 'expression', 'test', 'consequent', 'alternate',
-			'body', 'init', 'update', 'argument', 'left', 'right',
+			'body', 'discriminant', 'init', 'update', 'argument', 'left', 'right',
 			'declarators', 'arguments', 'callee', 'initializer'
 		];
 		
@@ -8136,7 +8232,7 @@ export class Optimizer extends ASTVisitor {
 		const fieldsToCheck = [
 			'functions', 'globalDeclarations', 'typeDefinitions',
 			'statements', 'expression', 'test', 'consequent', 'alternate',
-			'body', 'init', 'update', 'argument', 'left', 'right',
+			'body', 'discriminant', 'init', 'update', 'argument', 'left', 'right',
 			'declarators', 'arguments', 'callee', 'initializer'
 		];
 		
@@ -8377,7 +8473,7 @@ export class Optimizer extends ASTVisitor {
 			const fieldsToCheck = [
 				'functions', 'globalDeclarations', 'typeDefinitions',
 				'statements', 'expression', 'test', 'consequent', 'alternate',
-				'body', 'init', 'update', 'argument', 'left', 'right',
+				'body', 'discriminant', 'init', 'update', 'argument', 'left', 'right',
 				'declarators', 'arguments', 'callee', 'initializer'
 			];
 			
@@ -8554,7 +8650,7 @@ export class Optimizer extends ASTVisitor {
 		const fieldsToCheck = [
 				'functions', 'globalDeclarations', 'typeDefinitions', 'returnType',
 				'statements', 'expression', 'test', 'consequent', 'alternate', 'parameters',
-				'body', 'init', 'update', 'argument', 'left', 'right',
+				'body', 'discriminant', 'init', 'update', 'argument', 'left', 'right',
 				'declarators', 'arguments', 'callee', 'initializer'
 			];
 			
@@ -8602,6 +8698,10 @@ export class Optimizer extends ASTVisitor {
 				
 			case 'ForStatement':
 				modified = this.removeDeadCodeInForStatement(node);
+				break;
+				
+			case 'SwitchStatement':
+				modified = this.removeDeadCode(node.body);
 				break;
 				
 			case 'FunctionDeclaration':
@@ -9289,6 +9389,10 @@ export class Optimizer extends ASTVisitor {
 				break;
 				
 			case 'ForStatement':
+				modified = this.cleanupEmptyStatements(node.body);
+				break;
+				
+			case 'SwitchStatement':
 				modified = this.cleanupEmptyStatements(node.body);
 				break;
 				

@@ -139,6 +139,7 @@ export class CodeGenerator extends ASTVisitor {
 		this.currentContinues = [];
 		this.breakStack = [];
 		this.continueStack = [];
+		this.switchSerial = 0;
 		/**
 		 * @type {Scope}
 		 */
@@ -796,6 +797,19 @@ export class CodeGenerator extends ASTVisitor {
 	exitLoop() {
 		this.currentBreaks = this.breakStack.pop();
 		this.currentContinues = this.continueStack.pop();
+	}
+
+	/*
+	A switch is BREAKABLE but not CONTINUABLE: save only the break stack, so
+	`continue` inside a switch still reaches the enclosing loop.
+	*/
+	enterSwitch() {
+		this.breakStack.push(this.currentBreaks);
+		this.currentBreaks = [];
+	}
+
+	exitSwitch() {
+		this.currentBreaks = this.breakStack.pop();
 	}
 
 	/**
@@ -1792,6 +1806,68 @@ export class CodeGenerator extends ASTVisitor {
 	 * 
 	 * @param {WhileStatementNode} node 
 	 */
+	/**
+	 * `switch (disc) { case ...: ... }`
+	 *
+	 * The flat body is a list of statements with `CaseClause` markers. The
+	 * dispatch compares the discriminant once and jumps to the matching
+	 * marker; the statements are emitted in source order, so fallthrough is
+	 * the natural order. `break` targets the end (a switch-local break stack),
+	 * while `continue` is left to the enclosing loop.
+	 *
+	 * @param {SwitchStatementNode} node
+	 */
+	visitSwitchStatement(node) {
+		const disc = this.visitAndRead(node.discriminant);
+		const discReg = disc.instructionReturn;
+		const serial = ++this.switchSerial;
+		const result = new Instruction();
+		result.concat(disc);
+
+		this.enterSwitch();
+
+		const statements = node.body?.statements ?? [];
+		const labels = new Map();
+		const comparisons = [];
+		let fallback = 'switch_end';
+		let index = 0;
+		const dispatch = new Instruction();
+		for (const stmt of statements) {
+			if (stmt.type !== 'CaseClause') continue;
+			const label = `case_${serial}_${index++}`;
+			labels.set(stmt, label);
+			if (stmt.test) {
+				const jumper = InstructionBuilder.jump(`{${label}}`, 'equal', discReg, String(stmt.getAttribute('caseValue')));
+				dispatch.concat(jumper);
+				comparisons.push([jumper, label]);
+			} else {
+				fallback = label;
+			}
+		}
+		const fallbackJumper = InstructionBuilder.jump(`{${fallback}}`, 'always');
+		dispatch.concat(fallbackJumper);
+		result.concat(dispatch);
+
+		for (const stmt of statements) {
+			if (stmt.type === 'CaseClause') {
+				const label = labels.get(stmt);
+				for (const [jumper, target] of comparisons) {
+					if (target === label) result.concat(new InstructionReferrer(jumper, target));
+				}
+				if (fallback === label) result.concat(new InstructionReferrer(fallbackJumper, fallback));
+				continue;
+			}
+			result.concat(this.visit(stmt));
+		}
+		if (fallback === 'switch_end') {
+			result.concat(new InstructionReferrer(fallbackJumper, 'switch_end'));
+		}
+
+		this.currentBreaks.forEach(breaks => result.concat(new InstructionReferrer(breaks, 'loop_break')));
+		this.exitSwitch();
+		return result;
+	}
+
 	visitWhileStatement(node) {
 		//const test = this.implicitToBoolean(node.test);
 		const tester = this.visitToCondition(node.test, true);

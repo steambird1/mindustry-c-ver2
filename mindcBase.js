@@ -114,6 +114,8 @@ export const ASTNodeType = {
     EXPRESSION_STATEMENT: 'ExpressionStatement',
     COMPOUND_STATEMENT: 'CompoundStatement',
     IF_STATEMENT: 'IfStatement',
+    SWITCH_STATEMENT: 'SwitchStatement',
+    CASE_CLAUSE: 'CaseClause',
     WHILE_STATEMENT: 'WhileStatement',
     DO_WHILE_STATEMENT: 'DoWhileStatement',
     FOR_STATEMENT: 'ForStatement',
@@ -418,6 +420,21 @@ export class IfStatementNode extends ASTNode {
     }
 }
 
+export class SwitchStatementNode extends ASTNode {
+    constructor(discriminant, body) {
+        super(ASTNodeType.SWITCH_STATEMENT);
+        this.discriminant = discriminant;
+        this.body = body;
+    }
+}
+
+export class CaseClauseNode extends ASTNode {
+    constructor(test = null) {
+        super(ASTNodeType.CASE_CLAUSE);
+        this.test = test;
+    }
+}
+
 export class WhileStatementNode extends ASTNode {
     constructor(test, body) {
         super(ASTNodeType.WHILE_STATEMENT);
@@ -650,6 +667,14 @@ export class ASTBuilder {
     
     static ifStatement(test, consequent, alternate = null) {
         return new IfStatementNode(test, consequent, alternate);
+    }
+    
+    static switchStatement(discriminant, body) {
+        return new SwitchStatementNode(discriminant, body);
+    }
+    
+    static caseClause(test = null) {
+        return new CaseClauseNode(test);
     }
     
     static whileStatement(test, body) {

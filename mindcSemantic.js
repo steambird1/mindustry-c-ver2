@@ -1084,7 +1084,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 		const fieldsToCheck = [
 				'functions', 'globalDeclarations', 'typeDefinitions',
 				'statements', 'expression', 'test', 'consequent', 'alternate',
-				'body', 'init', 'update', 'argument', 'left', 'right',
+				'body', 'discriminant', 'init', 'update', 'argument', 'left', 'right',
 				'declarators', 'arguments', 'callee', 'initializer'
 			];
 
@@ -7256,6 +7256,106 @@ export class SemanticAnalyzer extends ASTVisitor {
     visitContinueStatement(node) {
         if (this.loopDepth === 0) {
             this.addError(`'continue' can only be used inside a loop`, node.location);
+        }
+    }
+
+    visitSwitchStatement(node) {
+        this.visit(node.discriminant);
+        const discType = this.getExpressionType(node.discriminant);
+        const integerLike = discType && (this.isIntegerType(discType.name)
+            || discType.name === 'char' || discType.name === 'bool');
+        if (!integerLike) {
+            this.addError(`A switch needs an integer value, but '${discType?.name ?? 'unknown'}' is not one`,
+                node.discriminant?.location ?? node.location);
+        }
+
+        /*
+        Case values are checked here, on the flat body list. `default` is a
+        marker with no test. A `const int` variable is NOT a C integer constant
+        expression, so the evaluator deliberately rejects identifiers.
+        */
+        const seen = new Set();
+        let hasDefault = false;
+        for (const stmt of node.body?.statements ?? []) {
+            if (stmt.type !== 'CaseClause') continue;
+            if (!stmt.test) {
+                if (hasDefault) this.addError(`Duplicate 'default' in switch`, stmt.location ?? node.location);
+                hasDefault = true;
+                continue;
+            }
+            const value = this.constantCaseValue(stmt.test);
+            if (value === undefined) {
+                this.addError(`A case label must be a compile-time integer constant`,
+                    stmt.test.location ?? stmt.location ?? node.location);
+                continue;
+            }
+            /* An ATTRIBUTE, so `cloneAST` keeps it when a function is inlined. */
+            stmt.setAttribute('caseValue', value);
+            if (seen.has(value)) {
+                this.addError(`Duplicate case value ${value} in switch`, stmt.location ?? node.location);
+            }
+            seen.add(value);
+        }
+
+        /*
+        The whole switch body is one breakable context: `break` leaves the
+        switch, while `continue` still belongs to the enclosing loop (so only
+        `breakableDepth` moves, not `loopDepth`).
+        */
+        this.breakableDepth += 1;
+        try {
+            if (node.body) this.visit(node.body);
+        } finally {
+            this.breakableDepth -= 1;
+        }
+    }
+
+    visitCaseClause(node) {
+        if (node.test) this.visit(node.test);
+    }
+
+    /**
+     * Value of a C integer constant expression, or `undefined`.
+     * @param {any} node
+     * @returns {number|undefined}
+     */
+    constantCaseValue(node) {
+        if (!node) return undefined;
+        switch (node.type) {
+            case 'NumericLiteral':
+                return Number.isFinite(Number(node.value)) ? Number(node.value) : undefined;
+            case 'CharacterLiteral':
+                return (node.value ?? '').codePointAt(0) ?? 0;
+            case 'UnaryExpression': {
+                const v = this.constantCaseValue(node.argument);
+                if (v === undefined) return undefined;
+                switch (node.operator) {
+                    case '+': return v;
+                    case '-': return -v;
+                    case '~': return ~v;
+                    case '!': return v ? 0 : 1;
+                    default: return undefined;
+                }
+            }
+            case 'BinaryExpression': {
+                const a = this.constantCaseValue(node.left);
+                const b = this.constantCaseValue(node.right);
+                if (a === undefined || b === undefined) return undefined;
+                switch (node.operator) {
+                    case '+': return a + b;
+                    case '-': return a - b;
+                    case '*': return a * b;
+                    case '/': return b === 0 ? undefined : Math.trunc(a / b);
+                    case '%': return b === 0 ? undefined : a % b;
+                    case '&': return a & b;
+                    case '|': return a | b;
+                    case '^': return a ^ b;
+                    case '<<': return a << b;
+                    case '>>': return a >> b;
+                    default: return undefined;
+                }
+            }
+            default: return undefined;
         }
     }
 
