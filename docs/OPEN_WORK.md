@@ -21,7 +21,7 @@ Reproduce the baselines from `testers/unit_tests`:
 | runner | result |
 |---|---|
 | `node ../tools/check.mjs` | 182 passed, 0 failed (111 shape assertions, 797 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 57 passed, 0 failed |
+| `node ../tools/negative.mjs` | 59 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
@@ -61,6 +61,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | assigning an open-dimension array parameter (§3.7) | **done** — `613cafa`; refused at semantic time, element writes stay supported | §7.5, §3.7 |
 | sized array parameter receiving a bound handle (§3.8) | **done** — `f970d51`; the call-site note follows the argument's packed handle | §7.6, §3.8 |
 | element writes through an array alias (§3.9) | **done** — `e13d454`; the optimizer follows `arrayAliasOf`, encoded/const targets are refused cleanly | §7.7, §3.9 |
+| `break` / `continue` outside a loop (§3.10) | **done** — `d34951c`; semantic context counters | §7.8, §3.10 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -741,6 +742,20 @@ Two independent causes:
 
 The decision is §7.7.
 
+### 3.10 `break` / `continue` outside a loop
+
+`break` and `continue` were parsed but never checked. Outside any loop they
+emitted an unresolved `jump {loop_break}` / `jump {loop_continue}`, and the
+program then ran away:
+
+| program | outcome |
+|---|---|
+| `void main(){ break; }` | compiled; `jump {loop_break}` never resolved; step limit |
+| `void main(){ continue; }` | the same |
+| `void main(){ if (1 == 1) break; }` | the same (the block is not the context) |
+
+The decision is §7.8.
+
 ---
 
 ## 4. Harness debt
@@ -764,21 +779,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 531 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 533 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §7.1–7.6,
-§3.4, §3.7 and §3.8 cases bring the count to 531 under `testers/unit_tests`, every one of
+§3.4, §3.7 and §3.8 cases bring the count to 533 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
 | `check.mjs` | 182 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 57 | `negative/` |
+| `negative.mjs` | 59 | `negative/` |
 | `nomem.mjs` | 7 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-182 + 10 + 57 + 7 + 275 = 531. The caveat that replaces "no runner" is weaker but real:
+182 + 10 + 59 + 7 + 275 = 533. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -839,7 +854,7 @@ Every item here is now fixed or closed; each points at the record and the case t
 ## 7. Decisions on the defects in §3 and §6
 
 Recorded so these are not re-opened, in the order they were given. **§1, §2 and §3 are
-closed**: their defects have decisions either in their own §3 record or below; §7.7 is the last one added.
+closed**: their defects have decisions either in their own §3 record or below; §7.8 is the last one added.
 
 ### 7.1 `'x'` is an `int` holding its ASCII value
 
@@ -1058,3 +1073,17 @@ initializer, embedded, alias-of-alias; each written through the alias and
 read through the owner) and
 `negative/alias_write_into_constant_refused.c` (encoded and const, with
 `NOT-MESSAGE: Internal parser error`).
+
+### 7.8 `break` / `continue` need a context
+
+**Done in `d34951c`.** Refuse them where they have nothing to act on.
+
+The semantic analyzer tracks two counters while visiting a loop body:
+`breakableDepth` (a loop or, later, a switch) and `loopDepth` (a loop only).
+`break` outside both, and `continue` outside a loop, are semantic errors now.
+The counters are separate because a `switch` will provide only the breakable
+half -- `continue` inside a switch still belongs to the enclosing loop.
+
+Cases: `negative/break_outside_loop_refused.c` and
+`negative/continue_outside_loop_refused.c`. Break/continue inside for/while
+and nested loops are unchanged.
