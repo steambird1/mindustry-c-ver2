@@ -13,7 +13,7 @@
 
 | 命令（从 `testers/unit_tests` 执行） | 读哪个目录 | 当前结果 | 判定标准 |
 |---|---|---|---|
-| `node ..\tools\check.mjs` | `check/` | **194 passed, 0 failed**（129 shape assertions, 846 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
+| `node ..\tools\check.mjs` | `check/` | **197 passed, 0 failed**（137 shape assertions, 861 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
 | `node ..\tools\negative.mjs` | `negative/` | **64 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
 | `node ..\tools\nomem.mjs` | `nomem/` | **7 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
 | `node ..\tools\loadorder.mjs` | 仓库根的 `mindc*.js` | **12 passed, 0 failed, 2 exempt** | 每个入口单独起一个 `node` 进程导入，不得有循环依赖 |
@@ -67,11 +67,11 @@
 
 ## 目录地图
 
-`testers/unit_tests/` 下共 **550 个 `.c`，全部有 runner**（194 + 10 + 64 + 7 + 275 = 550）：
+`testers/unit_tests/` 下共 **553 个 `.c`，全部有 runner**（197 + 10 + 64 + 7 + 275 = 553）：
 
 | 目录 | 文件数 | 谁来跑 |
 |---|---|---|
-| `check/` | 194 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
+| `check/` | 197 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
 | `t/` | 98 | `runall.mjs`（早期按主题分的用例，`2dc683e` 起纳入） |
 | `negative/` | 64 | `negative.mjs` |
 | `suite/` | 50 | `runall.mjs` |
@@ -95,7 +95,7 @@
 
 ## check/ 的编号约定
 
-`check/` 用 `tNN_主题.c` 命名，**编号 1–181 已用满，没有空号**，下一个用例是 `t182`。
+`check/` 用 `tNN_主题.c` 命名，**编号 1–184 已用满，没有空号**，下一个用例是 `t185`。
 另有 13 个不带编号的（`m1`–`m3`、`n1`–`n2`、`rw1`–`rw2`、`seq1`、`memsp2`–`memsp3`），
 它们早于编号制，保留原名。
 
@@ -178,6 +178,9 @@
 | `t179` | **§7.13**：encoded 表保持 default 居中、fallthrough、循环内 break/continue、嵌套 switch；输出 `100 9 1 3 200 9 1 99 99 99 3 299` |
 | `t180` | **§7.14**：`#pragma optimize(switch_table, off)` 让密集 switch 保持比较链；输出 `10 13 17 99` |
 | `t181` | **§7.14**：`#pragma optimize(switch_table, 32)` 强制 3-case 稀疏 switch 用 encoded 表；输出 `10 11 12 99` |
+| `t182` | **§7.15**：`for (int i = ...)` 的 switch 累加——`i` 在 forinit 作用域、`sum` 在外层作用域，两者分别播种；fallthrough 输出 `150`，带 `break` 输出 `65`；`EMIT-NOT: op lessThan` |
+| `t183` | **§7.15**：更多 `for (int i = ...)` 形状——普通累加、`break`、步长 2、`i != 5`；全部折叠，输出 `10 3 20 10`；`EMIT-NOT: op lessThan` |
+| `t184` | **§7.15**：for-init 循环的保守路径——`continue`、含 `print` 的 switch（不再被误删）、switch 内累加并打印、条件 `break` 的 switch；输出 `8 10 20 0 20 1 2 100 200 300 6 3` |
 
 设计背景见 `docs/PLAN_array_layout.md`。
 
