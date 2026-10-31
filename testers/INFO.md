@@ -13,7 +13,7 @@
 
 | 命令（从 `testers/unit_tests` 执行） | 读哪个目录 | 当前结果 | 判定标准 |
 |---|---|---|---|
-| `node ..\tools\check.mjs` | `check/` | **189 passed, 0 failed**（123 shape assertions, 832 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
+| `node ..\tools\check.mjs` | `check/` | **194 passed, 0 failed**（129 shape assertions, 846 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
 | `node ..\tools\negative.mjs` | `negative/` | **64 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
 | `node ..\tools\nomem.mjs` | `nomem/` | **7 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
 | `node ..\tools\loadorder.mjs` | 仓库根的 `mindc*.js` | **12 passed, 0 failed, 2 exempt** | 每个入口单独起一个 `node` 进程导入，不得有循环依赖 |
@@ -67,11 +67,11 @@
 
 ## 目录地图
 
-`testers/unit_tests/` 下共 **545 个 `.c`，全部有 runner**（189 + 10 + 64 + 7 + 275 = 545）：
+`testers/unit_tests/` 下共 **550 个 `.c`，全部有 runner**（194 + 10 + 64 + 7 + 275 = 550）：
 
 | 目录 | 文件数 | 谁来跑 |
 |---|---|---|
-| `check/` | 188 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
+| `check/` | 194 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
 | `t/` | 98 | `runall.mjs`（早期按主题分的用例，`2dc683e` 起纳入） |
 | `negative/` | 64 | `negative.mjs` |
 | `suite/` | 50 | `runall.mjs` |
@@ -95,7 +95,7 @@
 
 ## check/ 的编号约定
 
-`check/` 用 `tNN_主题.c` 命名，**编号 1–176 已用满，没有空号**，下一个用例是 `t177`。
+`check/` 用 `tNN_主题.c` 命名，**编号 1–181 已用满，没有空号**，下一个用例是 `t182`。
 另有 13 个不带编号的（`m1`–`m3`、`n1`–`n2`、`rw1`–`rw2`、`seq1`、`memsp2`–`memsp3`），
 它们早于编号制，保留原名。
 
@@ -173,6 +173,11 @@
 | `t174` | **§7.11**：常量 discriminant 的 switch 被折叠成实际路径；顶层 `switch(2)` → `print 5`，`while` 内 `switch(0)` → `print 3`；`EMIT-NOT: op lessThan` |
 | `t175` | **§7.11/§7.12**：折叠的保守边界——`if` 内的 switch `break`、平铺层声明保持 switch；case 块内声明可折；并在循环内运行条件 `break` 的 switch（防陈旧常量折叠）；输出 `1 5 7 3` |
 | `t176` | **§7.12**：`switch(i)` 的逐轮模拟——统一步长、非统一步长、带 fallthrough 的累加变量；三个循环全部折叠为常量，输出 `3 3 4 221`；`EMIT-NOT: op lessThan` |
+| `t177` | **§7.13**：密集 switch 的 encoded 跳转表——base-57 字符串存目标行号，`read` + Horner + `set @counter`；filler 把 switch 推到 57 行之后，覆盖高低位与 `$`/`&`；输出 `10 13 17 99`；`EMIT: read __switch_tgt_` |
+| `t178` | **§7.13**：稀疏 range（0..6 与 100000）回退比较链；输出 `10 17 99`；`EMIT-NOT: read __switch_tgt_` |
+| `t179` | **§7.13**：encoded 表保持 default 居中、fallthrough、循环内 break/continue、嵌套 switch；输出 `100 9 1 3 200 9 1 99 99 99 3 299` |
+| `t180` | **§7.14**：`#pragma optimize(switch_table, off)` 让密集 switch 保持比较链；输出 `10 13 17 99` |
+| `t181` | **§7.14**：`#pragma optimize(switch_table, 32)` 强制 3-case 稀疏 switch 用 encoded 表；输出 `10 11 12 99` |
 
 设计背景见 `docs/PLAN_array_layout.md`。
 

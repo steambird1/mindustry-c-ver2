@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 189 passed, 0 failed (123 shape assertions, 832 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 194 passed, 0 failed (129 shape assertions, 846 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 64 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
@@ -66,6 +66,8 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | `switch ... case` (§3.12) | **done** — `eaa54f6`; fallthrough + comparison dispatch, break/continue contexts | §7.10, §3.12 |
 | constant switch folding (§7.11) | **done** — `e7a89be`; a constant discriminant is replaced by the taken path | §7.11 |
 | switch-aware loop simulation (§7.12) | **done** — `bb6bcd3`; a `switch (i)` selects its taken case per simulation round | §7.12 |
+| encoded switch jump table (§7.13) | **done** — `f84b829`; case addresses live in base-57 strings, one `read` per plane | §7.13 |
+| switch table pragma (§7.14) | **done** — `304611d`; force, disable or bound the encoded table | §7.14 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -800,21 +802,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 545 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 550 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 545 under `testers/unit_tests`, every one of
+bring the count to 550 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 189 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `check.mjs` | 194 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
 | `negative.mjs` | 64 | `negative/` |
 | `nomem.mjs` | 7 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-189 + 10 + 64 + 7 + 275 = 545. The caveat that replaces "no runner" is weaker but real:
+194 + 10 + 64 + 7 + 275 = 550. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -875,7 +877,7 @@ Every item here is now fixed or closed; each points at the record and the case t
 ## 7. Decisions on the defects in §3 and §6
 
 Recorded so these are not re-opened, in the order they were given. **§1, §2 and §3 are
-closed**: their defects have decisions either in their own §3 record or below; §7.12 is the last one added.
+closed**: their defects have decisions either in their own §3 record or below; §7.14 is the last one added.
 
 ### 7.1 `'x'` is an `int` holding its ASCII value
 
@@ -1233,3 +1235,52 @@ Cases: `check/t176_switch_loop_sim.c` (uniform step, non-uniform step, and a
 fallthrough accumulator: outputs `3 3 4 221`; `EMIT-NOT: op lessThan`) and
 `check/t175_switch_no_fold.c` (now also runs the conditional-break switch
 inside a loop: `1 5 7 3`).
+
+### 7.13 Encoded switch jump table
+
+**Done in `f84b829`.** A dense, non-constant switch now dispatches
+through an encoded table instead of a comparison chain.
+
+The case targets are line numbers, which are only known after layout, so
+the table is filled by `InstructionReferrer` at output time:
+
+- every value in `[minCase, maxCase]` gets one slot; a slot holds the
+  target line number in base-57 digits, one digit plane per string;
+- the referrer placed at a case label receives its final line number and
+  writes one character into the plane string (`fromCharCode(35 + digit)`);
+- `op sub idx disc min`, two bounds jumps, one `read` per plane, Horner's
+  rule and one correction rebuild the address; `set @counter` jumps;
+- fallthrough is unchanged: the table jumps to a case label and the bodies
+  stay in source order. Missing values, out-of-range values and a missing
+  `default` go to `default` / `switch_end`.
+
+A referrer replaces exactly one character. That is load-bearing:
+`Instruction.raw_replace` is a JavaScript string replacement, so a
+multi-character value containing `$&`, `$'` or `$$` would be mangled; a
+lone `$` is literal. The encoded set (35..91) contains `$`, and t177 is
+placed past line 57 so the high plane and those characters are exercised.
+
+Selection: v150+, at least 8 cases, `range <= 256` and
+`range <= 2 * cases + 8`. Two digits cover 0..3248 (the default budget
+is 1000); a larger `maxInstructions` uses three. Sparse ranges and older
+targets keep the comparison chain. No memory block and no per-case
+instruction are needed.
+
+Cases: `t177_switch_encoded_table.c` (dense table, both planes, `$`/`&`),
+`t178_switch_encoded_fallback.c` (a sparse range keeps the chain) and
+`t179_switch_encoded_semantics.c` (default in the middle, fallthrough,
+loop break/continue, nested switch).
+
+### 7.14 Switch table pragma
+
+**Done in `304611d`.** `#pragma optimize(switch_table[, off|auto|N])`:
+
+- no argument: force the table even when the heuristic would not;
+- `N`: force it and allow a case-value range of up to `N` (capped at 4096);
+- `off`: never use it;
+- `auto`: restore the heuristic.
+
+The pragma only chooses the dispatch strategy; it never changes output.
+Cases: `t180_switch_table_off.c` (a dense switch stays on the chain) and
+`t181_switch_table_force.c` (a 3-case sparse switch is forced into a
+table with a range limit).
