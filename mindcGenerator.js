@@ -1721,7 +1721,9 @@ export class CodeGenerator extends ASTVisitor {
 
 		// TODO if it is a single operation, then directly use 'select':
 		// currently we use sth else
-		if (this.targetVersion >= 152) {
+		if (this.targetVersion >= 152
+			&& this.isCheapAndPure(node.consequent)
+			&& this.isCheapAndPure(node.alternate)) {
 			const tester = this.visitToCondition(node.test, false);
 			return this.operatesReads(
 				[this.visit(node.consequent), this.visit(node.alternate)],
@@ -3350,17 +3352,32 @@ export class CodeGenerator extends ASTVisitor {
 	 */
 	isCheapAndPure(node) {
 		const seen = new Set();
+		/*
+		Whitelist, not blacklist: an INLINED function body is often a
+		compound/statement-expression whose assignments live in `statements`,
+		which the old walk did not visit. Anything not known pure is treated as
+		impure, so a call that was inlined still short-circuits correctly.
+		*/
+		const pureTypes = new Set([
+			'NumericLiteral', 'StringLiteral', 'CharacterLiteral', 'NullLiteral',
+			'Identifier', 'BinaryExpression', 'LogicalExpression', 'UnaryExpression',
+			'ConditionalExpression', 'CastExpression'
+		]);
 		const walk = n => {
 			if (!n || typeof n !== 'object' || seen.has(n)) return true;
 			seen.add(n);
+			if (!pureTypes.has(n.type)) return false;
 			// A call may do anything, including something that must be skipped
 			if (n.type === 'FunctionCall' || n.type === 'BuiltinCall') return false;
 			if (n.type === 'AssignmentExpression') return false;
-			if (n.type === 'UnaryExpression' && (n.operator === '++' || n.operator === '--')) return false;
+			if (n.type === 'UnaryExpression'
+				&& ['++', '--', '&', '*'].includes(n.operator)) return false;
 			if (n.type === 'Identifier') {
 				if (typeof n.name === 'string' && n.name[0] === '@') return false;
-				if (n.symbol && n.symbol.isVolatile) return false;
+				if (n.symbol && (n.symbol.isVolatile || n.symbol.isRemote
+					|| n.symbol.accessThroughPointer)) return false;
 			}
+			if (n.symbol && (n.symbol.isVolatile || n.symbol.isRemote)) return false;
 			const keys = ['children', 'left', 'right', 'argument', 'expression', 'operand',
 				'test', 'consequent', 'alternate', 'arguments', 'callee', 'object', 'property'];
 			for (const key of keys) {
@@ -3389,7 +3406,13 @@ export class CodeGenerator extends ASTVisitor {
 		const type = node.dataType ?? this.semantic.getTypeInfo('bool');
 		const temp = this.getTempSymbol(type);
 		const target = temp.getAssemblySymbol();
-		const assigns = value => this.writeSymbol(temp, this.visit(value));
+		/*
+		`visitAndRead` is required here: `visit` hands back a value-class object
+		for a member/subscript, and writing that into the temporary emitted
+		`set ... [object Object]`.
+		*/
+		const assigns = value => this.writeSymbol(temp,
+			ExportRet(this.glob, this.visitAndRead(value), value.dataType));
 		/*
 		`&&`: when the left side is false the answer is false, so skip.
 		`||`: when the left side is true the answer is true, so skip.
@@ -3457,9 +3480,9 @@ export class CodeGenerator extends ASTVisitor {
 		*/
 		if ((node.operator === '&&' || node.operator === '||')
 			&& !(this.isCheapAndPure(node.left) && this.isCheapAndPure(node.right))) {
+			console.log('DBG short-circuit', node.operator, node.left?.type, node.right?.type, this.isCheapAndPure(node.left), this.isCheapAndPure(node.right));
 			return this.emitShortCircuitLogical(node);
 		}
-
 		// Evaluate both sides (they may well contain calls, so every operand ends up
 		// in its own temporary symbol -- see `arithmetic()`).
 		let left = ExportRet(glob, this.visit(node.left), node.left.dataType);

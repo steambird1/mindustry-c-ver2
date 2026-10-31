@@ -7813,15 +7813,32 @@ export class Optimizer extends ASTVisitor {
 		
 		// 更新上下文
 		const newContext = {...context};
+
+		/*
+		A call on the right of `&&`/`||`, or in a `?:` branch, is evaluated
+		CONDITIONALLY. Inlining it here is wrong: the inliner moves the body
+		out of the conditional, so `a && f()` would call `f` even when `a` is
+		false. Keep such calls intact; the generator then emits the branch.
+		*/
+		const conditionalChild = child => {
+			if ((node.type === 'BinaryExpression' || node.type === 'LogicalExpression')
+				&& (node.operator === '&&' || node.operator === '||')
+				&& child === node.right) return true;
+			if (node.type === 'ConditionalExpression'
+				&& (child === node.consequent || child === node.alternate)) return true;
+			return false;
+		};
 		
 		switch (node.type) {
 			case 'FunctionCall':
 				if (node.callee.type === 'Identifier' && node.callee.name === funcName) {
-					callSites.push({
-						callNode: node,
-						parentNode: node.parent,
-						context: {...newContext}
-					});
+					if (newContext.conditional !== true) {
+						callSites.push({
+							callNode: node,
+							parentNode: node.parent,
+							context: {...newContext}
+						});
+					}
 				}
 				break;
 				
@@ -7839,7 +7856,10 @@ export class Optimizer extends ASTVisitor {
 		// 递归检查子节点
 		if (node.children) {
 			for (const child of node.children) {
-				this.collectFunctionCallSites(child, funcName, callSites, newContext);
+				const next = conditionalChild(child)
+					? {...newContext, conditional: true}
+					: newContext;
+				this.collectFunctionCallSites(child, funcName, callSites, next);
 			}
 		}
 		
@@ -7855,11 +7875,17 @@ export class Optimizer extends ASTVisitor {
 			if (Array.isArray(node[field])) {
 				node[field].forEach(item => {
 					if (item && typeof item === 'object') {
-						this.collectFunctionCallSites(item, funcName, callSites, newContext);
+						const next = conditionalChild(item)
+							? {...newContext, conditional: true}
+							: newContext;
+						this.collectFunctionCallSites(item, funcName, callSites, next);
 					}
 				});
 			} else if (node[field] && typeof node[field] === 'object') {
-				this.collectFunctionCallSites(node[field], funcName, callSites, newContext);
+				const next = conditionalChild(node[field])
+					? {...newContext, conditional: true}
+					: newContext;
+				this.collectFunctionCallSites(node[field], funcName, callSites, next);
 			}
 		}
 	}
