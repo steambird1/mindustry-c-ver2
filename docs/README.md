@@ -74,6 +74,7 @@ There are some additional features:
 - `vecalias(&a, b)` and `veccpy(a, b)` bind and copy arrays at the intrinsic level
 - `do { ... } while (...)` loops are supported: the body runs once before the test
 - `switch (x) { case ...: ... default: ... }` follows C: fallthrough unless `break`
+- `static` is run-local (shared across calls in one pass); `persistent` survives the processor restart; ordinary file-scope variables reset each run
 
 *Note: `int a[] = {1, 2, 3};` is supported: the last dimension comes from the
 initializer. An empty initializer list is not a reliable form; write values or

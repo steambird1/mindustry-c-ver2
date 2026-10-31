@@ -63,6 +63,9 @@ For grammar introduction (about the features unique to Mindustry-C) and examples
   `for`/`while`/`do-while`/`switch`, `break`/`continue`/`return`.
 - C99 conveniences: `//` comments, `bool`/`true`/`false`, `inline`,
   declarations in `for` initializers.
+- Storage durations: automatic locals per call; `static` within one run;
+  `persistent` across processor restarts; ordinary file-scope variables reset
+  each run.
 - Preprocessor: `#define` (object-like and function-like), `#undef`,
   `#if`/`#elif`/`#else`/`#endif`, `#ifdef`/`#ifndef`, `#include`, `#pragma`.
   Variadic macros are not supported; `goto` and VLAs are rejected.

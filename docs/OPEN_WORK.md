@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 198 passed, 0 failed (139 shape assertions, 865 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 202 passed, 0 failed (139 shape assertions, 885 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 64 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
@@ -70,6 +70,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | switch table pragma (§7.14) | **done** — `304611d`; force, disable or bound the encoded table | §7.14 |
 | for-init loop scopes and switch side effects (§7.15) | **done** — `6c0c2a4`; per-scope seeding and switch-aware side effects | §7.15 |
 | shift operators (§7.16) | **done** — `37dca8e`; `<<`/`>>` precedence and `<<=`/`>>=` tokenization | §7.16 |
+| run-local static / cross-run persistent (§7.17) | **done** — `b4ecba9`; explicit lifetimes, zeroing, inlining veto, multi-run tests | §7.17 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -804,21 +805,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 554 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 558 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 554 under `testers/unit_tests`, every one of
+bring the count to 558 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 198 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `check.mjs` | 202 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
 | `negative.mjs` | 64 | `negative/` |
 | `nomem.mjs` | 7 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-198 + 10 + 64 + 7 + 275 = 554. The caveat that replaces "no runner" is weaker but real:
+202 + 10 + 64 + 7 + 275 = 558. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -879,7 +880,7 @@ Every item here is now fixed or closed; each points at the record and the case t
 ## 7. Decisions on the defects in §3 and §6
 
 Recorded so these are not re-opened, in the order they were given. **§1, §2 and §3 are
-closed**: their defects have decisions either in their own §3 record or below; §7.16 is the last one added.
+closed**: their defects have decisions either in their own §3 record or below; §7.17 is the last one added.
 
 ### 7.1 `'x'` is an `int` holding its ASCII value
 
@@ -1323,3 +1324,28 @@ rejected. The lexer also matched only two-character operators, which split
 - `t185_shift_operators.c` covers runtime and constant shifts, precedence
   with `+` and `<`, left associativity, compound assignments, unsigned
   values, a variable shift count, and `case 1 << 3`.
+
+### 7.17 Run-local `static` and cross-run `persistent`
+
+**Done in `b4ecba9`.**
+
+`static` now explicitly means one processor pass; `persistent` is a new
+storage duration that survives the implicit restart. The prologue resets
+all static initialization tags (including file-scope statics); persistent
+tags are left alone. Uninitialized static/persistent scalars, arrays and
+structs are explicitly zeroed, and embedded-array initializers now sit
+behind the same lifetime guard. Ordinary globals are per-run: initialized
+ones rerun their initializer, uninitialized ones are zeroed;
+`extern`/remote are left to their owners, though an `extern` WITH an
+initializer still performs that initializer on this side every run.
+
+Functions containing static/persistent locals are hard-vetoed by the
+inliner: a clone would otherwise own a separate object per call site.
+Explicit `inline` cannot override that.
+
+The test runner accepts `// RUNS: N`: after `end()` it restarts at pc 0
+while preserving registers/memory, so cross-run behavior is testable.
+`stop()` still halts permanently. Cases: t186 (static local/global ->
+`2 1` twice), t187 (persistent local/global/uninitialized -> `2 1 0` then
+`4 2 1`), t188 (static/persistent arrays and structs, ordinary globals),
+and t189 (`extern` with/without an initializer).

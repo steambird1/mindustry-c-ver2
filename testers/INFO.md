@@ -13,7 +13,7 @@
 
 | 命令（从 `testers/unit_tests` 执行） | 读哪个目录 | 当前结果 | 判定标准 |
 |---|---|---|---|
-| `node ..\tools\check.mjs` | `check/` | **198 passed, 0 failed**（139 shape assertions, 865 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
+| `node ..\tools\check.mjs` | `check/` | **202 passed, 0 failed**（139 shape assertions, 885 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
 | `node ..\tools\negative.mjs` | `negative/` | **64 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
 | `node ..\tools\nomem.mjs` | `nomem/` | **7 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
 | `node ..\tools\loadorder.mjs` | 仓库根的 `mindc*.js` | **12 passed, 0 failed, 2 exempt** | 每个入口单独起一个 `node` 进程导入，不得有循环依赖 |
@@ -67,11 +67,11 @@
 
 ## 目录地图
 
-`testers/unit_tests/` 下共 **554 个 `.c`，全部有 runner**（198 + 10 + 64 + 7 + 275 = 554）：
+`testers/unit_tests/` 下共 **558 个 `.c`，全部有 runner**（202 + 10 + 64 + 7 + 275 = 558）：
 
 | 目录 | 文件数 | 谁来跑 |
 |---|---|---|
-| `check/` | 198 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
+| `check/` | 202 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
 | `t/` | 98 | `runall.mjs`（早期按主题分的用例，`2dc683e` 起纳入） |
 | `negative/` | 64 | `negative.mjs` |
 | `suite/` | 50 | `runall.mjs` |
@@ -95,9 +95,11 @@
 
 ## check/ 的编号约定
 
-`check/` 用 `tNN_主题.c` 命名，**编号 1–185 已用满，没有空号**，下一个用例是 `t186`。
+`check/` 用 `tNN_主题.c` 命名，**编号 1–189 已用满，没有空号**，下一个用例是 `t190`。
 另有 13 个不带编号的（`m1`–`m3`、`n1`–`n2`、`rw1`–`rw2`、`seq1`、`memsp2`–`memsp3`），
 它们早于编号制，保留原名。
+
+`// RUNS: N` 让测试模拟器在 `end()` 后从 pc 0 重启并保留寄存器/内存（`stop()` 仍然永久停止）；t186–t189 使用这一机制验证跨运行状态。
 
 新增用例时：**挑一个没人验证过的行为**，并且先确认要断言的事实没有被别的用例断言过——
 同一个事实记两遍，两处都会各自腐烂。
@@ -182,6 +184,10 @@
 | `t183` | **§7.15**：更多 `for (int i = ...)` 形状——普通累加、`break`、步长 2、`i != 5`；全部折叠，输出 `10 3 20 10`；`EMIT-NOT: op lessThan` |
 | `t184` | **§7.15**：for-init 循环的保守路径——`continue`、含 `print` 的 switch（不再被误删）、switch 内累加并打印、条件 `break` 的 switch；输出 `8 10 20 0 20 1 2 100 200 300 6 3` |
 | `t185` | **§7.16**：左/右移与复合赋值——运行时/常量、与 `+`/`<` 的优先级、左结合、`<<=`/`>>=`、unsigned、变量移位数、case 标签中的 `1 << 3`；输出 `8 4 8 8 1 16 8 4 15 12 7`；`EMIT: op shl` / `EMIT: op shr` |
+| `t186` | **§7.17**：`static` 本次运行内持久——局部/全局 static 两次运行都输出 `2 1`；静态局部被多调用点调用也不会被内联复制 |
+| `t187` | **§7.17**：`persistent` 跨运行持久——局部/全局/未初始化 persistent 输出 `2 1 0`，下一次运行 `4 2 1` |
+| `t188` | **§7.17**：存储形状——static/persistent 的 embedded 数组、未初始化数组、未初始化 struct、普通全局变量；两次运行输出 `2 3 0 2 3 0 0 2 3 0 4 5 0 0` |
+| `t189` | **§7.17**：`extern` 显式初始化仍在本侧每次运行执行（`10 0`），无初始化器的 `extern` 不重置（下一次运行 `10 1`）；`// RUNS: 2` |
 
 设计背景见 `docs/PLAN_array_layout.md`。
 

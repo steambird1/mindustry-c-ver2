@@ -23,6 +23,7 @@ Mindustry-C 不需要安装。你只需要下载 `main.html` 和所有 JavaScrip
 - C 核心：函数、结构体、指针、数组、`typedef`、
   `for`/`while`/`do-while`/`switch`、`break`/`continue`/`return`。
 - C99 便利：`//` 注释、`bool`/`true`/`false`、`inline`、`for` 初始化声明。
+- 存储期：自动局部变量按调用；`static` 在本次运行内；`persistent` 跨处理器重启；普通文件作用域变量每次运行重置。
 - 预处理器：对象宏和函数宏、`#undef`、`#if`/`#elif`/`#else`/`#endif`、
   `#ifdef`/`#ifndef`、`#include`、`#pragma`。
   不支持可变参数宏；`goto` 和 VLA 会被拒绝。
