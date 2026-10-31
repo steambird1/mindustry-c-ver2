@@ -2613,7 +2613,14 @@ export class Optimizer extends ASTVisitor {
 				must not stop the simulation, which runs in a `optimizingLoop`
 				context where every value really is known.
 				*/
-				if (usage && (usage.canOptimize || (info && info.optimizingLoop))) {
+				/*
+				A write in an unsure region is not definite: the branch may
+				not run, and the value it computes comes from a state we do
+				not trust. Never fold it; the fallback below still records
+				the write and drops the stale constant.
+				*/
+				const unsureWrite = !!(info && info.isUnsure);
+				if (usage && !unsureWrite && (usage.canOptimize || (info && info.optimizingLoop))) {
 					// ! Manually modified (now constant expression also consider '+=') !
 					let constValue = undefined;
 					if (node.operator && node.operator !== '=') {
@@ -2661,7 +2668,7 @@ export class Optimizer extends ASTVisitor {
 				`b` and make `a = t` compile into `a = b`. Record the write
 				anyway; its VALUE stays unknown, only the access is known.
 				*/
-				if (!(usage && usage.canOptimize)) {
+				if (unsureWrite || !(usage && usage.canOptimize)) {
 					const written = this.currentScope.lookup(node.left.name);
 					if (written) {
 						this.addWrittenSymbol(written, null,
@@ -2878,8 +2885,16 @@ export class Optimizer extends ASTVisitor {
 		} else {
 			// 分析then分支
 			const hasNoCondit = conditionValue == null || conditionValue == undefined;
+			/*
+			An enclosing unsure region stays unsure. A condition that
+			happens to evaluate (from a stale/loop-written value) must not
+			turn one branch into a definite execution: that is how
+			`switch (i) { case 1: if (i == 1) i = i + 1; }` inside a loop
+			was folded to `i = 1`.
+			*/
+			const parentUnsure = !!(info && info.isUnsure);
 			const ifInfo = {
-				isUnsure: (hasNoCondit) && !(info && info.firstLoopRun),
+				isUnsure: parentUnsure || ((hasNoCondit) && !(info && info.firstLoopRun)),
 				hasNoCondit: hasNoCondit,
 				parentInfo: info
 			};
@@ -2953,6 +2968,16 @@ export class Optimizer extends ASTVisitor {
 
 		// 尝试分析while循环是否可以优化
 		if (!(info && info.optimizingLoop)) {
+			/*
+			The loop variable's value has to be captured BEFORE the body is
+			analysed. A `switch` body is analysed as unsure, which drops the
+			constants it writes (`i`) -- so `simulateLoop` would otherwise
+			start from `undefined` and never model a single round. Values of
+			the OTHER variables the loop writes are captured for the same
+			reason: a simulation can only fold `n = n + 1` if it knows what
+			`n` was before the loop.
+			*/
+			let loopInitConstants = null;
 			// 分析循环体
 			if (node.body) {
 				// 进入循环体作用域
@@ -2968,6 +2993,30 @@ export class Optimizer extends ASTVisitor {
 				if (modifieds.has("unrecognized")) {
 					weird = true;
 					modifieds.delete("unrecognized");
+				}
+				/*
+				Snapshot the constants the loop may overwrite, before the body
+				analysis can drop them (see above). Only loop-written variables
+				are kept: those are the ones the simulation is going to model,
+				so no unrelated constant is resurrected.
+				*/
+				const test = node.test;
+				const initVarName = test && test.type === 'BinaryExpression'
+					? (test.left?.type === 'Identifier' ? test.left.name
+						: test.right?.type === 'Identifier' ? test.right.name : null)
+					: null;
+				if (initVarName && !weird) {
+					const initScope = this.currentScope.lookupScopeOf(initVarName);
+					const initialMap = initScope && this.localConstants.get(initScope.getPath());
+					if (initialMap) {
+						loopInitConstants = new Map();
+						for (const entry of modifieds) {
+							if (!entry || typeof entry !== 'object') continue;
+							if (initialMap.has(entry.varName)) {
+								loopInitConstants.set(entry.varName, initialMap.get(entry.varName));
+							}
+						}
+					}
 				}
 				// 分析循环体
 				this.analyzeNode(node.body, {
@@ -3000,8 +3049,10 @@ export class Optimizer extends ASTVisitor {
 					(the body was checked to be free of side effects), so a loop
 					that never reaches its `break` may simply be dropped.
 					*/
-					const tried = this.analyzeWhileLoopForOptimization(node, info)
-						|| this.analyzeEndlessLoopForOptimization(node, info);
+					const tried = this.analyzeWhileLoopForOptimization(node, {
+						...(info ?? {}),
+						loopInitConstants: loopInitConstants
+					}) || this.analyzeEndlessLoopForOptimization(node, info);
 					if (tried) {
 						if ((!info || !info.optimizingLoop) && this.optimizeDeterministicWhileLoop(node)) {
 							this.modified = true;
@@ -3054,6 +3105,11 @@ export class Optimizer extends ASTVisitor {
 		has anything to disable.
 		*/
 		if (this.foldConstantSwitch(node, info)) return;
+		/*
+		Inside a loop simulation the AST must not be rewritten per round; if
+		the discriminant is known in this round, analyse only the taken path.
+		*/
+		if (info && info.optimizingLoop && this.simulateSwitch(node, info)) return;
 		if (node.body) {
 			/*
 			A switch is a set of mutually-exclusive branches that the linear
@@ -3174,6 +3230,124 @@ export class Optimizer extends ASTVisitor {
 		};
 		walk(node);
 		return found;
+	}
+
+	/**
+	 * Non-mutating switch simulation for the loop optimizer: when the
+	 * discriminant is known in the current simulation round, analyse only the
+	 * path it takes (fallthrough up to a top-level break).
+	 *
+	 * Only a simple body is handled (`canSimulateSwitch`). Anything else
+	 * falls back to the conservative `isUnsure` analysis, which normally
+	 * leaves the loop alone.
+	 *
+	 * @param {ASTNode} node
+	 * @param {*} info
+	 * @returns {boolean} Whether the switch was simulated.
+	 */
+	simulateSwitch(node, info) {
+		if (!this.canSimulateSwitch(node)) return false;
+		let disc = this.evaluateConstantExpression(node.discriminant);
+		if (typeof disc === 'boolean') disc = disc ? 1 : 0;
+		if (typeof disc !== 'number' || !Number.isFinite(disc)) return false;
+		const statements = node.body?.statements ?? [];
+		let taken = -1;
+		let fallback = -1;
+		for (let i = 0; i < statements.length; i++) {
+			const s = statements[i];
+			if (s.type !== 'CaseClause') continue;
+			if (!s.test) { fallback = i; continue; }
+			if (taken < 0 && s.getAttribute('caseValue') === disc) taken = i;
+		}
+		if (taken < 0) taken = fallback;
+		if (taken < 0) return true;  // no case and no default: nothing runs
+		for (let i = taken + 1; i < statements.length; i++) {
+			const s = statements[i];
+			if (s.type === 'CaseClause') continue;
+			if (s.type === 'BreakStatement') break;
+			this.analyzeNode(s, info);
+		}
+		return true;
+	}
+
+	/**
+	 * Whether a switch body is simple enough to simulate per round: no
+	 * declaration at the flat level, and no nested loop/switch or `break`
+	 * inside a statement. A top-level `break` is fine (it ends the path).
+	 * @param {ASTNode} node
+	 * @returns {boolean}
+	 */
+	canSimulateSwitch(node) {
+		const statements = node.body?.statements ?? [];
+		const isDeclaration = s => s.type === 'VariableDeclaration'
+			|| (s.type && typeof s.type === 'object');
+		if (statements.some(isDeclaration)) return false;
+		for (const s of statements) {
+			if (s.type === 'CaseClause' || s.type === 'BreakStatement') continue;
+			if (this.containsNestedControlOrBreak(s)) return false;
+		}
+		return true;
+	}
+
+	/**
+	 * Whether a statement contains a nested loop/switch, a `break`, a
+	 * `continue` or a `return`. The switch simulator only handles
+	 * straight-line case bodies: the other control transfers belong to the
+	 * loop or function and would leave the simulation (and its scope stack)
+	 * mid-round.
+	 * @param {ASTNode} node
+	 * @returns {boolean}
+	 */
+	containsNestedControlOrBreak(node) {
+		let found = false;
+		const walk = n => {
+			if (!n || typeof n !== 'object' || found) return;
+			if (Array.isArray(n)) { n.forEach(walk); return; }
+			if (n.type === 'BreakStatement' || n.type === 'ContinueStatement'
+				|| n.type === 'ReturnStatement'
+				|| n.type === 'WhileStatement' || n.type === 'ForStatement'
+				|| n.type === 'DoWhileStatement' || n.type === 'SwitchStatement') {
+				found = true;
+				return;
+			}
+			for (const key of ['children', 'statements', 'body', 'consequent',
+				'alternate', 'test', 'update', 'init', 'expression', 'argument',
+				'left', 'right']) {
+				const c = n[key];
+				if (Array.isArray(c)) c.forEach(walk);
+				else if (c && typeof c === 'object') walk(c);
+			}
+		};
+		walk(node);
+		return found;
+	}
+
+	/**
+	 * Whether a loop body contains a switch the simulator cannot handle. Those
+	 * keep the loop out of the deterministic optimizations; simulatable ones
+	 * no longer do.
+	 * @param {ASTNode} node
+	 * @returns {boolean}
+	 */
+	containsUnsafeSwitch(node) {
+		let unsafe = false;
+		const walk = n => {
+			if (!n || typeof n !== 'object' || unsafe) return;
+			if (Array.isArray(n)) { n.forEach(walk); return; }
+			if (n.type === 'SwitchStatement' && !this.canSimulateSwitch(n)) {
+				unsafe = true;
+				return;
+			}
+			for (const key of ['children', 'statements', 'body', 'consequent',
+				'alternate', 'test', 'update', 'init', 'expression', 'argument',
+				'left', 'right', 'discriminant']) {
+				const c = n[key];
+				if (Array.isArray(c)) c.forEach(walk);
+				else if (c && typeof c === 'object') walk(c);
+			}
+		};
+		walk(node);
+		return unsafe;
 	}
 
 	/**
@@ -3365,10 +3539,11 @@ export class Optimizer extends ASTVisitor {
 		// while循环的优化比for循环更复杂
 		// 这里我们只处理简单情况：条件中的变量在循环体中被简单修改
 		/*
-		A switch in the body has its own break targets and a dispatch the loop
-		simulation does not model; keep the loop as it is.
+		A switch is now simulated per round when its body is simple; only the
+		ones the simulator cannot handle keep the loop out of the optimizer.
 		*/
-		if (this.containsSwitch(whileNode.body)) return false;
+		const hasSwitch = this.containsSwitch(whileNode.body);
+		if (hasSwitch && this.containsUnsafeSwitch(whileNode.body)) return false;
 		
 		// 检查条件是否为简单比较
 		if (whileNode.test.type === 'BinaryExpression') {
@@ -3401,7 +3576,14 @@ export class Optimizer extends ASTVisitor {
 					// 获取循环变量的初始值
 					const scopePath = this.currentScope.lookupScopeOf(loopVarName).getPath();
 					const localConstants = this.localConstants.get(scopePath);
-					const initValue = localConstants.get(loopVarName);
+					/*
+					`localConstants` may have lost the variable while the body
+					was analysed (a switch body is analysed as unsure); the
+					snapshot taken in `analyzeWhileStatement` still has it.
+					*/
+					const initValue = localConstants.get(loopVarName)
+						?? (info && info.loopInitConstants
+							? info.loopInitConstants.get(loopVarName) : undefined);
 					
 					if (initValue !== undefined) {
 						// Successful to make registrations
@@ -3415,6 +3597,20 @@ export class Optimizer extends ASTVisitor {
 						const iterationCount = (constValue === undefined) ? null
 							: this.calculateLoopIterations(initValue, conditionInfo, updateInfo);
 						const MAX_OPTIMIZE_ITERATIONS = 250; // 最大优化循环次数
+
+						/*
+						A switch may advance the loop variable by a different
+						amount on each case, so the single `updateInfo` step is
+						only a hint. Let the simulation stop on the test instead
+						of trusting the static count. Seed the other loop-written
+						variables from their pre-loop values for the same reason
+						the loop variable is seeded.
+						*/
+						if (hasSwitch) {
+							return this.runWhileSimulation(whileNode, loopVarName, initValue,
+								conditionInfo, updateInfo, MAX_OPTIMIZE_ITERATIONS, info,
+								info && info.loopInitConstants);
+						}
 
 						if (iterationCount !== null && iterationCount >= 0) {
 							whileNode.setAttribute('iterationCount', iterationCount);
@@ -4062,7 +4258,7 @@ export class Optimizer extends ASTVisitor {
 	 * @param {number} iterationCount - 迭代次数
 	 * @return {boolean} True for successful or false for unsuccessful (too many loops)
 	 */
-	simulateLoop(loopNode, loopVarName, initValue, conditionInfo, updateInfo, iterationCount, envInfo = null) {
+	simulateLoop(loopNode, loopVarName, initValue, conditionInfo, updateInfo, iterationCount, envInfo = null, seedConstants = null) {
 		
 		// User configuration
 		const configuredMaxSimulation = 300;
@@ -4094,6 +4290,27 @@ export class Optimizer extends ASTVisitor {
 		*/
 		loopNode.setAttribute('savedConstants', savedConstants);
 		loopNode.setAttribute('savedConstantsScopePath', scopePath);
+		/*
+		Seed the constants the loop overwrites. A switch body is analysed as
+		unsure, which drops them -- but the simulation is about to recompute
+		each round, so their pre-loop values are the true starting point.
+		They are deliberately added AFTER `savedConstants`, so a simulation
+		that does not end in replacement puts the table back as it was.
+		*/
+		if (seedConstants) {
+			for (const [name, value] of seedConstants) {
+				if (!localConstants.has(name)) localConstants.set(name, value);
+				/*
+				The pre-analysis marked a switch body's writes as not
+				foldable. During simulation each round is known, so the same
+				rule as for the loop variable applies: an `n = n + 1` may be
+				folded, and `n` must not look like it has side effects just
+				because it is loop-written.
+				*/
+				const usage = variableUses.get(name);
+				if (usage) usage.canOptimize = true;
+			}
+		}
 		/*
 		Ordinary analysis marks everything written inside a loop as not
 		foldable (`canOptimize` false, see `evaluationState`). That is what stops
@@ -6206,7 +6423,7 @@ export class Optimizer extends ASTVisitor {
 	 * @returns {boolean}
 	 */
 	runWhileSimulation(whileNode, loopVarName, initValue, conditionInfo, updateInfo,
-		iterationCount, info) {
+		iterationCount, info, seedConstants = null) {
 		whileNode.setAttribute('iterationCount', iterationCount);
 		whileNode.setAttribute('iteration', {
 			node: whileNode,
@@ -6216,12 +6433,13 @@ export class Optimizer extends ASTVisitor {
 			condition: conditionInfo,
 			update: updateInfo,
 			count: iterationCount,
+			seedConstants: seedConstants,
 			info: info
 		});
 		whileNode.setAttribute('canOptimize', true);
 		if (info && info.noRunning) return true;
 		if (!this.simulateLoop(whileNode, loopVarName, initValue, conditionInfo, updateInfo,
-			iterationCount, info)) {
+			iterationCount, info, seedConstants)) {
 			whileNode.setAttribute('optimized', false);
 			return false;
 		}
