@@ -2999,24 +2999,28 @@ export class Optimizer extends ASTVisitor {
 				analysis can drop them (see above). Only loop-written variables
 				are kept: those are the ones the simulation is going to model,
 				so no unrelated constant is resurrected.
+
+				The variables do not all live in one scope: `for (int i = ...)`
+				puts `i` in the synthesized `forinit` scope while an accumulator
+				declared before the loop stays in the enclosing block. Store the
+				snapshot per scope, and seed each scope's table separately.
 				*/
-				const test = node.test;
-				const initVarName = test && test.type === 'BinaryExpression'
-					? (test.left?.type === 'Identifier' ? test.left.name
-						: test.right?.type === 'Identifier' ? test.right.name : null)
-					: null;
-				if (initVarName && !weird) {
-					const initScope = this.currentScope.lookupScopeOf(initVarName);
-					const initialMap = initScope && this.localConstants.get(initScope.getPath());
-					if (initialMap) {
-						loopInitConstants = new Map();
-						for (const entry of modifieds) {
-							if (!entry || typeof entry !== 'object') continue;
-							if (initialMap.has(entry.varName)) {
-								loopInitConstants.set(entry.varName, initialMap.get(entry.varName));
-							}
-						}
+				if (!weird) {
+					const byScope = new Map();
+					for (const entry of modifieds) {
+						if (!entry || typeof entry !== 'object' || !entry.varName) continue;
+						const symbol = entry.symbol ?? this.currentScope.lookup(entry.varName);
+						const scope = symbol?.scope
+							?? this.currentScope.lookupScopeOf(entry.varName)
+							?? entry.scope;
+						const path = scope?.getPath?.();
+						if (!path) continue;
+						const initial = this.localConstants.get(path);
+						if (!initial || !initial.has(entry.varName)) continue;
+						if (!byScope.has(path)) byScope.set(path, new Map());
+						byScope.get(path).set(entry.varName, initial.get(entry.varName));
 					}
+					if (byScope.size > 0) loopInitConstants = byScope;
 				}
 				// 分析循环体
 				this.analyzeNode(node.body, {
@@ -3583,7 +3587,7 @@ export class Optimizer extends ASTVisitor {
 					*/
 					const initValue = localConstants.get(loopVarName)
 						?? (info && info.loopInitConstants
-							? info.loopInitConstants.get(loopVarName) : undefined);
+							? info.loopInitConstants.get(scopePath)?.get(loopVarName) : undefined);
 					
 					if (initValue !== undefined) {
 						// Successful to make registrations
@@ -4280,8 +4284,35 @@ export class Optimizer extends ASTVisitor {
 		const localConstants = this.localConstants.get(scopePath);
 		const variableUses = this.variableUses.get(scopePath);
 		
-		// 保存循环前的常量状态
-		const savedConstants = new Map(localConstants);
+		/*
+		Normalize the seed to `scopePath -> (name -> value)`. The loop's
+		variables may live in several scopes: `for (int i = ...)` makes a
+		`forinit` scope for `i`, while an accumulator declared before the
+		loop stays in the enclosing block. Seeding only the loop variable's
+		scope leaves the accumulator unknown after the switch pre-analysis.
+		*/
+		const seedScopes = new Map();
+		if (seedConstants) {
+			for (const [key, value] of seedConstants) {
+				if (value instanceof Map) {
+					seedScopes.set(key, value);
+				} else {
+					// Backward-compatible flat `name -> value` map
+					if (!seedScopes.has(scopePath)) seedScopes.set(scopePath, new Map());
+					seedScopes.get(scopePath).set(key, value);
+				}
+			}
+		}
+
+		// 保存循环前的常量状态（所有会被播种的作用域）
+		const savedConstants = [];
+		const saveScope = path => {
+			if (!path || savedConstants.some(entry => entry.scopePath === path)) return;
+			const live = this.localConstants.get(path);
+			if (live) savedConstants.push({ scopePath: path, constants: new Map(live) });
+		};
+		saveScope(scopePath);
+		for (const path of seedScopes.keys()) saveScope(path);
 		/*
 		If the simulation does NOT end in the loop being replaced (the body
 		reads memory, say, so no final value is known), these imagined constants
@@ -4295,11 +4326,14 @@ export class Optimizer extends ASTVisitor {
 		unsure, which drops them -- but the simulation is about to recompute
 		each round, so their pre-loop values are the true starting point.
 		They are deliberately added AFTER `savedConstants`, so a simulation
-		that does not end in replacement puts the table back as it was.
+		that does not end in replacement puts the tables back as they were.
 		*/
-		if (seedConstants) {
-			for (const [name, value] of seedConstants) {
-				if (!localConstants.has(name)) localConstants.set(name, value);
+		for (const [path, values] of seedScopes) {
+			const target = this.localConstants.get(path);
+			if (!target) continue;
+			const uses = this.variableUses.get(path);
+			for (const [name, value] of values) {
+				target.set(name, value);
 				/*
 				The pre-analysis marked a switch body's writes as not
 				foldable. During simulation each round is known, so the same
@@ -4307,7 +4341,7 @@ export class Optimizer extends ASTVisitor {
 				folded, and `n` must not look like it has side effects just
 				because it is loop-written.
 				*/
-				const usage = variableUses.get(name);
+				const usage = uses?.get(name);
 				if (usage) usage.canOptimize = true;
 			}
 		}
@@ -4719,6 +4753,17 @@ export class Optimizer extends ASTVisitor {
 	 */
 	restoreLoopConstants(loopNode) {
 		const saved = loopNode?.getAttribute?.('savedConstants');
+		if (Array.isArray(saved)) {
+			for (const entry of saved) {
+				const live = this.localConstants.get(entry.scopePath);
+				if (!live) continue;
+				live.clear();
+				for (const [key, value] of entry.constants) live.set(key, value);
+			}
+			loopNode.setAttribute('savedConstants', null);
+			return;
+		}
+		// Legacy single-scope format
 		const scopePath = loopNode?.getAttribute?.('savedConstantsScopePath');
 		if (!saved || !scopePath) return;
 		const live = this.localConstants.get(scopePath);
@@ -7067,6 +7112,7 @@ export class Optimizer extends ASTVisitor {
 			case 'IfStatement':
 			case 'WhileStatement':
 			case 'ForStatement':
+			case 'DoWhileStatement':
 				// 控制语句可能有副作用
 				return (node.test && this.hasSideEffects(node.test, special, selectedScope)) ||
 					   (node.consequent && this.hasSideEffects(node.consequent, special, selectedScope)) ||
@@ -7074,6 +7120,14 @@ export class Optimizer extends ASTVisitor {
 					   (node.body && this.hasSideEffects(node.body, special, selectedScope)) ||
 					   (node.init && this.hasSideEffects(node.init, special, selectedScope)) ||
 					   (node.update && this.hasSideEffects(node.update, special, selectedScope));
+			case 'SwitchStatement':
+				/*
+				A switch keeps its statements in `body`, not in `children`.
+				Without this case a `print` inside a switch looked like no side
+				effect at all, and the enclosing loop could be deleted.
+				*/
+				return (node.discriminant && this.hasSideEffects(node.discriminant, special, selectedScope)) ||
+					   (node.body && this.hasSideEffects(node.body, special, selectedScope));
 			case 'CompoundStatement':
 				// 如果其任何子语句有副作用，复合语句有副作用
 				if (node.statements) {
