@@ -63,6 +63,11 @@ For grammar introduction (about the features unique to Mindustry-C) and examples
   `for`/`while`/`do-while`/`switch`, `break`/`continue`/`return`.
 - C99 conveniences: `//` comments, `bool`/`true`/`false`, `inline`,
   declarations in `for` initializers.
+- C characters and native strings are separate: `char` is a one-cell
+  character/number with real `char*` pointers and NUL-terminated arrays;
+  `string_t` is the one-cell Mindustry string value. `#include <string.h>`
+  provides a length-bounded read-only `string_view` and message-board
+  concatenation (v150+ for character-level operations).
 - Storage durations: automatic locals per call; `static` within one run;
   `persistent` across processor restarts; ordinary file-scope variables reset
   each run.
@@ -138,6 +143,7 @@ metadata; small arrays can often use register or encoded layouts instead.
 
 - Empty initializer lists are not a reliable form. `int a[] = {1, 2, 3};` is
   supported: the last dimension is deduced from the initializer.
-- String literals are `char` values, not `char *`; there are no C string
-  functions.
+- String literals are native `string_t` values. `char` is an ordinary
+  one-cell character/number; `char*` is a real pointer to a `char` array, and
+  `const char*` may point at a literal. There are no C string functions.
 - The complete list is in [DIFFERENCES_FROM_C99.md](docs/DIFFERENCES_FROM_C99.md).

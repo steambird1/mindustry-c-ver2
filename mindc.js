@@ -333,6 +333,8 @@ export class Compiler {
 		this.memoryInfo = memoryInfo;
 		
         this.lexer = new Lexer(sourceCode);
+		this.lexer.macros['__MINDC_TARGET_VERSION__'] =
+			String(this.config.getAttribute('targetVersion'));
 		let parserConfig = new AttributeClass();
 		parserConfig.setAttribute('extraTypes', []);
         this.parser = new Parser(this.lexer, parserConfig);

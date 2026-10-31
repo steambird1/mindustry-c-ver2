@@ -30,7 +30,7 @@ int *a = {};
 
 * 结构体类型变量不需要额外的 struct 来声明（与 C++ 类似）。当然，写上 struct  也是可以的。
 
-* char 表示字符串而不是字符类型。**char 类型不能被放入内存。**
+* `string_t` 表示 Mindustry 原生字符串值；`char` 是普通的字符/数值类型。`char*` 是真正的字符数组指针，`const char*` 可以指向字面量。
 
 * 存在特殊的类型 content_t, item_t, unit_t, block_t, liquid_t, null_t 和 device，其用法见后文具体介绍。**null_t 和 device 类型不能被放入内存。**
 

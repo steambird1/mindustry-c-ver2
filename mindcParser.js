@@ -534,7 +534,7 @@ export class Parser {
         // 特殊类型：device 和 null_t
         if (checkSpecialTypes && this.matchToken(TokenType.IDENTIFIER)) {
             const token = this.getCurrentToken();
-			const specials = ['device', 'null_t', 'content_t', 'item_t', 'liquid_t', 'unit_t', 'block_t']
+			const specials = ['device', 'null_t', 'content_t', 'item_t', 'liquid_t', 'unit_t', 'block_t', 'string_t']
             if (specials.includes(token.value)) {
                 this.consumeToken();
                 typeNode = ASTBuilder.typeSpecifier(token.value);
@@ -2367,6 +2367,7 @@ export class Parser {
 		if (this.isTypeNameStart()) {
 			const name = this.readTypeName(parenthesized);
 			argument = ASTBuilder.stringLiteral(name).setAttribute('location', token.location);
+			argument.setAttribute('isTypeName', true);
 		} else {
 			argument = this.parseExpression();
 			if (argument) argument.parent = null;
@@ -2387,7 +2388,7 @@ export class Parser {
 	isTypeNameStart() {
 		const typeKeywords = ['INT', 'CHAR', 'FLOAT', 'DOUBLE', 'VOID', 'LONG', 'SHORT',
 			'SIGNED', 'UNSIGNED', 'BOOL', 'STRUCT', 'UNION', 'ENUM'];
-		const special = ['device', 'content_t', 'null_t', 'item_t', 'liquid_t', 'unit_t', 'block_t'];
+		const special = ['device', 'content_t', 'null_t', 'item_t', 'liquid_t', 'unit_t', 'block_t', 'string_t'];
 		const token = this.getCurrentToken();
 		if (!token) return false;
 		if (typeKeywords.includes(token.type)) return true;

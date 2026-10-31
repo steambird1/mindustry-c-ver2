@@ -2,7 +2,7 @@
 
 auto device scatter1;
 
-const char filter1 = "flying", filter2 = "any", filter3 = "any", sorter = "distance";
+const string_t filter1 = "flying", filter2 = "any", filter3 = "any", sorter = "distance";
 
 void main() {
     int order = 1;

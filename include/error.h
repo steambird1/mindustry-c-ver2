@@ -8,7 +8,7 @@ error.h : C-style error handler.
 
 // Public interfaces
 extern int _errId = 0;
-extern char _errInfo;
+extern string_t _errInfo;
 
 void perror() {
     if (_errId) {

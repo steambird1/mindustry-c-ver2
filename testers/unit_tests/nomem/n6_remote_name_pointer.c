@@ -8,7 +8,7 @@
    pointer as missing one refused a program that was already correct. */
 auto device message1;
 extern int c;
-extern char qq;
+extern string_t qq;
 void main() {
     qq = "g:.c";
     int *byname remote q = remote(@this, "g:.qq");

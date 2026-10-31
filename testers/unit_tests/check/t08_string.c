@@ -1,7 +1,7 @@
 /* EXPECT: 104 108 3 */
 auto device message1;
 void main() {
-    char s = "hello";
+    string_t s = "hello";
     print(s[0]);
     print(s[2]);
     int i = 3;

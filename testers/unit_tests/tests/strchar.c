@@ -1,6 +1,6 @@
 auto device message1;
 void main() {
-    char s = "hello";
+    string_t s = "hello";
     int i = 1;
     int c = s[i];
     print(c);

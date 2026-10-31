@@ -35,7 +35,7 @@ void show_amount(float amount) {
 	}
 }
 
-void show_node(int where, char who, device whose) {
+void show_node(int where, string_t who, device whose) {
 	print(who);
 	draw("color", 255, 255, 255, 255);
 	draw("print", 5, where, @bottomLeft);
@@ -47,7 +47,7 @@ void show_node(int where, char who, device whose) {
 	draw("print", 55, where, @bottomLeft);
 }
 
-void show_status(char msg) {
+void show_status(string_t msg) {
 	draw("clear", 0, 0, 0);
 	show_node(65, "C", consume_node);
 	show_node(50, "S", supply_node);
@@ -67,7 +67,7 @@ void show_status(char msg) {
 
 void main() {
 	while (true) {
-		char state = "";
+		string_t state = "";
 		float demand = ((float)sensor(consume_node, @powerNetIn) - (float)sensor(consume_node, @powerNetOut));
 		if ((float)sensor(supply_node, @powerNetCapacity) < (demand * -50)) {
 			state = "Low PNC";

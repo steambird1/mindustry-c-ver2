@@ -923,6 +923,9 @@ export class SemanticAnalyzer extends ASTVisitor {
     analyze(ast) {
         this.errors = [];
         this.warnings = [];
+        this.ast = ast;
+        this.stringLiteralCounter = 0;
+        this.stringLiteralArrays = new Map();
         // `remote()` bindings that name an array declared further down
         this.pendingRemoteLinks = [];
         this.currentScope = new Scope(null, 'g');
@@ -953,9 +956,9 @@ export class SemanticAnalyzer extends ASTVisitor {
 			'@maph': this.typeTable.get('int'),
 			'@server': this.typeTable.get('bool'),
 			'@client': this.typeTable.get('bool'),
-			'@clientLocale': this.typeTable.get('char'),
-			'@clientName': this.typeTable.get('char'),
-			'@clientTeam': this.typeTable.get('char'),
+			'@clientLocale': this.typeTable.get('string_t'),
+			'@clientName': this.typeTable.get('string_t'),
+			'@clientTeam': this.typeTable.get('string_t'),
 			'@clientUnit': this.typeTable.get('int'),
 			'@clientMobile': this.typeTable.get('bool'),
 			'@blockCount': this.typeTable.get('int'),
@@ -1164,6 +1167,13 @@ export class SemanticAnalyzer extends ASTVisitor {
         basicTypes.forEach(type => {
             this.typeTable.set(type, new TypeInfo(type, 'basic', 1));
         });
+        /*
+        The native Mindustry string is a value, not a C character. It used to
+        be spelled `char`; separating the two lets `char` be the ordinary
+        one-cell number C expects while `string_t` keeps the 1-cell machine
+        string.
+        */
+        this.typeTable.set('string_t', new TypeInfo('string_t', 'basic', 1));
 
         // 特殊类型
         this.typeTable.set('device', new TypeInfo('device', 'device', 1));
@@ -1201,19 +1211,19 @@ export class SemanticAnalyzer extends ASTVisitor {
 		// TODO: Must be modified...
 		// TODO: Use boolean here
         const builtins = [
-            { name: 'draw', returnType: 'void', parameters: ['char'], hasVarArgs: true }, // 操作名称 + 变长参数 (Actually, need further judgment)
+            { name: 'draw', returnType: 'void', parameters: ['string_t'], hasVarArgs: true }, // 操作名称 + 变长参数 (Actually, need further judgment)
 			{ name: 'print', returnType: 'void', parameters: [], hasVarArgs: true }, // 变长参数 (Actually, accepting multiple operations)
 			{ name: 'printchar', returnType: 'void', parameters: [], hasVarArgs: true }, 
 			{ name: 'format', returnType: 'void', parameters: [], hasVarArgs: true }, 
 			{ name: 'drawflush', returnType: 'void', parameters: ['device'] },
 			{ name: 'printflush', returnType: 'void', parameters: ['device'] },
 			{ name: 'getlink', returnType: 'device', parameters: ['int'] },
-			{ name: 'control', returnType: 'void', parameters: ['char', 'device'], hasVarArgs: true }, // 操作名称 + 设备 + 变长参数
-			{ name: 'radar', returnType: 'device', parameters: ['char', 'char', 'char', 'char', 'device', 'int'] },
+			{ name: 'control', returnType: 'void', parameters: ['string_t', 'device'], hasVarArgs: true }, // 操作名称 + 设备 + 变长参数
+			{ name: 'radar', returnType: 'device', parameters: ['string_t', 'string_t', 'string_t', 'string_t', 'device', 'int'] },
 			{ name: 'sensor', returnType: 'null_t', parameters: ['device', 'content_t'] },	// Sensor may return ANY TYPE. PROCESS ON YOUR OWN
 			{ name: 'set', returnType: 'void', parameters: [], hasVarArgs: true, special: 'set' }, // 特殊处理
 			{ name: 'op', returnType: 'void', parameters: [], hasVarArgs: true, special: 'op' }, // 特殊处理
-			{ name: 'lookup', returnType: 'content_t', parameters: ['char', 'int'] },
+			{ name: 'lookup', returnType: 'content_t', parameters: ['string_t', 'int'] },
 			{ name: 'wait', returnType: 'void', parameters: ['float'] },
 			{ name: 'stop', returnType: 'void', parameters: [] },
 			{ name: 'end', returnType: 'void', parameters: [] },
@@ -1223,9 +1233,9 @@ export class SemanticAnalyzer extends ASTVisitor {
 			{ name: 'write', returnType: 'void', parameters: [], special: 'write'}, // 特殊处理
 			{ name: 'ubind', returnType: 'void', parameters: ['content_t']},
 			{ name: 'ucontrol', returnType: 'void', parameters: [], hasVarArgs: true},
-			{ name: 'uradar', returnType: 'device', parameters: ['char', 'char', 'char', 'char', 'int', 'int'] },
+			{ name: 'uradar', returnType: 'device', parameters: ['string_t', 'string_t', 'string_t', 'string_t', 'int', 'int'] },
 			{ name: 'ulocate', returnType: 'int', parameters: [], hasVarArgs: true},
-			{ name: 'asm', returnType: 'null_t', parameters: ['char'], special: 'asm'}, // TODO: I'm unsure about whether this can be correctly done now.
+			{ name: 'asm', returnType: 'null_t', parameters: ['string_t'], special: 'asm'}, // TODO: I'm unsure about whether this can be correctly done now.
 			{ name: 'sin', returnType: 'float', parameters: ['float'] },	// These are in [op] instruction
 			{ name: 'cos', returnType: 'float', parameters: ['float'] },
 			{ name: 'tan', returnType: 'float', parameters: ['float'] },
@@ -1981,6 +1991,16 @@ export class SemanticAnalyzer extends ASTVisitor {
 			makes it obvious.
 			*/
 			this.deduceRemoteArrayDimensions(declarator);
+			/*
+			`char a[] = "hi"` is a C character array: expand the literal into
+			codes plus NUL before the dimension is deducted from it.
+			*/
+			if (baseTypeName === 'char'
+				&& declarator.arrayDimensions?.length > 0
+				&& declarator.initializer?.type === 'StringLiteral') {
+				declarator.initializer = this.characterArrayInitializer(declarator.initializer);
+				declarator.initializer.parent = declarator;
+			}
 			this.deduceArrayDimensions(declarator, baseType);
             if (declarator.arrayDimensions && declarator.arrayDimensions.length > 0) {
                 let arrayType = finalType;
@@ -2245,6 +2265,32 @@ export class SemanticAnalyzer extends ASTVisitor {
 				declarator.dataType = varSymbol.extractType();
 			}
 
+			/*
+			A string literal is a native `string_t` value, not an addressable
+			array. A `const char*` may still point at it: materialise a hidden
+			`const char[]` once and point there. A mutable `char*` is refused --
+			text is read-only, exactly like a C string literal.
+			*/
+			if (declarator.initializer?.type === 'StringLiteral'
+				&& finalType.kind === 'pointer'
+				&& finalType.pointerTo?.kind === 'basic'
+				&& finalType.pointerTo.name === 'char') {
+				if (this.isConstCharPointer(finalType)) {
+					const hidden = this.materializeStringLiteral(declarator.initializer);
+					const reference = ASTBuilder.identifier(hidden);
+					reference.setAttribute('location', declarator.initializer.location);
+					reference.parent = declarator;
+					declarator.initializer = reference;
+				} else {
+					this.addError(
+						`Cannot initialize '${this.typeToString(finalType)}' with a string literal: ` +
+						`the characters are read-only. Use 'const char*' for a view, or ` +
+						`'char ${declarator.name}[] = "..."' for a mutable copy.`,
+						declarator.initializer.location);
+					declarator.initializer = null;
+				}
+			}
+
             // 检查初始化表达式
             if (declarator.initializer) {
                 this.visit(declarator.initializer, {
@@ -2328,6 +2374,24 @@ export class SemanticAnalyzer extends ASTVisitor {
 				}
 
                 varSymbol.initialized = true;
+
+				/*
+				A character array initialised from a literal includes its NUL, so
+				`char a[2] = "hi"` cannot fit. The same count check catches any
+				other initializer list that names more elements than the array
+				has; C requires the excess to be diagnosed rather than dropped.
+				*/
+				if (finalType.kind === 'array'
+					&& declarator.initializer?.type === 'InitializerList') {
+					const outer = this.arrayDimensionsOf(finalType)[0];
+					const count = declarator.initializer.children.length;
+					if (outer && count > outer) {
+						this.addError(
+							`Too many initializers for '${declarator.name}': ` +
+							`${count} value(s) for ${outer} element(s)`,
+							declarator.initializer.location);
+					}
+				}
             }
 			// 检查const变量初始化
 			if (finalType.isConst() && !varSymbol.isAutoDevice && !declarator.initializer) {
@@ -2422,6 +2486,112 @@ export class SemanticAnalyzer extends ASTVisitor {
 	 * @param {ASTNode} declarator
 	 * @returns {void}
 	 */
+	/**
+	 * `char a[] = "hi"` -- a C character array, not a native string.
+	 *
+	 * The literal is expanded into its character codes plus the terminating
+	 * NUL, so the ordinary array machinery deducts the dimension and lays the
+	 * cells out. The native `string_t` value stays one cell; this path only
+	 * runs when the destination is a `char` array.
+	 *
+	 * @param {StringLiteralNode} literal
+	 * @returns {InitializerListNode}
+	 */
+	characterArrayInitializer(literal) {
+		const list = new InitializerListNode();
+		list.location = literal.location;
+		for (const ch of String(literal.value ?? '')) {
+			const cell = ASTBuilder.numericLiteral(ch.codePointAt(0) ?? 0);
+			cell.location = literal.location;
+			list.addChild(cell);
+		}
+		const nul = ASTBuilder.numericLiteral(0);
+		nul.location = literal.location;
+		list.addChild(nul);
+		return list;
+	}
+
+	/**
+	 * Materialise a string literal as a compile-time `const char[]` so that a
+	 * `const char*` can point at it. Only literals used through a character
+	 * pointer pay for this: a plain `string_t s = "hi"` stays one cell.
+	 *
+	 * @param {StringLiteralNode} literal
+	 * @returns {string} the hidden array's name
+	 */
+	materializeStringLiteral(literal) {
+		const text = String(literal.value ?? '');
+		const cached = this.stringLiteralArrays.get(text);
+		if (cached) return cached;
+
+		const name = `__strlit_${this.stringLiteralCounter++}`;
+		const typeSpec = ASTBuilder.typeSpecifier('char');
+		typeSpec.setAttribute('location', literal.location);
+		typeSpec.setAttribute('qualifiers', ['const']);
+		typeSpec.storageClass = '';
+
+		const declarator = ASTBuilder.variableDeclarator(name);
+		declarator.location = literal.location;
+		declarator.arrayDimensions = [ASTBuilder.numericLiteral([...text].length + 1)];
+		declarator.initializer = this.characterArrayInitializer(literal);
+		/*
+		A literal must be addressable: force the traditional memory layout,
+		because an encoded/register constant has no block+offset to point at.
+		*/
+		declarator.setAttribute('arrayImplementation', 'traditional');
+
+		const declaration = ASTBuilder.variableDeclaration(typeSpec, [declarator]);
+		declaration.location = literal.location;
+
+		const savedScope = this.currentScope;
+		const savedFunction = this.currentFunction;
+		this.currentScope = this.globalScope;
+		this.currentFunction = null;
+		this.visit(declaration);
+		this.currentScope = savedScope;
+		this.currentFunction = savedFunction;
+
+		const symbol = this.globalScope.lookup(name);
+		if (symbol) symbol.requestedArrayImplementation = 'traditional';
+		this.ast.globalDeclarations.push(declaration);
+		this.stringLiteralArrays.set(text, name);
+		return name;
+	}
+
+	/**
+	 * Whether a type is a pointer to `const char` (the only pointer a literal
+	 * may initialise; a mutable `char*` would invite writes to read-only text).
+	 *
+	 * @param {TypeInfo} type
+	 * @returns {boolean}
+	 */
+	isConstCharPointer(type) {
+		if (!type || type.kind !== 'pointer') return false;
+		const target = type.pointerTo;
+		if (!target || target.kind !== 'basic' || target.name !== 'char') return false;
+		return (target.qualifiers ?? []).includes('const');
+	}
+
+	/**
+	 * Replace a literal with a reference to its materialised `const char[]`
+	 * when the destination is `const char*`. Every other destination keeps the
+	 * one-cell `string_t` value.
+	 *
+	 * @param {ASTNode?} node
+	 * @param {TypeInfo?} expectedType
+	 * @param {ASTNode?} parent
+	 * @returns {ASTNode?}
+	 */
+	coerceStringLiteralToCharPointer(node, expectedType, parent = null, force = false) {
+		if (!node || node.type !== 'StringLiteral') return node;
+		if (!force && !this.isConstCharPointer(expectedType)) return node;
+		const hidden = this.materializeStringLiteral(node);
+		const reference = ASTBuilder.identifier(hidden);
+		reference.setAttribute('location', node.location);
+		reference.parent = parent;
+		return reference;
+	}
+
 	deduceArrayDimensions(declarator, baseType) {
 		const dims = declarator.arrayDimensions;
 		if (!Array.isArray(dims) || dims.length === 0) return;
@@ -3219,10 +3389,11 @@ export class SemanticAnalyzer extends ASTVisitor {
 	/**
 	 * 
 	 * @param {StringLiteralNode} node 
-	 * @remark Specially, string literal is considered 'char', unless specially converted!
+	 * @remark A double-quoted literal is a native Mindustry string (`string_t`).
+	 *         `char` is the ordinary one-cell character/number type.
 	 */
 	visitStringLiteral(node) {
-		node.dataType = this.typeTable.get('char');
+		node.dataType = this.typeTable.get('string_t');
 	}
 
 	/**
@@ -3339,6 +3510,16 @@ export class SemanticAnalyzer extends ASTVisitor {
 			if (node.name === '@counter') {
 				this.addWarning(`Deprecated to use @counter inside program`, node.getAttribute('location'));
 			}
+			/*
+			String/message length and character indexing arrived with the
+			v150 string instructions. Refuse the property itself when the
+			target cannot support it, instead of emitting a sensor that reads
+			null in game.
+			*/
+			if ((node.name === '@size' || node.name === '@bufferSize')
+				&& this.targetVersion < 150) {
+				this.addError(`${node.name} requires v150 or higher`, node.getAttribute('location'));
+			}
 			if (specialTypes[node.name]) {
 				node.dataType = specialTypes[node.name];
 				return;
@@ -3417,15 +3598,15 @@ export class SemanticAnalyzer extends ASTVisitor {
         }
 
         /*
-        `char` is a STRING in this dialect, so `+` concatenates. Whether it can
-        actually be done is decided later: only two literals can be joined at
-        compile time, and there is no instruction that joins two strings at
-        run time. The check is here so that the rejection comes from the code
-        generator with a source location, not from here as a type error.
+        `string_t` is the native Mindustry string, so `+` concatenates two of
+        them. Whether it can actually be done is decided later: only two
+        literals can be joined at compile time, and there is no instruction
+        that joins two strings at run time. `char` is a NUMBER and takes the
+        ordinary arithmetic path.
         */
-        const isCharString = t => !!t && (t.name === 'char');
-        if (node.operator === '+' && isCharString(leftType) && isCharString(rightType)) {
-            node.dataType = this.getTypeInfo('char');
+        const isNativeString = t => !!t && (t.name === 'string_t');
+        if (node.operator === '+' && isNativeString(leftType) && isNativeString(rightType)) {
+            node.dataType = this.getTypeInfo('string_t');
             return;
         }
 
@@ -4614,6 +4795,17 @@ export class SemanticAnalyzer extends ASTVisitor {
 
     visitAssignmentExpression(node) {
         this.visit(node.left);
+        /*
+        `p = "hi"` where p is `const char*`: materialise the literal as a
+        read-only char array before the right side is visited.
+        */
+        const leftTypeForLiteral = this.getExpressionType(node.left);
+        if (node.operator === '='
+            && node.right?.type === 'StringLiteral'
+            && this.isConstCharPointer(leftTypeForLiteral)) {
+            node.right = this.coerceStringLiteralToCharPointer(
+                node.right, leftTypeForLiteral, node);
+        }
         this.visit(node.right, {
 			givenType: node.left.dataType,
 			givenTypeUnsure: true
@@ -4752,18 +4944,17 @@ export class SemanticAnalyzer extends ASTVisitor {
 		// This should discard volatile qualifier
         if (computed) {
             if (objectType.kind !== 'array' && objectType.kind !== 'pointer') {
-				if (objectType.kind === 'basic' && objectType.name === 'char') {
+				if (objectType.kind === 'basic' && objectType.name === 'string_t') {
 					if (this.targetVersion < 150) {
 						this.addError('String index access requires at least v150', node.location);
 						return;
 					} else {
 						node.setAttribute('stringAccess', true);
 						/**
+						 * Indexing a native string yields a character NUMBER.
 						 * @type {TypeInfo}
 						 */
-						const dataType = objectType.duplicate();
-						dataType.qualifiers = [...new Set([...dataType.qualifiers, 'const'])];
-						node.dataType = dataType.discardQualifier(['volatile']);
+						node.dataType = this.getTypeInfo('char');
 					}
 					
 				} else {
@@ -4995,7 +5186,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 	sizeOfTypeInfo(type) {
 		if (!type) return null;
 		// Types that never reach memory have no meaningful size
-		if (['char', 'content_t', 'device', 'null_t'].includes(type.name)) return null;
+		if (['string_t', 'content_t', 'device', 'null_t'].includes(type.name)) return null;
 		// An inner array is a value of its own size, so this recurses
 		const elementSize = t => {
 			if (!t) return 1;
@@ -5050,7 +5241,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 				return true;
 			}
 			const arg = args[0];
-			if (arg.type === 'StringLiteral') {
+			if (arg.type === 'StringLiteral' && arg.getAttribute?.('isTypeName') === true) {
 				// `sizeof(<type>)`: the parser left the type's NAME here
 				const info = this.resolveCompileTimeTypeName(String(arg.value));
 				if (!info) {
@@ -5064,6 +5255,14 @@ export class SemanticAnalyzer extends ASTVisitor {
 						location);
 					return true;
 				}
+			} else if (arg.type === 'StringLiteral') {
+				/*
+				`sizeof("hi")`: in C the literal is a `const char[3]`, including
+				the terminating NUL. The native string value is one cell, but a
+				char pointer to the literal sees the character array, so the
+				C answer is the useful one here.
+				*/
+				value = [...String(arg.value ?? '')].length + 1;
 			} else {
 				this.visit(arg);
 				const type = this.getExpressionType(arg);
@@ -5091,13 +5290,16 @@ export class SemanticAnalyzer extends ASTVisitor {
 			const arg = args[0];
 			/** @type {TypeInfo?} */
 			let info = null;
-			if (arg.type === 'StringLiteral') {
+			if (arg.type === 'StringLiteral' && arg.getAttribute?.('isTypeName') === true) {
 				// `widthof(<type>)`: the parser left the type's NAME here
 				info = this.resolveCompileTimeTypeName(String(arg.value));
 				if (!info) {
 					this.addError(`Unknown type '${arg.value}' in widthof()`, location);
 					return true;
 				}
+			} else if (arg.type === 'StringLiteral') {
+				value = [...String(arg.value ?? '')].length + 1;
+				info = null;
 			} else {
 				this.visit(arg);
 				info = this.getExpressionType(arg);
@@ -5106,7 +5308,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 					return true;
 				}
 			}
-			value = widthOfType(info);
+			if (info) value = widthOfType(info);
 		} else {
 			if (args.length !== 1) {
 				this.addError(`lenof() takes exactly one operand`, location);
@@ -6844,6 +7046,10 @@ export class SemanticAnalyzer extends ASTVisitor {
                 const got = argTypes[i];
                 if (!got) continue;
                 if (String(got.name ?? got) === String(want)) continue;
+                if (node.arguments?.[i]?.type === 'StringLiteral') {
+                    const wantType = (typeof want === 'string') ? this.getTypeInfo(want) : want;
+                    if (this.isConstCharPointer(wantType)) { total += 1; continue; }
+                }
                 if (this.isTypeCompatible(want, got)) { total += 1; continue; }
                 return -1;
             }
@@ -6989,6 +7195,21 @@ export class SemanticAnalyzer extends ASTVisitor {
 			}
 		}
 
+		/*
+		A literal may satisfy a `const char*` parameter by materialising a
+		read-only char array. This happens after overload resolution, so a
+		`string_t` overload still wins when one exists.
+		*/
+		node.arguments.forEach((arg, index) => {
+			if (index >= expectedParams.length || arg?.type !== 'StringLiteral') return;
+			const raw = expectedParams[index].type;
+			const want = (typeof raw === 'string') ? this.getTypeInfo(raw) : raw;
+			if (!this.isConstCharPointer(want)) return;
+			const reference = this.coerceStringLiteralToCharPointer(arg, want, node);
+			node.arguments[index] = reference;
+			this.visit(reference, { givenType: want, givenTypeUnsure: true });
+		});
+
         // 检查参数数量
         /*
         A name shared by several versions is not one function with one
@@ -7042,7 +7263,9 @@ export class SemanticAnalyzer extends ASTVisitor {
                 }
                 return this.isStructVariantOf(ra, re);
             };
-            const compatible = this.isTypeCompatible(expectedType, argType)
+            const compatible = (node.callee.name === 'sensor' && index === 0
+                    && ['string_t', 'null_t'].includes(argType?.name))
+                || this.isTypeCompatible(expectedType, argType)
                 || peelVariant(argType, expectedType);
             if (argType && expectedType && !compatible) {
                 this.addError(
@@ -7137,8 +7360,8 @@ export class SemanticAnalyzer extends ASTVisitor {
 		switch (node.functionName) {
 			case 'printchar':
 			case 'format':
-				if (this.targetVersion < 154) {
-					this.addError(`${node.functionName} requires v154 or higher`, node.location);
+				if (this.targetVersion < 150) {
+					this.addError(`${node.functionName} requires v150 or higher`, node.location);
 				}
 				break;
 			case 'set':
@@ -7157,8 +7380,11 @@ export class SemanticAnalyzer extends ASTVisitor {
 				if (node.arguments.length !== 2) {
 					this.addError(`'${node.functionName}' requires exactly 2 arguments`, node.location);
 				} else if (!node.arguments[0].dataType
-					|| !['device', 'null_t'].includes(String(node.arguments[0].dataType.name))) {
+					|| !['device', 'null_t', 'string_t'].includes(String(node.arguments[0].dataType.name))) {
 					this.addError(`The building of '${node.functionName}' should be a device`, node.location);
+				}
+				if (node.arguments[0]?.dataType?.name === 'string_t' && this.targetVersion < 150) {
+					this.addError(`Reading a string by index requires v150 or higher`, node.location);
 				}
 				break;
 				
@@ -7420,6 +7646,19 @@ export class SemanticAnalyzer extends ASTVisitor {
         if (node.argument) {
 			if (this.currentFunction) {
                 const returnType = this.currentFunction.type.returnType;
+				const returnTypeInfo = this.getTypeInfo(returnType);
+				/*
+				A function's return type is stored as text and may have lost the
+				`const` qualifier on the pointee. Returning a literal still
+				materialises it as a read-only array; the pointer cannot write
+				through the array's declared constness either way.
+				*/
+				const returnsCharPointer = /\bchar\s*\*$/.test(String(returnType));
+				if (node.argument.type === 'StringLiteral'
+					&& (this.isConstCharPointer(returnTypeInfo) || returnsCharPointer)) {
+					node.argument = this.coerceStringLiteralToCharPointer(
+						node.argument, returnTypeInfo, node, returnsCharPointer);
+				}
                 const argType = this.getExpressionType(node.argument);
                 
                 if (returnType !== 'void' && argType && !this.isTypeCompatible(returnType, argType)) {
@@ -7621,9 +7860,7 @@ export class SemanticAnalyzer extends ASTVisitor {
                 return this.typeTable.get('int');
 
             case 'StringLiteral':
-                const charPtrType = new TypeInfo('', 'pointer', 2);
-                charPtrType.pointerTo = this.typeTable.get('char');
-                return charPtrType;
+                return this.typeTable.get('string_t');
 
             case 'CharacterLiteral':
                 return this.typeTable.get('int');
@@ -7767,12 +8004,12 @@ export class SemanticAnalyzer extends ASTVisitor {
 				return this.isTypeCompatible(targetType.extractSingle(), sourceType.extractSingle());
 			}
 			// 数值类型之间的兼容性
-			const numericTypes = ['int', 'short', 'long', 'float', 'double', 'signed', 'unsigned', 'bool'];
+			const numericTypes = ['int', 'char', 'short', 'long', 'float', 'double', 'signed', 'unsigned', 'bool'];
 			if (numericTypes.includes(targetType.name) && numericTypes.includes(sourceType.name)) {
 				return true;
 			}
 		} else {
-			const numericGroup = ['int', 'long', 'short', 'signed', 'unsigned', 'bool'], decimalGroup = ['float', 'double'];
+			const numericGroup = ['int', 'char', 'long', 'short', 'signed', 'unsigned', 'bool'], decimalGroup = ['float', 'double'];
 			if (numericGroup.includes(targetType.name) && numericGroup.includes(sourceType.name)) {
 				return true;
 			}
@@ -7785,6 +8022,14 @@ export class SemanticAnalyzer extends ASTVisitor {
 		// null_t can be assigned to everything
 		if (!strictCompatible) {
 			if (sourceType.name === 'null_t') {
+				return true;
+			}
+			/*
+			...and it can hold everything, which is what lets a string view
+			keep a string value, a message building or a memory block in one
+			cell.
+			*/
+			if (targetType.name === 'null_t') {
 				return true;
 			}
 		}
@@ -7864,8 +8109,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 			if (specialComparisonOps.includes(operator)) {
 				return this.isTypeCompatible(leftType, rightType);
 			} else {
-				return (this.isNumericType(leftType.name) || leftType.name === 'char') 
-				&& (this.isNumericType(rightType.name) || leftType.name === 'char');
+				return this.isNumericType(leftType.name) && this.isNumericType(rightType.name);
 			}
 			
         }
@@ -7994,12 +8238,12 @@ export class SemanticAnalyzer extends ASTVisitor {
     }
 
     isNumericType(type) {
-        const numericTypes = ['int', 'short', 'long', 'float', 'double', 'signed', 'unsigned'];
+        const numericTypes = ['int', 'char', 'short', 'long', 'float', 'double', 'signed', 'unsigned'];
         return numericTypes.includes(type);
     }
 
     isIntegerType(type) {
-        const integerTypes = ['int', 'short', 'long', 'signed', 'unsigned'];
+        const integerTypes = ['int', 'char', 'short', 'long', 'signed', 'unsigned'];
         return integerTypes.includes(type);
     }
 

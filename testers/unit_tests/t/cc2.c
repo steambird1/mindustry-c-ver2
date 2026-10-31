@@ -1,6 +1,6 @@
 auto device message1;
 void main() {
-    char s;
+    string_t s;
     s = "ab";
     print(s + "cd");
     printflush(message1); stop();

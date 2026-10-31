@@ -20,8 +20,8 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 203 passed, 0 failed (139 shape assertions, 890 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 64 passed, 0 failed |
+| `node ../tools/check.mjs` | 207 passed, 0 failed (139 shape assertions, 910 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 69 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
@@ -52,7 +52,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | remote-`&x` difference regression | **done** �?`245c163`, `check/t161` | §2.3 |
 | out-of-bounds subscript | **done** — `8d8fb43`; a constant index is refused where the length is known at compile time | §7.4 |
 | a case for the zero-candidate overload refusal | **done** �?`1584cf3` | §2.5 |
-| `'x'` loses its text (§3.1) | **done** �?`0784da0`, `check/t162`; int→char is now a clean refusal | §7.1, §3.1 |
+| `'x'` loses its text (§3.1) | **done** �?`0784da0`, `check/t162`; int↔char works now (§7.18) | §7.1, §3.1 |
 | `for (int i = 0; �?` (§3.2) | **done** �?`189f546`, `check/t163`; every clause may be empty, the init declaration is scoped to the loop | §7.2, §3.2 |
 | both `stackcheck` overflow paths trap (§3.3) | **done** �?`9cbaf8c`; both overflow paths stop cleanly, so1/so2/so3 all clean | §3.3 |
 | &global_array[i] / &global_struct.field (§3.4) | **done** — mindcGenerator.js pair init + static struct-store at boot | §3.4 |
@@ -71,6 +71,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | for-init loop scopes and switch side effects (§7.15) | **done** — `6c0c2a4`; per-scope seeding and switch-aware side effects | §7.15 |
 | shift operators (§7.16) | **done** — `37dca8e`; `<<`/`>>` precedence and `<<=`/`>>=` tokenization | §7.16 |
 | run-local static / cross-run persistent (§7.17) | **done** — `b4ecba9`; explicit lifetimes, zeroing, inlining veto, multi-run tests | §7.17 |
+| `char` numeric / `string_t` / `char*` / `string_view` (§7.18) | **done**; v150 gates, message `@bufferSize`, literal materialisation | §7.18 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -805,21 +806,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 559 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 568 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 559 under `testers/unit_tests`, every one of
+bring the count to 568 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 203 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 64 | `negative/` |
+| `check.mjs` | 207 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `negative.mjs` | 69 | `negative/` |
 | `nomem.mjs` | 7 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-203 + 10 + 64 + 7 + 275 = 559. The caveat that replaces "no runner" is weaker but real:
+207 + 10 + 69 + 7 + 275 = 568. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -880,7 +881,7 @@ Every item here is now fixed or closed; each points at the record and the case t
 ## 7. Decisions on the defects in §3 and §6
 
 Recorded so these are not re-opened, in the order they were given. **§1, §2 and §3 are
-closed**: their defects have decisions either in their own §3 record or below; §7.17 is the last one added.
+closed**: their defects have decisions either in their own §3 record or below; §7.18 is the last one added.
 
 ### 7.1 `'x'` is an `int` holding its ASCII value
 
@@ -897,9 +898,9 @@ This is more than §3.1's "carry the text onto the node". The lexer classifies `
   (`mindcGenerator.js:4867`) reads. §3.1's generator crash and its runtime trap both go
   with it.
 
-`char c = 'x';` then becomes an `int`→`char` initialization. Whatever the compiler already
-does for `int`→`char` is the answer; if that is a refusal, it has to be a clear one-line
-message and not a crash. Settle it by testing both when this is implemented.
+`char c = 'x';` then became an `int`→`char` initialization. At that time
+`int`→`char` was a refusal; **§7.18 later made `char` a numeric type**, so
+`char c = 'x'` is now valid and yields 120. The current rule is recorded there.
 
 **Done in `0784da0`.** Both halves landed together. The expression's type is `int`
 (semantic `visitCharacterLiteral` + `getExpressionType`'s case), so `int c = 'x';`
@@ -909,10 +910,10 @@ raw text). The node also carries its text �?`readCharacter` now gives the toke
 `raw`, the way `readString` always did �?and the optimizer's `cloneAST` gained the
 `CharacterLiteral` case (value + raw), which is the half that made `p('x')` reach
 codegen textless and crash: the `raw` was dropped by the clone, not by the lexer.
-`char c = 'x';` is the clean one-line `Cannot initialize 'char' with 'int'` refusal
-from the already-existing int→char rule, not the 3.1 crash or trap. Cases:
-`check/t162_char_literal_is_int.c` (int value, escapes, overload picks `int` for `'x'`
-and `char` for `"a"`) and `negative/char_literal_is_int_refused.c`.
+Cases: `check/t162_char_literal_is_int.c` (int value, escapes, overload picks `int`
+for `'x'` and `string_t` for `"a"`). The old negative case for `int`→`char` was
+replaced by `negative/char_ptr_string_literal_refused.c` when `char` became numeric
+(§7.18).
 
 ### 7.2 `for (int i = 0; �?` parses, and every clause may be empty
 
@@ -1356,3 +1357,34 @@ while preserving registers/memory, so cross-run behavior is testable.
 `4 2 1`), t188 (static/persistent arrays and structs, ordinary globals),
 t189 (`extern` with/without an initializer), and t190 (nested struct
 initialization, pointer members skipped while non-pointer members zero).
+
+### 7.18 `char` is a number; `string_t` is the native string
+
+The old dialect used `char` as the name of Mindustry's 1-cell string value.
+That made `char c = 'A'` impossible and left `char*` without a real C meaning.
+The two are now separate:
+
+- `char` is a one-cell character/number; `'A'` is 65, `char c = 65` works,
+  `char[]` is a numeric array and `char*` is an ordinary block+offset pointer.
+- `char a[] = "hi"` expands to `{'h','i',0}`; `sizeof("hi")` is 3.
+- `string_t` is the native one-cell Mindustry string. String literals are
+  `string_t`; `s[i]` yields a `char`, `sensor s @size` is its length.
+- A literal is materialised as a hidden, traditional-memory `const char[]` only
+  when a `const char*` needs an address. `const char* p = "hi"`, a matching
+  function argument and `return "hi"` all use that path. `char* p = "hi"` is
+  refused because the text is read-only; `char a[] = "hi"` is the mutable copy.
+- `string_t` and `char*` do not convert implicitly. `include/string.h` adds a
+  length-bounded read-only `string_view`, `sv_at`/`sv_len`/`sv_print`, and
+  `concat_to_message`. A message board's length is `sensor m @bufferSize`
+  (not `@size`), and overwriting the board invalidates old views.
+- `string_t` indexing, `@size`, `@bufferSize`, reading a string by index,
+  `printchar`, `format` and the character-level view helpers require v150+.
+  A lower target gets a compile-time refusal (or `concat_print` for output-only
+  concatenation).
+
+Cases: t191 (char literal/arithmetic/array/pointer/sizeof), t192 (`string_t`,
+`string_view`, `@bufferSize`, concatenation), t193 (`const char*` assignment,
+argument and return), t194 (`strlen`/`strcpy`/`strcat`/`strcmp` on real
+`char*` buffers), plus negatives for mutable `char*` from a literal, a
+too-small char array, scalar `char` from a string, and the v149 gates. Existing
+string tests and samples were migrated from `char` to `string_t`.

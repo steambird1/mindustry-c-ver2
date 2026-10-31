@@ -40,20 +40,20 @@ Mindustry 的指令风格是“输出参数在左边”。本编译器采用：
 | `void printchar(...)` | Mindustry 的 `printchar` 指令封装。 |
 | `void format(...)` | Mindustry 的 `format` 指令封装；具体格式以目标版本为准。 |
 | `void printflush(device target)` | 把输出缓冲发送到消息板/显示器。 |
-| `void draw(char action, ...)` | `action` 必须是字符串字面量；如 `"clear"`、`"rect"`、`"line"` 等。 |
+| `void draw(string_t action, ...)` | `action` 必须是字符串字面量；如 `"clear"`、`"rect"`、`"line"` 等。 |
 | `void drawflush(device target)` | 刷新绘图缓冲。 |
 | `device getlink(int id)` | 取第 `id` 个链接建筑。 |
-| `void control(char action, device target, ...)` | `action` 必须是字符串字面量；控制建筑。 |
-| `device radar(char c1, char c2, char c3, char sort, device from, int order)` | 四个筛选/排序字符串必须是字面量。 |
+| `void control(string_t action, device target, ...)` | `action` 必须是字符串字面量；控制建筑。 |
+| `device radar(string_t c1, string_t c2, string_t c3, string_t sort, device from, int order)` | 四个筛选/排序字符串必须是字面量。 |
 | `null_t sensor(device source, content_t property)` | 读取属性；返回值可能是任意类型，按需转换。 |
-| `content_t lookup(char category, int id)` | `category` 必须是字面量，如 `"item"`、`"liquid"`、`"unit"`、`"block"`。 |
+| `content_t lookup(string_t category, int id)` | `category` 必须是字面量，如 `"item"`、`"liquid"`、`"unit"`、`"block"`。 |
 | `void wait(float time)` | Mindustry 的等待。 |
 | `void stop()` | 停止处理器。 |
 | `void end()` | 结束当前执行轮。 |
 | `void ubind(content_t unit)` | 绑定单位。 |
-| `void ucontrol(char action, ...)` | `action` 必须是字符串字面量；输出参数按指针/原样转换传入。 |
-| `device uradar(char c1, char c2, char c3, char sort, int reserved, int order)` | `reserved` 通常为 0。 |
-| `int ulocate(char action, ...)` | `action` 必须是字面量；输出参数见 §2.1。 |
+| `void ucontrol(string_t action, ...)` | `action` 必须是字符串字面量；输出参数按指针/原样转换传入。 |
+| `device uradar(string_t c1, string_t c2, string_t c3, string_t sort, int reserved, int order)` | `reserved` 通常为 0。 |
+| `int ulocate(string_t action, ...)` | `action` 必须是字面量；输出参数见 §2.1。 |
 
 ### 2.1 `ulocate` 的输出参数
 
@@ -87,7 +87,7 @@ ulocate("building", "core", false, &x, &y, &found, (volatile device*)(&out));
 | `bool stricteq(...)` | 严格相等比较。 |
 | `null_t read(device source, null_t reference)` | 原始 `read`；优先使用数组/memsp。 |
 | `void write(null_t value, device source, null_t reference)` | 原始 `write`。 |
-| `null_t asm(char code)` / `asm("...")` | 原始指令字符串，支持 `${expr}` 替换；见 [asm.md](asm.md)。 |
+| `null_t asm(string_t code)` / `asm("...")` | 原始指令字符串，支持 `${expr}` 替换；见 [asm.md](asm.md)。 |
 
 ---
 
@@ -345,7 +345,7 @@ ERR_IN_PROGRESS ERR_OK ERR_MINE_NOT_FOUND
 | 名称 | 说明 |
 |---|---|
 | `extern int _errId` | 错误号，默认 0。 |
-| `extern char _errInfo` | 错误信息字符串。 |
+| `extern string_t _errInfo` | 错误信息字符串。 |
 | `void perror()` | 当 `_errId` 非 0 时打印 `<ERROR>: (id): info`。 |
 | `errno` | `_errId` 的宏别名。 |
 
@@ -361,25 +361,25 @@ ERR_IN_PROGRESS ERR_OK ERR_MINE_NOT_FOUND
 
 | 签名 | 说明 |
 |---|---|
-| `content_t argetblock(char layer, int x, int y)` | 取方块；`layer` 是字符串字面量。 |
-| `void arsetblock(char layer, content_t block, int x, int y, content_t team, float rotation)` | 放方块。 |
+| `content_t argetblock(string_t layer, int x, int y)` | 取方块；`layer` 是字符串字面量。 |
+| `void arsetblock(string_t layer, content_t block, int x, int y, content_t team, float rotation)` | 放方块。 |
 | `device arspawn(content_t unit, int x, int y, float rotation, content_t team)` | 生成单位。 |
-| `void arstatus(char type, ...)` | `type` 为 `"apply"` 或 `"clear"`，后接状态参数。 |
+| `void arstatus(string_t type, ...)` | `type` 为 `"apply"` 或 `"clear"`，后接状态参数。 |
 | `bool arweathersense(content_t weather)` | 读取天气。 |
 | `void arweatherset(content_t weather, bool active)` | 设置天气。 |
 | `void arspawnwave(int x, int y, bool natural)` | 生成波次。 |
-| `void arsetrule(char name, ...)` | 设置规则；`name` 为字面量。 |
-| `void armessage(char type, ...)` | `type` 如 `"notify"`、`"mission"`。 |
-| `void arcutscene(char type, ...)` | 过场/镜头。 |
-| `void areffect(char effect, ...)` | 特效；参数以 `archon.js` 为准。 |
+| `void arsetrule(string_t name, ...)` | 设置规则；`name` 为字面量。 |
+| `void armessage(string_t type, ...)` | `type` 如 `"notify"`、`"mission"`。 |
+| `void arcutscene(string_t type, ...)` | 过场/镜头。 |
+| `void areffect(string_t effect, ...)` | 特效；参数以 `archon.js` 为准。 |
 | `void arexplosion(content_t team, int x, int y, float radius, float damage, bool air, bool ground, bool pierce, bool effect)` | 爆炸。 |
-| `null_t arfetch(char type, content_t team, null_t id, content_t category)` | 取实体/数据。 |
+| `null_t arfetch(string_t type, content_t team, null_t id, content_t category)` | 取实体/数据。 |
 | `void arsetprop(content_t prop, device target, null_t value)` | 设置属性。 |
-| `bool argetflag(char name)` | 读全局 flag。 |
-| `void arsetflag(char name, bool value)` | 写全局 flag。 |
-| `void arplaysound(char type, ...)` | `"global"` 或 `"positional"`。 |
-| `void armakemarker(char type, int id, int x, int y, bool replace)` | 创建 marker。 |
-| `void arsetmarker(char type, ...)` | 修改 marker。 |
+| `bool argetflag(string_t name)` | 读全局 flag。 |
+| `void arsetflag(string_t name, bool value)` | 写全局 flag。 |
+| `void arplaysound(string_t type, ...)` | `"global"` 或 `"positional"`。 |
+| `void armakemarker(string_t type, int id, int x, int y, bool replace)` | 创建 marker。 |
+| `void arsetmarker(string_t type, ...)` | 修改 marker。 |
 
 这些函数的字符串参数、变参个数和顺序由 `include/archon.js` 的处理器决定；本文只列稳定签名。目标 Mindustry 版本必须支持对应指令。
 
@@ -403,6 +403,29 @@ ERR_IN_PROGRESS ERR_OK ERR_MINE_NOT_FOUND
 |---|---|
 | `int add(int x, int y)` | 返回 `x + y`；用于编译/调用测试，不是正式标准库。 |
 
+### 5.14 `string.h`
+
+```c
+#include <string.h>
+```
+
+| 签名 | 说明 |
+|---|---|
+| `struct string_view { null_t source; int base; int length; }` | 只读、带长度的字符视图。 |
+| `string_view sv_of_string(string_t s)` | 视图覆盖一个原生字符串；长度来自 `sensor s @size`。 |
+| `string_view sv_of_message(device m)` | 视图覆盖 message 建筑；长度来自 `sensor m @bufferSize`（不是 `@size`）。 |
+| `char sv_at(string_view v, int i)` | 读取第 `i` 个字符。 |
+| `int sv_len(string_view v)` | 视图长度。 |
+| `void sv_print(string_view v)` | 逐字符输出；需要 v150+。 |
+| `int strlen(const char* s)` | C 字符串长度（数到 NUL）。 |
+| `void strcpy(char* dst, const char* src)` | 复制到 `char` 缓冲区。 |
+| `void strcat(char* dst, const char* src)` | 追加到 `char` 缓冲区；调用者负责容量。 |
+| `int strcmp(const char* a, const char* b)` | 逐字符比较。 |
+| `string_view concat_to_message(device msg, string_t a, string_t b)` | 把 `a`、`b` 写入 message 并 flush，返回 message 的活视图；需要 v150+。 |
+| `void concat_print(device msg, string_t a, string_t b)` | v150 以下的纯输出拼接；不返回视图。 |
+
+`string_view` 是只读视图：没有指针算术、不能写入；message 被覆盖后旧视图内容会改变。需要稳定副本时复制到 `char[]` 缓冲区。`string_t` 与 `char*` 不隐式互转；`char*` 只指向真正的字符数组。
+
 ---
 
 ## 6. 与 C 标准库的关系
@@ -412,6 +435,7 @@ ERR_IN_PROGRESS ERR_OK ERR_MINE_NOT_FOUND
 - `memcpy`（内建）；
 - `sin`、`cos`、`tan`、`asin`、`acos`、`atan`、`ceil`、`floor`、`sqrt`、`pow`、`abs`（内建）；
 - `memset`、`memset_near`（`memory.h`，自定义实现）；
+- `strlen`、`strcpy`、`strcat`、`strcmp`（`string.h`，按 `char*` 实现，不是 `string_t`）；
 - `time()`（`time.h`，基于 `@time`）；
 - `errno`（`error.h`，实际是 `_errId` 宏）。
 
@@ -419,12 +443,11 @@ ERR_IN_PROGRESS ERR_OK ERR_MINE_NOT_FOUND
 
 - `printf`、`scanf`、`puts`、`getchar`；
 - `malloc`、`calloc`、`realloc`、`free`；
-- `strlen`、`strcpy`、`strcmp` 等 C 字符串函数；
 - `FILE`、`fopen`、文件/目录/网络 API；
 - `qsort`、`bsearch`、`atexit`、`exit`；
 - `setjmp`/`longjmp`、信号、线程。
 
-字符串直接交给 `print()`/`printchar()`/`format()` 或内置函数；不要按 `char *` 的 C 习惯使用。
+字符串值直接交给 `print()`/`printchar()`/`format()` 或内置函数；`string_t` 不是 `char*`。需要 C 字符缓冲区时使用 `char[]`/`char*`，需要只读字符串视图时使用 `include/string.h` 的 `string_view`。
 
 ---
 
@@ -437,7 +460,7 @@ ERR_IN_PROGRESS ERR_OK ERR_MINE_NOT_FOUND
 - `pdcreate`/`sdcreate` 的 size/id 当前要求整数常量。
 - `button.h` 的 `hasPressed` 有语法错误；用 `hasPressedDev`。
 - `archon.h`/`archon.js` 生成的指令依赖目标 Mindustry 版本；不同版本支持的动作/参数可能不同。
-- `format`、`unpackcolor` 等较新的指令需要相应版本；默认目标版本是 `154.3`。
+- `format`、`unpackcolor` 等较新的指令需要相应版本；`format` 和字符级的字符串操作要求 v150+，默认目标版本是 `154.3`。
 - 没有动态内存分配；数组大小、结构体布局和句柄表示在编译期确定。
 
-语言层的差异（`goto`、VLA、`char *`、`remote`、`byname`、`auto`、数组布局、`#pragma` 等）见 [DIFFERENCES_FROM_C99.md](DIFFERENCES_FROM_C99.md)。
+语言层的差异（`goto`、VLA、`char`/`string_t` 的拆分、`remote`、`byname`、`auto`、数组布局、`#pragma` 等）见 [DIFFERENCES_FROM_C99.md](DIFFERENCES_FROM_C99.md)。

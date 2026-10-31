@@ -9,8 +9,8 @@ int coreX, coreY;
 bool coreFound;
 device coreDevice;
 
-// Notice that pure strings are of 'char' type.
-void output(char info) {
+// Notice that pure strings are of 'string_t' type.
+void output(string_t info) {
     print(info);
     printflush(message1);
 }

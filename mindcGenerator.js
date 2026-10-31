@@ -3405,7 +3405,7 @@ export class CodeGenerator extends ASTVisitor {
 		`emitRuntimeStringConcat`, which is where a future run time version
 		belongs.
 		*/
-		const isStringType = t => !!t && t.name === 'char';
+		const isStringType = t => !!t && t.name === 'string_t';
 		if (node.operator === '+' && (isStringType(node.left?.dataType) || isStringType(node.right?.dataType))) {
 			const leftText = this.staticStringOf(node.left);
 			const rightText = this.staticStringOf(node.right);

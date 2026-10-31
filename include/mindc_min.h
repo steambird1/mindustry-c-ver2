@@ -11,6 +11,7 @@ Also used for linter; this assume that you have already ignored any error.
 #define auto
 #define persistent
 
+typedef const char* string_t;
 typedef unsigned int content_t;
 typedef unsigned int device;
 typedef unsigned int pdlist_t, sdlist_t;
@@ -20,19 +21,19 @@ extern const null_t null = 0;
 
 typedef content_t item_t, liquid_t, unit_t, block_t;
 
-void draw(char arg0,...);
+void draw(string_t arg0,...);
 void print(...);
 void printchar(...);
 void format(...);
 void drawflush(device arg0);
 void printflush(device arg0);
 device getlink(int arg0);
-void control(char arg0,device arg1,...);
-device radar(char arg0,char arg1,char arg2,char arg3,device arg4,int arg5);
+void control(string_t arg0,device arg1,...);
+device radar(string_t arg0,string_t arg1,string_t arg2,string_t arg3,device arg4,int arg5);
 null_t sensor(device arg0,content_t arg1);
 void set(...);
 void op(...);
-content_t lookup(char arg0,int arg1);
+content_t lookup(string_t arg0,int arg1);
 void wait(float arg0);
 void stop();
 void end();
@@ -41,7 +42,7 @@ null_t read(device source, null_t reference);
 void write(null_t value, device source, null_t reference);
 void ubind(content_t arg0);
 void ucontrol(...);
-device uradar(char arg0,char arg1,char arg2,char arg3,int arg4,int arg5);
+device uradar(string_t arg0,string_t arg1,string_t arg2,string_t arg3,int arg4,int arg5);
 int ulocate(...);
 float sin(float arg0);
 float cos(float arg0);
@@ -71,25 +72,25 @@ null_t sdread(device at, sdlist_t pdlist, int pos);
 void sdwrite(device at, sdlist_t pdlist, int pos, null_t data);
 
 // archon.h components
-content_t argetblock(char arg0,int arg1,int arg2);
-void arsetblock(char arg0,content_t arg1,int arg2,int arg3,content_t arg4,float arg5);
+content_t argetblock(string_t arg0,int arg1,int arg2);
+void arsetblock(string_t arg0,content_t arg1,int arg2,int arg3,content_t arg4,float arg5);
 device arspawn(content_t arg0,int arg1,int arg2,float arg3,content_t arg4);
-void arstatus(char type,...);
+void arstatus(string_t type,...);
 bool arweathersense(content_t arg0);
 void arweatherset(content_t arg0,bool arg1);
 void arspawnwave(int arg0,int arg1,bool arg2);
-void arsetrule(char name,...);
-void armessage(char type,...);
-void arcutscene(char type,...);
-void areffect(char arg0,...);
+void arsetrule(string_t name,...);
+void armessage(string_t type,...);
+void arcutscene(string_t type,...);
+void areffect(string_t arg0,...);
 void arexplosion(content_t team,int x,int y,float radius,float damage,bool air,bool gnd,bool pierce,bool effect);
-null_t arfetch(char type,content_t team,null_t id,content_t category);
+null_t arfetch(string_t type,content_t team,null_t id,content_t category);
 void arsetprop(content_t prop,device target,null_t value);
-bool argetflag(char name);
-void arsetflag(char name,bool value);
-void arplaysound(char arg0,...);
-void armakemarker(char arg0,int arg1,int arg2,int arg3,bool arg4);
-void arsetmarker(char arg0,...);
+bool argetflag(string_t name);
+void arsetflag(string_t name,bool value);
+void arplaysound(string_t arg0,...);
+void armakemarker(string_t arg0,int arg1,int arg2,int arg3,bool arg4);
+void arsetmarker(string_t arg0,...);
 
 #endif
 #endif

@@ -13,8 +13,8 @@
 
 | 命令（从 `testers/unit_tests` 执行） | 读哪个目录 | 当前结果 | 判定标准 |
 |---|---|---|---|
-| `node ..\tools\check.mjs` | `check/` | **203 passed, 0 failed**（139 shape assertions, 890 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
-| `node ..\tools\negative.mjs` | `negative/` | **64 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
+| `node ..\tools\check.mjs` | `check/` | **207 passed, 0 failed**（139 shape assertions, 910 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
+| `node ..\tools\negative.mjs` | `negative/` | **69 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
 | `node ..\tools\nomem.mjs` | `nomem/` | **7 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
 | `node ..\tools\loadorder.mjs` | 仓库根的 `mindc*.js` | **12 passed, 0 failed, 2 exempt** | 每个入口单独起一个 `node` 进程导入，不得有循环依赖 |
 | `node ..\tools\runall.mjs` | 14 个目录：`suite/` `mem/` `arr/` `arr2/` `ptr2/` `stack/` `tests/` `uc/` `cases/` `exttests/` `hdr/` `t/` `big/` `u/` | **267/275**（8 个已知坏例以 KNOWN-GAP 如实上报，不算失败） | 能编译、能跑完不崩；带 `EXPECT:` 的还比对输出 |
@@ -67,13 +67,13 @@
 
 ## 目录地图
 
-`testers/unit_tests/` 下共 **559 个 `.c`，全部有 runner**（203 + 10 + 64 + 7 + 275 = 559）：
+`testers/unit_tests/` 下共 **567 个 `.c`，全部有 runner**（207 + 10 + 69 + 7 + 275 = 568）：
 
 | 目录 | 文件数 | 谁来跑 |
 |---|---|---|
-| `check/` | 203 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
+| `check/` | 207 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
 | `t/` | 98 | `runall.mjs`（早期按主题分的用例，`2dc683e` 起纳入） |
-| `negative/` | 64 | `negative.mjs` |
+| `negative/` | 69 | `negative.mjs` |
 | `suite/` | 50 | `runall.mjs` |
 | `mem/` | 25 | `runall.mjs` |
 | `tests/` | 25 | `runall.mjs`（另有手工的 `batch.mjs [baseline]`） |
@@ -95,7 +95,7 @@
 
 ## check/ 的编号约定
 
-`check/` 用 `tNN_主题.c` 命名，**编号 1–190 已用满，没有空号**，下一个用例是 `t191`。
+`check/` 用 `tNN_主题.c` 命名，**编号 1–194 已用满，没有空号**，下一个用例是 `t195`。
 另有 13 个不带编号的（`m1`–`m3`、`n1`–`n2`、`rw1`–`rw2`、`seq1`、`memsp2`–`memsp3`），
 它们早于编号制，保留原名。
 
@@ -189,6 +189,10 @@
 | `t188` | **§7.17**：存储形状——static/persistent 的 embedded 数组、未初始化数组、未初始化 struct、普通全局变量；两次运行输出 `2 3 0 2 3 0 0 2 3 0 4 5 0 0` |
 | `t189` | **§7.17**：`extern` 显式初始化仍在本侧每次运行执行（`10 0`），无初始化器的 `extern` 不重置（下一次运行 `10 1`）；`// RUNS: 2` |
 | `t190` | **§7.17**：嵌套结构体初始化 `{{1,2},3}`；static 每次运行重置、persistent 跨运行累加；指针成员不置零、非指针成员正常置零 → `123 223 0 0 123 323 0 0` |
+| `t191` | **§7.18**：`char` 是数值/字符——`char c='A'`、`char[]="Hi"`、`char*` 指针算术、`sizeof("Hi")`、`sizeof(char)`；输出 `65 66 67 88 105 0 105 2 3 72 1 2` |
+| `t192` | **§7.18**：`string_t` + `string_view` + message 拼接——`@size` 与 `@bufferSize`、`concat_to_message`、`read(message1,i)`；输出 `5 104 101 6 5 hellohello10 104 111` |
+| `t193` | **§7.18**：`const char*` 上下文的字面量物化——赋值、函数参数、返回值；可写 `char[]` 仍通过 `char*` 修改；输出 `72 72 105` |
+| `t194` | **§7.18**：`include/string.h` 的 C 字符缓冲区函数——`strcat`、`strcpy`、`strlen`、`strcmp` 作用于真正的 `char*`；输出 `4 0 97 100` |
 
 设计背景见 `docs/PLAN_array_layout.md`。
 
@@ -201,7 +205,7 @@
 在它想守住的那条检查被删掉之后**依然会通过**——这正是删掉的检查不被发现的方式。
 所以每条 `MESSAGE:` 都必须匹配到编译器真实给出的某一条错误。
 
-**负债已清零**（`1584cf3`）。`negative/` 的 64 个用例全部带 `MESSAGE:`，没有
+**负债已清零**（`1584cf3`）。`negative/` 的 69 个用例全部带 `MESSAGE:`，没有
 `KNOWN-GAP`：原先那两个（`ovl_auto.c`、`ovl_pragma.c`）已删除——自动模板 / 重载
 已经实现，`check/t109`、`check/t110` 用正向用例断言同一事实。
 `remote_as_value_refused.c`（§7.3）是第一个真正用上 `NOT-MESSAGE:` 的用例，

@@ -23,6 +23,7 @@ Mindustry-C 不需要安装。你只需要下载 `main.html` 和所有 JavaScrip
 - C 核心：函数、结构体、指针、数组、`typedef`、
   `for`/`while`/`do-while`/`switch`、`break`/`continue`/`return`。
 - C99 便利：`//` 注释、`bool`/`true`/`false`、`inline`、`for` 初始化声明。
+- `char` 与原生字符串分离：`char` 是 1-cell 字符/数值，`char*` 是普通指针、`char[]` 是 NUL 结尾的 C 数组；`string_t` 是 1-cell 的 Mindustry 字符串。`#include <string.h>` 提供只读 `string_view` 和 message 拼接（字符级操作要求 v150+）。
 - 存储期：自动局部变量按调用；`static` 在本次运行内；`persistent` 跨处理器重启；普通文件作用域变量每次运行重置。
 - 预处理器：对象宏和函数宏、`#undef`、`#if`/`#elif`/`#else`/`#endif`、
   `#ifdef`/`#ifndef`、`#include`、`#pragma`。
@@ -79,7 +80,7 @@ Mindustry-C 不需要安装。你只需要下载 `main.html` 和所有 JavaScrip
 ### 与 C/C++ 不同
 
 - 空初始化列表不是可靠写法。`int a[] = {1, 2, 3};` 是支持的：最后一维由初始化列表推导。
-- 字符串字面量是 `char` 值，不是 `char *`；没有 C 字符串函数。
+- 字符串字面量是原生 `string_t` 值。`char` 是普通的 1-cell 字符/数值；`char*` 是真正的字符数组指针，`const char*` 可以指向字面量。没有 C 字符串函数。
 - 完整差异见 [DIFFERENCES_FROM_C99.md](../DIFFERENCES_FROM_C99.md)。
 
 ## 旧文档

@@ -53,7 +53,7 @@ int coreX, coreY, coreFound;
 device coreDevice;
 near int *phaseAccess;
 
-void output(char info) {
+void output(string_t info) {
     print(info);
     printflush(message1);
 }

@@ -24,7 +24,7 @@ bool terminate() {
     return !sensor(switch1, @enabled);
 }
 
-void output(device target, char info) {
+void output(device target, string_t info) {
     print(info);
     printflush(target);
 }

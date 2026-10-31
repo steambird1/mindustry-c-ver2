@@ -24,7 +24,7 @@ int vaultX, vaultY;
 int coreX, coreY, core_found;
 device core_device;
 
-void output(char info) {
+void output(string_t info) {
     print(info);
     printflush(message1);
 }

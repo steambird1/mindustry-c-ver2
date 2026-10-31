@@ -38,13 +38,13 @@ void main() {
 |---|---|
 | `goto` / 标签 | **不支持**。词法分析能识别 `goto`，但语法分析会拒绝。需要提前退出时用 `break`、`continue`、`return` 或重构控制流。 |
 | 变长数组（VLA） | **不支持**。数组维度必须是编译期常量；`int a[n];` 会报 “Variable length arrays are not supported”。 |
-| C 字符串 / `char *` | 字符串字面量是 `char`（Mindustry 字符串），不是 `char *`。`char *p = "hi";` 会被拒绝；字符串直接传给 `print()` 或作为内置函数的参数。 |
+| C 字符串 / `char *` | 字符串字面量是 `string_t`（Mindustry 原生字符串值），不是 `char *`。`const char* p = "hi";` 可以指向只读字符数组；`char* p = "hi";` 会被拒绝；需要可写副本时写 `char a[] = "hi";`。 |
 | 用户自定义可变参数函数 | **不支持**。`print`、`draw` 等内置函数和扩展可以变参；普通函数参数表必须固定。 |
-| `printf` / `scanf` / `FILE` / `malloc` / `free` / `str*` 等 | 不提供；见 [STANDARD_LIBRARY.md](STANDARD_LIBRARY.md) 的“C 标准库函数”一节。 |
+| `printf` / `scanf` / `FILE` / `malloc` / `free` / `str*` 等 | `printf`、`scanf`、`FILE`、动态分配不提供；`strlen`/`strcpy`/`strcat`/`strcmp` 由 `include/string.h` 按 `char*` 提供。见 [STANDARD_LIBRARY.md](STANDARD_LIBRARY.md)。 |
 | `setjmp` / `longjmp`、信号、线程、文件 | 不提供。 |
 | 联合体（`union`） | 语法上可以解析，但当前代码生成**不保证** C 的成员重叠语义；不要依赖 `u.a` 写入后从 `u.b` 读出同一个值。 |
 | 位域（bit-field） | 语法上可以解析，但位宽当前**未用于打包**；每个成员实际仍按普通单元处理，`a : 3` 不会自动掩码到 3 位。 |
-| `char` 作为小整数 | `char` 在本实现里更接近“字符/字符串值”；`char c = 65;` 可能被拒绝，必要时写 `(char)65`。 |
+| `char` 作为小整数 | **已支持**：`char c = 'A';` 和 `char c = 65;` 都得到 65，`char` 通常参与数值运算。没有 8 位宽度、回绕或有符号性；所有标量都是 1 个 cell。 |
 | `auto` 类型推断 | 不支持 `auto x = ...;`。`auto` 是限定符/存储类，只用于 `auto device`、`auto` 参数/结构体成员等，见 §6。 |
 | C 的独立编译/链接 | 没有。整个程序是一个翻译单元；`extern` 不是 C 的外部链接，见 §5。 |
 | 空初始化列表等边界形式 | 行为以当前编译器为准；数组初始化建议显式写出长度或初值。 |
@@ -57,12 +57,14 @@ void main() {
 
 ### 3.1 基本类型
 
-`int`、`char`、`float`、`double`、`long`、`short`、`signed`、`unsigned`、`bool`、`void` 都可以作为类型名。所有**基本标量**在 Mindustry 里都占 1 个单元/寄存器；不要按宿主机的 32/64 位去理解它们。
+`int`、`char`、`float`、`double`、`long`、`short`、`signed`、`unsigned`、`bool`、`void` 都可以作为类型名。所有**基本标量**在 Mindustry 里都占 1 个单元/寄存器；不要按宿主机的 32/64 位去理解它们。`char` 是普通的 1-cell 数值/字符类型；原生 Mindustry 字符串是独立的 `string_t`。
 
 ```c
 int a = 1;
+char c = 'A';       // 65
+string_t s = "hi";  // 1-cell Mindustry string
 float b = 2.5;
-double c = 3.5;
+double d = 3.5;
 bool ok = true;
 ```
 
@@ -74,8 +76,9 @@ bool ok = true;
 | `content_t` | 1 个寄存器 | 内容（物品、液体、单位、方块）的句柄。 |
 | `item_t`、`liquid_t`、`unit_t`、`block_t` | 1 个寄存器 | 更具体的内容类型；可转换到 `content_t`。 |
 | `null_t` | 1 个寄存器 | 可容纳任意值，`null` 的类型；`sensor()` 返回它。 |
-| `char` | 1 个寄存器 | 字符或 Mindustry 字符串。字符串字面量不是 `char *`。 |
-| 指针 | 2 个寄存器 | 普通内存指针：`block` + `position`。 |
+| `string_t` | 1 个寄存器 | 原生 Mindustry 字符串值；字符串字面量是 `string_t`。支持 `@size`、`s[i]`、`print`（索引/长度需要 v150+）。 |
+| `char` | 1 个寄存器 | 普通字符/数值；`'A'` 是 65。`char[]` 是 C 数值数组，`char*` 是普通指针。 |
+| 指针 | 2 个寄存器 | 普通内存指针：`block` + `position`。`char*` 与 `int*` 表示相同。 |
 | `*byname` 指针 | 1 个寄存器 | 名字指针，指向寄存器/变量名，见 §8。 |
 | 数组句柄 | 1 个寄存器 | 无地址数组、remote 数组、embedded 数组等的打包句柄，见 §7。 |
 | 数组（内存布局） | 2 个寄存器 | 块号 + 偏移；元素本身在内存里。 |
@@ -102,6 +105,8 @@ print(lenof(mem));    // 4
 ```
 
 `sizeof`/`widthof` 是编译期量；`lenof` 对开放句柄可能在运行时从打包句柄里取长度。
+
+`sizeof("hi")` 是 3（C 字符数组，含 NUL），`sizeof(char)` 是 1，`sizeof(string_t)` 是 1（原生字符串值）。`char*`/`const char*` 的 `widthof` 是 2。
 
 ---
 
@@ -277,6 +282,30 @@ void h(auto int s[4]); // 每个表示一个版本
 
 ---
 
+### 7.5 `string_t`、`char` 和字符串拼接
+
+Mindustry 的字符串是**值**，不是 C 的字符数组；本实现把两者分开：
+
+```c
+string_t s = "hello";   // 1 个 cell 的原生字符串
+char c = 'A';           // 65，普通字符/数值
+char a[] = "hello";     // 6 个 cell：5 个字符 + NUL，可写
+char* p = a;            // 和 int* 相同的普通指针
+const char* q = "hi";   // 只读字符数组；字面量被物化一次
+```
+
+- `char` 是 1-cell 数值类型；`'A'` 是 65，`char c = 65` 可用。没有 8 位宽度/回绕/有符号性。
+- `char[]` 是 C 数值数组；`char a[] = "hi"` 展开为 `{'h','i',0}`，所以长度为 3。
+- `char*` 是真正的块+偏移指针，支持取地址、指针算术、`p[i]`、`*p` 和写入。
+- 字符串字面量默认是 `string_t`；在 `const char*` 上下文中会物化为只读 `const char[]`，因此 `const char* p = "hi"`、函数参数和 `return "hi"` 都可用。
+- `char* p = "hi"` 被拒绝：字面量只读；需要可写副本时写 `char a[] = "hi"`。`string_t` 和 `char*` 不隐式互转；从字符串值取字符用 `s[i]`，从字符串值复制到 char 缓冲区用 `string_view`/`to_chars`（见 `include/string.h`）。
+- `sizeof("hi")` 是 3（字符数组），`sizeof(string_t)` 是 1；`widthof` 对应表示宽度。
+- 字符串拼接没有 `+` 之外的隐式构造：`string_t + string_t` 只允许两个字面量在编译期合并。运行时拼接必须显式指定目的地：`char` 缓冲区（`strcpy`/`strcat`，全版本）或 message 建筑（`concat_to_message`）。
+- `concat_to_message(msg, a, b)` 把字符逐字写入 message 建筑并 flush，返回 `string_view`。message 的长度来自 `sensor msg @bufferSize`，**不是** `@size`；message 文本没有 NUL，视图是只读、带长度的，而且再次覆盖 message 后旧视图内容会改变。需要稳定副本时复制到 char 缓冲区。
+- 字符串索引 `s[i]`、`@size`、`@bufferSize`、从字符串/message `read`、`printchar`、`format` 和 `string_view` 的字符级操作都要求 **v150+**；低版本会编译期拒绝，或只提供 `concat_print` 这种纯输出拼接。
+
+---
+
 ## 8. 指针、地址和 `byname`
 
 ### 8.1 两种指针表示
@@ -447,7 +476,8 @@ asm("print ${x}");
 
 写移植自 C99 的程序时，先检查：
 
-- 有没有 `goto`、VLA、`char *` 字符串、`printf`/`malloc`/文件等宿主机功能？
+- 有没有 `goto`、VLA、`printf`/`malloc`/文件等宿主机功能？
+- 字符串是否仍按 `char*` 处理？`string_t` 是原生字符串值；`char*` 只用于真正的字符数组/缓冲区，`const char*` 可以指向字面量。
 - 数组长度是否编译期常量？数组是否需要在寄存器/内存/远程之间传递？
 - 指针是否需要做算术？如果需要，不能用 `byname`/名字指针。
 - 是否跨处理器访问？需要 `remote`、对端变量和一致的数组布局。

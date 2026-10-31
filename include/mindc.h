@@ -9,6 +9,7 @@ Standard header for Mindustry-C. This is used for linter.
 
 #define near
 
+typedef const char* string_t;
 typedef unsigned int content_t;
 typedef unsigned int device;
 typedef volatile void* null_t;

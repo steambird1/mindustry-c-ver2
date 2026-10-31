@@ -329,8 +329,7 @@ export class Processor {
 				const target = this.nameOfToken(args[0]);
 				const device = a(1);
 				const index = args[2];
-				if (device && isProcessor(device) && device.kind === 'processor') {
-					/*
+				if (device && isProcessor(device) && device.kind === 'processor') {					/*
 					`read r @this <name>` : a DYNAMICALLY named register. The
 					operand names another register whose VALUE is the name to
 					read -- so the name has to be resolved twice.
@@ -353,6 +352,11 @@ export class Processor {
 					const i = Math.trunc(this.toNumber(a(2)));
 					const code = (i >= 0 && i < device.length) ? device.charCodeAt(i) : 0;
 					this.writeRegister(target, code);
+				} else if (device && device.kind === 'device' && device.type === '@message') {
+					/* `read r message1 i`: the message board's text is indexed like a string. */
+					const text = String(device.text ?? '');
+					const i = Math.trunc(this.toNumber(a(2)));
+					this.writeRegister(target, (i >= 0 && i < text.length) ? text.charCodeAt(i) : 0);
 				} else {
 					this.writeRegister(target, device.cells[this.cell(device, a(2))]);
 				}
@@ -415,9 +419,27 @@ export class Processor {
 				this.buffer += this.format(a(0)) + '\n';
 				next(); return;
 			}
+			case 'printchar': {
+				const code = Math.trunc(this.toNumber(a(0)));
+				this.buffer += Number.isFinite(code) ? String.fromCharCode(code) : '';
+				next(); return;
+			}
+			case 'format': {
+				const value = this.format(a(0));
+				if (/\{\d+\}/.test(this.buffer)) {
+					this.buffer = this.buffer.replace(/\{\d+\}/, value);
+				} else {
+					this.buffer += value;
+				}
+				next(); return;
+			}
 			case 'printflush': {
 				const device = a(0);
-				this.lines.push({ target: device ? device.name : String(args[0].raw), text: this.buffer });
+				const text = this.buffer;
+				if (device && device.kind === 'device' && device.type === '@message') {
+					device.text = text;
+				}
+				this.lines.push({ target: device ? device.name : String(args[0].raw), text });
 				this.buffer = '';
 				next(); return;
 			}
@@ -591,9 +613,21 @@ export class Processor {
 			if (what === '@id') return ID_OF.get(device) ?? null;
 			return null;
 		}
+		if (typeof device === 'string') {
+			// A native string value: `sensor s @size` is its character count.
+			if (what === '@size') return device.length;
+			return null;
+		}
 		if (device && device.kind === 'device') {
 			if (what === '@type') return device.type;
 			if (what === '@name') return device.name;
+			/*
+			A message board's text length is `@bufferSize` (not `@size`); it
+			is what makes the concatenation result a length-bounded view.
+			*/
+			if (what === '@bufferSize' && device.type === '@message') {
+				return String(device.text ?? '').length;
+			}
 			return null;
 		}
 		return null;
