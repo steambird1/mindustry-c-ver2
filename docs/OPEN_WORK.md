@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 188 passed, 0 failed (118 shape assertions, 827 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 189 passed, 0 failed (123 shape assertions, 832 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 64 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
@@ -65,6 +65,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | `do ... while` (§3.11) | **done** — `4f44071`; parser/semantic/generator + deterministic optimization | §7.9, §3.11 |
 | `switch ... case` (§3.12) | **done** — `eaa54f6`; fallthrough + comparison dispatch, break/continue contexts | §7.10, §3.12 |
 | constant switch folding (§7.11) | **done** — `e7a89be`; a constant discriminant is replaced by the taken path | §7.11 |
+| switch-aware loop simulation (§7.12) | **done** — `bb6bcd3`; a `switch (i)` selects its taken case per simulation round | §7.12 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -799,21 +800,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 544 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 545 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 544 under `testers/unit_tests`, every one of
+bring the count to 545 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 188 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `check.mjs` | 189 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
 | `negative.mjs` | 64 | `negative/` |
 | `nomem.mjs` | 7 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-188 + 10 + 64 + 7 + 275 = 544. The caveat that replaces "no runner" is weaker but real:
+189 + 10 + 64 + 7 + 275 = 545. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -874,7 +875,7 @@ Every item here is now fixed or closed; each points at the record and the case t
 ## 7. Decisions on the defects in §3 and §6
 
 Recorded so these are not re-opened, in the order they were given. **§1, §2 and §3 are
-closed**: their defects have decisions either in their own §3 record or below; §7.11 is the last one added.
+closed**: their defects have decisions either in their own §3 record or below; §7.12 is the last one added.
 
 ### 7.1 `'x'` is an `int` holding its ASCII value
 
@@ -1189,4 +1190,46 @@ Cases: `check/t174_switch_const_fold.c` (a top-level constant switch folds
 to `print 5`; `while ... switch(0)` folds to `print 3`; `EMIT-NOT: op
 lessThan`) and `check/t175_switch_no_fold.c` (a conditional break and a flat
 declaration keep the switch; a declaration inside a case block folds;
-outputs `1 5 7`).
+outputs `1 5 7`; §7.12 extended it to `1 5 7 3`).
+
+### 7.12 Switch-aware loop simulation
+
+**Done in `bb6bcd3`.** `switch (i)` can now be optimized per simulation
+round.
+
+`analyzeSwitchStatement` first tries the constant fold; while a loop is being
+simulated it then calls `simulateSwitch` (non-mutating), which:
+
+- evaluates the discriminant in the current round (the loop variable and every
+  other loop-written variable have been seeded with their pre-loop constants);
+- picks the matching `CaseClause`, else `default`;
+- analyses only the statements from that label onward, stopping at a top-level
+  `break` that belongs to the switch (fallthrough is therefore preserved).
+
+The safe subset is `canSimulateSwitch`: no declaration at the switch's flat
+level and no nested loop/switch, `break`, `continue` or `return` inside a case
+statement. `containsUnsafeSwitch` keeps a loop containing anything else out of
+the deterministic optimizer as before; the `do-while` and endless-loop
+optimizers remain guarded by `containsSwitch`.
+
+Because a switch body is analysed conservatively as "unsure", it drops the
+constants of every variable it writes. `analyzeWhileStatement` therefore
+snapshots those pre-loop values (only loop-written names) before the body
+analysis, and `simulateLoop` seeds them (and lifts their `canOptimize` mark)
+for the simulation. A switch may step the loop variable by a different amount
+on each case, so these loops are simulated with `MAX_OPTIMIZE_ITERATIONS` and
+stop on the test rather than on a static update step.
+
+Two pre-existing correctness problems surfaced with the new guard:
+
+- a condition that evaluated from a stale loop-written value used to turn one
+  branch of an enclosing `unsure` region into the definite path
+  (`switch (i) { case 1: if (i == 1) q = q + 1; }` folded `q` to 1). An
+  enclosing unsure region now stays unsure for `if` branches;
+- a write in an unsure region is never folded; it invalidates the stale
+  constant instead.
+
+Cases: `check/t176_switch_loop_sim.c` (uniform step, non-uniform step, and a
+fallthrough accumulator: outputs `3 3 4 221`; `EMIT-NOT: op lessThan`) and
+`check/t175_switch_no_fold.c` (now also runs the conditional-break switch
+inside a loop: `1 5 7 3`).
