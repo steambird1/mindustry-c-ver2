@@ -1459,9 +1459,14 @@ export class Lexer {
         const startLocation = this.getLocation();
         let value = this.sourceCode[this.position];
         
-        // 检查双字符运算符
+        // 先检查三字符运算符（<<=、>>=），再检查双字符
+        const threeCharOp = value + (this.peek() || '') + (this.peek(2) || '');
         const twoCharOp = value + (this.peek() || '');
-        if (OPERATORS[twoCharOp]) {
+        if (OPERATORS[threeCharOp]) {
+            value = threeCharOp;
+            this.advance(); // 额外前进两次
+            this.advance();
+        } else if (OPERATORS[twoCharOp]) {
             value = twoCharOp;
             this.advance(); // 额外前进一次
         }

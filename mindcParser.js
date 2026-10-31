@@ -1971,7 +1971,7 @@ export class Parser {
     }
 
     parseRelationalExpression() {
-        let left = this.parseAdditiveExpression();
+        let left = this.parseShiftExpression();
         if (!left) return null;
 
         while (
@@ -1981,7 +1981,7 @@ export class Parser {
             this.matchToken(TokenType.GREATER_EQUAL)
         ) {
             const operatorToken = this.consumeToken();
-            const right = this.parseAdditiveExpression();
+            const right = this.parseShiftExpression();
             
             if (!right) {
                 this.addError('Expected expression after relational operator');
@@ -1991,6 +1991,36 @@ export class Parser {
             const binaryExpr = ASTBuilder.binaryExpression(operatorToken.value, left, right);
 			left.parent = binaryExpr;
 			right.parent = binaryExpr;
+            binaryExpr.location = left.location;
+            left = binaryExpr;
+        }
+
+        return left;
+    }
+
+    /**
+     * C's shift level: between additive and relational.
+     *
+     * `a + b << c` parses as `(a + b) << c`; `a << b < c` parses as
+     * `(a << b) < c`. Without this level the lexer produced LEFT_SHIFT /
+     * RIGHT_SHIFT tokens and the expression parser rejected them.
+     */
+    parseShiftExpression() {
+        let left = this.parseAdditiveExpression();
+        if (!left) return null;
+
+        while (this.matchToken(TokenType.LEFT_SHIFT) || this.matchToken(TokenType.RIGHT_SHIFT)) {
+            const operatorToken = this.consumeToken();
+            const right = this.parseAdditiveExpression();
+
+            if (!right) {
+                this.addError('Expected expression after shift operator');
+                break;
+            }
+
+            const binaryExpr = ASTBuilder.binaryExpression(operatorToken.value, left, right);
+            left.parent = binaryExpr;
+            right.parent = binaryExpr;
             binaryExpr.location = left.location;
             left = binaryExpr;
         }
