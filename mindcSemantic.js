@@ -1220,6 +1220,8 @@ export class SemanticAnalyzer extends ASTVisitor {
         const builtins = [
             { name: 'draw', returnType: 'void', parameters: ['string_t'], hasVarArgs: true }, // 操作名称 + 变长参数 (Actually, need further judgment)
 			{ name: 'print', returnType: 'void', parameters: [], hasVarArgs: true }, // 变长参数 (Actually, accepting multiple operations)
+			{ name: 'printf', returnType: 'void', parameters: [], hasVarArgs: true },
+			{ name: 'assert', returnType: 'void', parameters: [], hasVarArgs: true },
 			{ name: 'printchar', returnType: 'void', parameters: [], hasVarArgs: true }, 
 			{ name: 'format', returnType: 'void', parameters: [], hasVarArgs: true }, 
 			{ name: 'drawflush', returnType: 'void', parameters: ['device'] },

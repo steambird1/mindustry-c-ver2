@@ -366,6 +366,7 @@ export class Lexer {
 		stays the same.
 		*/
 		this.legacyCharString = options.legacyCharString === true;
+		this.fileName = options.fileName ?? '<source>';
 		this.lexerOptions = { ...options };
         
         // 预处理器状态
@@ -1391,6 +1392,15 @@ export class Lexer {
         }
 
         // Added on my own: check if it is a macro
+        if (value === '__LINE__') {
+            this.tokens.push(new Token(TokenType.NUMBER, String(startLocation.line), startLocation));
+            return;
+        }
+        if (value === '__FILE__') {
+            const file = this.fileName ?? '<source>';
+            this.tokens.push(new Token(TokenType.STRING, file, startLocation, JSON.stringify(file)));
+            return;
+        }
         if (this.macros[value]) {
             // read braces, etc.
             let repls = {...this.macros};

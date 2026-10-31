@@ -2651,7 +2651,7 @@ export class Parser {
 			'draw', 'print', 'drawflush', 'printflush', 'getlink', 'ceil', 'floor', 'sqrt', 'rand', 'abs', 'memcpy', 'pow',
 			'control', 'radar', 'sensor', 'set', 'op', 'lookup', 'ubind', 'ulocate', 'ucontrol', 'uradar', 'min', 'max',
 			'wait', 'stop', 'end', 'jump', 'read', 'write', 'asm', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'adiff',
-			'memsp', 'printchar', 'format', 'stricteq', 'byname',
+			'memsp', 'printchar', 'format', 'stricteq', 'byname', 'printf', 'assert',
 			/*
 			`vecalias` / `veccpy` are intrinsics, not functions: they have no
 			body to call, and their array arguments are laid out by the generator

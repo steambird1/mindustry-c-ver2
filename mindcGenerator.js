@@ -5747,6 +5747,85 @@ export class CodeGenerator extends ASTVisitor {
 				});
 				return result;
 			},
+			printf: ast => {
+				/*
+				`printf` is a compiler builtin because ordinary user functions
+				cannot be variadic. The format must be a literal: it is parsed
+				here, turned into one `print` with `{n}` placeholders, and each
+				argument is emitted as a `format`.
+				*/
+				const result = new Instruction();
+				const fmtNode = ast.arguments?.[0];
+				const values = ast.arguments?.slice(1) ?? [];
+				if (!fmtNode || fmtNode.type !== 'StringLiteral') {
+					this.addError('printf format must be a string literal', ast.location);
+					return result;
+				}
+				const format = String(fmtNode.value ?? '');
+				let text = '';
+				let valueIndex = 0;
+				const formats = [];
+				for (let i = 0; i < format.length;) {
+					const ch = format[i++];
+					if (ch !== '%') { text += ch; continue; }
+					if (format[i] === '%') { text += '%'; i++; continue; }
+					// Skip optional flags/width/precision; they are accepted but
+					// not applied yet (mlog format has no field width).
+					while (i < format.length && /[-+ 0#]/.test(format[i])) i++;
+					while (i < format.length && /[0-9]/.test(format[i])) i++;
+					if (format[i] === '.') {
+						i++;
+						while (i < format.length && /[0-9]/.test(format[i])) i++;
+					}
+					const conversion = format[i++] ?? '';
+					if (!['d', 'i', 'u', 'f', 's'].includes(conversion)) {
+						this.addError(`Unsupported printf conversion '%${conversion}'`, ast.location);
+						return result;
+					}
+					if (valueIndex >= values.length) {
+						this.addError('printf has fewer arguments than its format needs', ast.location);
+						return result;
+					}
+					const arg = values[valueIndex++];
+					const printed = ['d', 'i', 'u'].includes(conversion)
+						? this.implicitToNumeric(arg)
+						: this.visitAndRead(arg);
+					formats.push({ instruction: printed, name: printed.instructionReturn });
+					text += `{${formats.length - 1}}`;
+				}
+				if (valueIndex < values.length) {
+					this.addError('printf has more arguments than its format uses', ast.location);
+					return result;
+				}
+				if (text.length > 0) {
+					result.concat(InstructionBuilder.print(JSON.stringify(text)));
+				}
+				formats.forEach(entry => {
+					result.concat(entry.instruction);
+					result.concat(InstructionBuilder.format(entry.name));
+				});
+				return result;
+			},
+			assert: ast => {
+				const condition = ast.arguments?.[0];
+				if (!condition || ast.arguments.length !== 1) {
+					this.addError('assert() takes exactly one expression', ast.location);
+					return new Instruction();
+				}
+				const tester = this.visitAndRead(condition);
+				const jumper = InstructionBuilder.jump('{assert_ok}', 'notEqual',
+					tester.instructionReturn, 'false');
+				const line = ast.location?.line ?? 0;
+				const message = `assertion failed at line ${line}`;
+				const result = new Instruction([
+					tester,
+					jumper,
+					InstructionBuilder.print(JSON.stringify(message)),
+					InstructionBuilder.stop(),
+					new InstructionReferrer(jumper, 'assert_ok')
+				]);
+				return result;
+			},
 			printflush: ast => {
 				return packer(`printflush`, ast.arguments);
 			},
