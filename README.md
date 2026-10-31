@@ -67,6 +67,9 @@ For grammar introduction (about the features unique to Mindustry-C) and examples
   Name;` (anonymous, tagged, self-referential), short-circuit `&&`/`||` and
   single-branch `?:`, `printf` (literal format; `%d/%i/%u/%f/%s/%%`),
   `assert`, and `<stdbool.h>`/`<stdio.h>`/`<assert.h>` compatibility headers.
+- Data layout: multi-member `union` overlays members in memory; unsigned and
+  signed bitfields pack LSB-first into 52-bit cells in both register and memory
+  structs.
 - C characters and native strings are separate: `char` is a one-cell
   character/number with real `char*` pointers and NUL-terminated arrays;
   `string_t` is the one-cell Mindustry string value. `#include <string.h>`

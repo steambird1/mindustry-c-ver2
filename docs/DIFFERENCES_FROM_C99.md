@@ -42,8 +42,8 @@ void main() {
 | 用户自定义可变参数函数 | **不支持**。`print`、`draw` 等内置函数和扩展可以变参；普通函数参数表必须固定。 |
 | `printf` / `scanf` / `FILE` / `malloc` / `free` / `str*` 等 | `printf` 是编译器内建（格式串必须是字面量；支持 `%d/%i/%u/%f/%s/%%`）；`assert` 也是内建；`scanf`、`FILE`、动态分配不提供；`strlen`/`strcpy`/`strcat`/`strcmp` 由 `include/string.h` 按 `char*` 提供。见 [STANDARD_LIBRARY.md](STANDARD_LIBRARY.md)。 |
 | `setjmp` / `longjmp`、信号、线程、文件 | 不提供。 |
-| 联合体（`union`） | 语法上可以解析，但当前代码生成**不保证** C 的成员重叠语义；不要依赖 `u.a` 写入后从 `u.b` 读出同一个值。 |
-| 位域（bit-field） | 语法上可以解析，但位宽当前**未用于打包**；每个成员实际仍按普通单元处理，`a : 3` 不会自动掩码到 3 位。 |
+| 联合体（`union`） | **布局已支持**：所有成员 offset 0、大小为最大成员；多成员 union 目前强制放内存。跨不同类型读取是**数值别名**，不是 C 的字节级 bitcast。union 内位域暂不支持。 |
+| 位域（bit-field） | **unsigned/signed 已支持**：按声明顺序 LSB-first 打包，每 cell 最多 52 bit；写入按宽度掩码，signed 读取做符号扩展。`&bitfield` 会被拒绝；内存结构体的位域初始化列表暂不支持。 |
 | `char` 作为小整数 | **已支持**：`char c = 'A';` 和 `char c = 65;` 都得到 65，`char` 通常参与数值运算。没有 8 位宽度、回绕或有符号性；所有标量都是 1 个 cell。 |
 | `auto` 类型推断 | 不支持 `auto x = ...;`。`auto` 是限定符/存储类，只用于 `auto device`、`auto` 参数/结构体成员等，见 §6。 |
 | C 的独立编译/链接 | 没有。整个程序是一个翻译单元；`extern` 不是 C 的外部链接，见 §5。 |
@@ -51,7 +51,7 @@ void main() {
 
 `int a[] = {1, 2, 3};` 现在可以从初始化列表推导最后一维；不带初始化列表的 `int a[];` 不是数组，而是“以后绑定到某个数组”的一字句柄，见 §7.3。
 
-`enum`（含匿名/typedef）和 `typedef struct { ... } Name;` 现在受支持；`union`/位域仍只有语法解析，语义见上表。
+`enum`（含匿名/typedef）和 `typedef struct { ... } Name;` 现在受支持；`union` 是多成员内存重叠布局，位域是 52-bit 打包布局，具体限制见上表。
 
 ---
 
@@ -397,6 +397,8 @@ remote int *p = remote(processor1, qq);      // 指针本身在对端
 - 递归函数会被特殊处理：函数内所有符号（含临时量）放进内存，栈在 memory block 里走；栈溢出默认会写错误并停止，可用 `#pragma stackcheck(fn)` 接管。
 - 函数调用、数组句柄、结构体返回值都可能生成 helper；`auto` 参数/结构体模板就是为了让这些表示在编译期确定。
 - 没有动态分配；数组/结构体的存储是编译期确定的。
+- `union`：所有成员从 offset 0 开始，大小取最大成员；多成员 union 目前强制放内存。跨类型读取是数值别名，不是 C 的字节级 bitcast。
+- 位域：连续位域按声明顺序 LSB-first 打包，每个 storage cell 最多 52 bit；寄存器结构体和内存结构体都支持。写入按位宽掩码，signed 读取做符号扩展；`&bitfield` 被拒绝。内存结构体的位域初始化列表暂不支持，逐字段赋值可用。
 - 复合字面量在现有头文件中写作 `(type)({ ... })`，例如 `(mOpRet_t)({true, OP_BIND})`；不要假定 C99 的 `(type){ ... }` 写法一定可用。
 
 ---
@@ -489,7 +491,7 @@ asm("print ${x}");
 - 是否跨处理器访问？需要 `remote`、对端变量和一致的数组布局。
 - 是否有递归/大数组/大结构体？确认链接了足够的 memory cell/bank。
 - 是否需要 `auto` 参数/结构体模板？启用 `#pragma overload(auto)` 并考虑 `#pragma noinline` 检查版本。
-- 是否用了 `union`/位域？当前不要依赖 C 的重叠/打包语义。
+- 是否用了 `union`/位域？`union` 多成员走内存；位域每 cell 最多 52 bit，`&bitfield` 不可用，union 内位域暂不支持。
 - 是否需要 `#pragma` 控制数组布局、指针表示、栈检查或 switch 跳转表？
 
 标准库函数和头文件见 [STANDARD_LIBRARY.md](STANDARD_LIBRARY.md)。

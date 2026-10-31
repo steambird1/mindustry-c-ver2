@@ -1515,6 +1515,12 @@ export class SemanticAnalyzer extends ASTVisitor {
         // 处理成员
         let currentOffset = 0;
         let maxMemberSize = 0;
+        const members = [];
+        const bitfieldStorages = [];
+        let bitGroupStart = -1;
+        let bitGroupUsed = 0;
+        let bitGroupIndex = 0;
+        const intType = this.typeTable.get('int');
         
         if (defNode.members && defNode.members.length > 0) {
             defNode.members.forEach(member => {
@@ -1530,20 +1536,87 @@ export class SemanticAnalyzer extends ASTVisitor {
                 
                 // 计算成员大小（所有基本类型大小为1）
                 const memberSize = this.calculateTypeSize(memberType);
+
+                /*
+                Bitfields: unsigned, 1..52 bits, packed LSB-first into one cell.
+                A zero-width field ends the current storage cell; more than 52
+                bits starts a new one. The cell itself is a synthetic member so
+                copy/zero/serialisation see the raw storage, while the visible
+                bitfield members carry storageName/bitOffset/bitWidth.
+                */
+                if (member.bitField) {
+                    if (isUnion) {
+                        this.addError(`Bitfields in a union are not supported yet`, member.location);
+                        return;
+                    }
+                    if (!(this.isIntegerType(memberType.name) || memberType.name === 'bool')) {
+                        this.addError(`A bitfield needs an integer type`, member.location);
+                        return;
+                    }
+                    const width = this.constantCaseValue(member.bitField);
+                    if (!Number.isInteger(width) || width < 0) {
+                        this.addError(`A bitfield width must be a non-negative integer constant`, member.location);
+                        return;
+                    }
+                    if (width === 0) {
+                        bitGroupStart = -1;
+                        bitGroupUsed = 0;
+                        return;
+                    }
+                    if (width > 52) {
+                        this.addError(`A bitfield is limited to 52 bits (got ${width})`, member.location);
+                        return;
+                    }
+                    if (bitGroupStart < 0 || bitGroupUsed + width > 52) {
+                        bitGroupStart = currentOffset++;
+                        bitGroupUsed = 0;
+                        const storageName = `__bits${bitGroupIndex++}`;
+                        const storage = new MemberInfo(storageName, intType, bitGroupStart, null);
+                        storage.isBitfieldStorage = true;
+                        storage.bitfieldMembers = [];
+                        members.push(storage);
+                        bitfieldStorages.push(storage);
+                    }
+                    const storageName = `__bits${bitGroupIndex - 1}`;
+                    const bit = new MemberInfo(member.name, memberType,
+                        bitGroupStart, member.bitField);
+                    bit.isBitfield = true;
+                    bit.storageName = storageName;
+                    bit.bitOffset = bitGroupUsed;
+                    bit.bitWidth = width;
+                    bit.isSigned = memberType.name === 'signed';
+                    bit.namePointer = memberByname;
+                    members.push(bit);
+                    bitfieldStorages[bitfieldStorages.length - 1].bitfieldMembers.push(bit);
+                    bitGroupUsed += width;
+                    return;
+                }
+
+                // A non-bitfield ends the current bitfield storage cell.
+                bitGroupStart = -1;
+                bitGroupUsed = 0;
                 
                 // 对于结构体，累加偏移量；对于联合体，取最大成员大小
                 if (isUnion) {
                     maxMemberSize = Math.max(maxMemberSize, memberSize);
+                    const memberInfo = new MemberInfo(
+                        member.name,
+                        memberType,
+                        0,
+                        null
+                    );
+                    memberInfo.namePointer = memberByname;
+                    members.push(memberInfo);
                 } else {
                     // 结构体成员：按1字节对齐
                     const memberInfo = new MemberInfo(
                         member.name,
                         memberType,
                         currentOffset,
-                        member.bitField
+                        null
                     );
                     memberInfo.namePointer = memberByname;
-                    structType.members.push(memberInfo);
+                    members.push(memberInfo);
                     currentOffset += memberSize;
                 }
             });
@@ -1551,20 +1624,13 @@ export class SemanticAnalyzer extends ASTVisitor {
             // 计算最终大小
             if (isUnion) {
                 structType.size = maxMemberSize;
-                // 联合体所有成员偏移量都是0
-                defNode.members.forEach((member, index) => {
-                    const memberTypeName = this.getTypeNameFromDeclarator(member);
-                    const memberType = this.getTypeInfo(memberTypeName);
-                    if (memberType) {
-                        const memberInfo = new MemberInfo(
-                            member.name,
-                            memberType,
-                            0, // 所有成员偏移量都是0
-                            member.bitField
-                        );
-                        structType.members.push(memberInfo);
-                    }
-                });
+                /*
+                A union with more than one member is memory-backed for now:
+                register structs give every member its own register, which would
+                not overlap at all. A single-member union has nothing to alias
+                and may keep the ordinary representation.
+                */
+                if (members.length > 1) structType.forceMemoryImpl = true;
             } else {
                 structType.size = currentOffset;
             }
@@ -1572,6 +1638,8 @@ export class SemanticAnalyzer extends ASTVisitor {
             // 空结构体/联合体
             structType.size = 0;
         }
+        structType.members = members;
+        structType.bitfieldStorages = bitfieldStorages;
         
         // 存储到类型表 (already registered above, before the members were read)
         structType.beingDefined = false;
@@ -4101,8 +4169,16 @@ export class SemanticAnalyzer extends ASTVisitor {
 		copy.members = (type.members ?? []).map(m => {
 			const cm = new MemberInfo(m.name, m.type?.duplicate?.() ?? m.type, m.offset, m.bitField);
 			cm.namePointer = m.namePointer;
+			cm.isBitfield = m.isBitfield;
+			cm.storageName = m.storageName;
+			cm.bitOffset = m.bitOffset;
+			cm.bitWidth = m.bitWidth;
+			cm.isSigned = m.isSigned;
+			cm.isBitfieldStorage = m.isBitfieldStorage;
 			return cm;
 		});
+		copy.bitfieldStorages = (type.bitfieldStorages ?? []).map(s =>
+			copy.members.find(m => m.name === s.name) ?? s);
 		const names = type.templateMembers ?? [];
 		names.forEach((memberName, i) => {
 			const m = copy.members.find(x => x.name === memberName);

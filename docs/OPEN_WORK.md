@@ -20,8 +20,8 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 216 passed, 0 failed (140 shape assertions, 955 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 72 passed, 0 failed |
+| `node ../tools/check.mjs` | 220 passed, 0 failed (140 shape assertions, 975 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 75 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
@@ -76,6 +76,8 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | conditional evaluation order + `stdbool.h` (§7.20) | **done**; short-circuit/`?:` side effects, tests t197/t198 | §7.20 |
 | `enum` + `typedef struct` (§7.21) | **done**; constants, typedef members, tests t199/t200 | §7.21 |
 | `printf` / `assert` / `__FILE__` / `__LINE__` (§7.22) | **done**; builtins, tests t201–t203 | §7.22 |
+| union layout: multi-member unions in memory (§7.23) | **done**; offset 0, max size, nested members, test t204 | §7.23 |
+| unsigned/signed bitfields, register + memory (§7.24) | **done**; 52-bit cells, mask/shift, tests t205–t207 | §7.24 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -810,21 +812,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 580 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 587 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 580 under `testers/unit_tests`, every one of
+bring the count to 587 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 216 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 72 | `negative/` |
+| `check.mjs` | 220 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `negative.mjs` | 75 | `negative/` |
 | `nomem.mjs` | 7 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-216 + 10 + 72 + 7 + 275 = 580. The caveat that replaces "no runner" is weaker but real:
+220 + 10 + 75 + 7 + 275 = 587. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -1466,3 +1468,38 @@ called `f` even when `a` was false.
   portable sources; `assert` itself is the builtin, not a libc function.
 - Cases: t201 (printf), t202 (true assert and predefined macros), t203 (failed
   assert stops), plus a negative for a runtime printf format.
+
+### 7.23 Union layout: memory for multi-member unions
+
+- All union members start at offset 0; `sizeof(union)` is the largest member
+  size. Nested structs, arrays and unions inside a union use that same
+  overlapping region.
+- A union with more than one member is forced into memory. Register structs
+  give each member its own register, which cannot represent an overlap; a
+  single-member union has nothing to alias and may keep the ordinary
+  representation.
+- Cross-representation reads are **value aliasing**, not C byte-level
+  reinterpretation: mlog cells are doubles, so `union { int a; float b; }`
+  does not produce the IEEE-754 bit pattern of `a`.
+- Bitfields inside a union are refused for now (`Bitfields in a union are not
+  supported yet`); they will follow once union storage has a shared register
+  model. Cases: t204; negatives for union bitfields.
+- Union copies/assignment work through the ordinary memory struct copy path.
+
+### 7.24 Unsigned and signed bitfields
+
+- Consecutive bitfields are packed LSB-first into one storage cell, up to
+  **52 bits** per cell. A field that does not fit starts a new cell; a
+  zero-width field ends the current cell; a non-bitfield member ends the group.
+- Writes mask the value and clear/OR the target bits; reads shift and mask.
+  `++`, `--` and compound assignments read-modify-write the storage cell.
+  `&bitfield` is refused.
+- The same access path works in register structs and in memory-backed structs
+  (a struct embedding an array); memory bitfield structs use the synthetic
+  `__bitsN` storage members.
+- Signed fields sign-extend on read using a `select`; writes still mask to the
+  declared width. 52-bit signed values are supported.
+- Memory-backed bitfield struct initializer lists are refused for now; assign
+  the fields individually (register struct initializer lists work).
+- Cases: t205 (register, widths, split at 52), t206 (memory), t207 (signed);
+  negatives for width 53, address-of-bitfield and bitfields in a union.

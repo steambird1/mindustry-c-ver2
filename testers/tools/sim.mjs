@@ -635,6 +635,7 @@ export class Processor {
 
 	applyOp(sub, x, y) {
 		const n = v => this.toNumber(v);
+		const big = v => BigInt(Math.trunc(n(v)));
 		switch (sub) {
 			case 'add': return n(x) + n(y);
 			case 'sub': return n(x) - n(y);
@@ -651,14 +652,16 @@ export class Processor {
 			case 'greaterThan': return n(x) > n(y) ? 1 : 0;
 			case 'greaterThanEq': return n(x) >= n(y) ? 1 : 0;
 			// `op and` / `op or` are BITWISE in the machine language (they are
-			// how a packed value is taken apart), not logical.
-			case 'and': return Math.trunc(n(x)) & Math.trunc(n(y));
-			case 'or': return Math.trunc(n(x)) | Math.trunc(n(y));
+			// how a packed value is taken apart), not logical. JS bitwise
+			// operators are 32-bit; mlog keeps at least 52 bits, so use BigInt
+			// and convert back.
+			case 'and': return Number(big(x) & big(y));
+			case 'or': return Number(big(x) | big(y));
 			case 'land': return (n(x) !== 0 && n(y) !== 0) ? 1 : 0;
-			case 'xor': return Math.trunc(n(x)) ^ Math.trunc(n(y));
-			case 'shl': return Math.trunc(n(x)) << Math.trunc(n(y));
-			case 'shr': return Math.trunc(n(x)) >> Math.trunc(n(y));
-			case 'not': return ~Math.trunc(n(x));
+			case 'xor': return Number(big(x) ^ big(y));
+			case 'shl': return Number(big(x) << big(y));
+			case 'shr': return Number(big(x) >> big(y));
+			case 'not': return Number(~big(x));
 			case 'abs': return Math.abs(n(x));
 			case 'floor': return Math.floor(n(x));
 			case 'ceil': return Math.ceil(n(x));

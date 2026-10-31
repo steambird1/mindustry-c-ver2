@@ -24,6 +24,7 @@ Mindustry-C 不需要安装。你只需要下载 `main.html` 和所有 JavaScrip
   `for`/`while`/`do-while`/`switch`、`break`/`continue`/`return`。
 - C99 便利：`//` 注释、`bool`/`true`/`false`、`inline`、`for` 初始化声明。
 - C 表面：真正的 `enum`（含 `typedef enum`）、`typedef struct { ... } Name;`（匿名/具名/自引用）、`&&`/`||` 短路与 `?:` 单分支求值、`printf`（格式串需字面量；`%d/%i/%u/%f/%s/%%`）、`assert`，以及 `<stdbool.h>`/`<stdio.h>`/`<assert.h>` 兼容头。
+- 数据布局：多成员 `union` 在内存中重叠；unsigned/signed 位域按 LSB-first 打包进 52-bit cell，寄存器和内存结构体都支持。
 - `char` 与原生字符串分离：`char` 是 1-cell 字符/数值，`char*` 是普通指针、`char[]` 是 NUL 结尾的 C 数组；`string_t` 是 1-cell 的 Mindustry 字符串。`#include <string.h>` 提供只读 `string_view` 和 message 拼接（字符级操作要求 v150+）。
 - 存储期：自动局部变量按调用；`static` 在本次运行内；`persistent` 跨处理器重启；普通文件作用域变量每次运行重置。
 - 预处理器：对象宏和函数宏、`#undef`、`#if`/`#elif`/`#else`/`#endif`、

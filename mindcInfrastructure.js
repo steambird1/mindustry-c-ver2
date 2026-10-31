@@ -1434,6 +1434,71 @@ export class RegistryStructRet extends StructRefRet {
 }
 
 /**
+ * A bitfield member. The storage is one ordinary cell (register or memory);
+ * reads mask/shift, writes clear the field and OR the new value back.
+ */
+export class BitfieldRet extends BasicRet {
+	constructor(glob, storage, type, bitOffset, bitWidth, signed = false) {
+		super(glob, storage.instructions, storage.instructionReturn, type, true);
+		this.storage = storage;
+		this.bitOffset = bitOffset;
+		this.bitWidth = bitWidth;
+		this.signed = signed === true;
+		this.setAttribute('isBitfield', true);
+	}
+
+	get() {
+		const glob = this.glob;
+		const intType = glob.semantic.getTypeInfo('int');
+		const target = glob.tmp(this.type ?? intType);
+		const mask = Math.pow(2, this.bitWidth) - 1;
+		const storage = this.storage.get();
+		const result = new Instruction([
+			storage.instructions,
+			InstructionBuilder.op('shr', target, storage.instructionReturn, this.bitOffset),
+			InstructionBuilder.op('and', target, target, mask)
+		]);
+		if (this.signed && this.bitWidth > 0) {
+			const signBit = Math.pow(2, this.bitWidth - 1);
+			const full = Math.pow(2, this.bitWidth);
+			const negative = glob.tmp(intType);
+			result.concat(InstructionBuilder.op('sub', negative, target, full));
+			result.concat(InstructionBuilder.select(target, 'greaterThanEq',
+				target, signBit, negative, target));
+		}
+		return new IntRet(glob, result, target, this.type ?? intType, true);
+	}
+
+	set(other) {
+		const glob = this.glob;
+		const intType = glob.semantic.getTypeInfo('int');
+		const value = other.materialize();
+		const storage = this.storage.get();
+		const clear = glob.tmp(intType);
+		const shifted = glob.tmp(intType);
+		const packed = glob.tmp(intType);
+		const mask = Math.pow(2, this.bitWidth) - 1;
+		// All bits live in a 52-bit storage cell (see the layout code).
+		const allBits = Math.pow(2, 52) - 1;
+		const inField = mask * Math.pow(2, this.bitOffset);
+		const clearMask = allBits - inField;
+		return this.storage.set(new IntRet(glob, [
+			storage.instructions,
+			value.instructions,
+			InstructionBuilder.op('and', clear, storage.instructionReturn, clearMask),
+			InstructionBuilder.op('and', shifted, value.instructionReturn, mask),
+			InstructionBuilder.op('shl', shifted, shifted, this.bitOffset),
+			InstructionBuilder.op('or', packed, clear, shifted)
+		], packed, intType, true));
+	}
+
+	address() {
+		throw new InfrastructureNotImplementedExpection(
+			`cannot take the address of bitfield '${this.instructionReturn}'`);
+	}
+}
+
+/**
  * The declared type of a struct member.
  * @param {Globals} glob
  * @param {TypeInfo?} structType

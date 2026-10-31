@@ -13,8 +13,8 @@
 
 | 命令（从 `testers/unit_tests` 执行） | 读哪个目录 | 当前结果 | 判定标准 |
 |---|---|---|---|
-| `node ..\tools\check.mjs` | `check/` | **216 passed, 0 failed**（140 shape assertions, 955 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
-| `node ..\tools\negative.mjs` | `negative/` | **72 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
+| `node ..\tools\check.mjs` | `check/` | **220 passed, 0 failed**（140 shape assertions, 975 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
+| `node ..\tools\negative.mjs` | `negative/` | **75 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
 | `node ..\tools\nomem.mjs` | `nomem/` | **7 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
 | `node ..\tools\loadorder.mjs` | 仓库根的 `mindc*.js` | **12 passed, 0 failed, 2 exempt** | 每个入口单独起一个 `node` 进程导入，不得有循环依赖 |
 | `node ..\tools\runall.mjs` | 14 个目录：`suite/` `mem/` `arr/` `arr2/` `ptr2/` `stack/` `tests/` `uc/` `cases/` `exttests/` `hdr/` `t/` `big/` `u/` | **267/275**（8 个已知坏例以 KNOWN-GAP 如实上报，不算失败） | 能编译、能跑完不崩；带 `EXPECT:` 的还比对输出 |
@@ -67,13 +67,13 @@
 
 ## 目录地图
 
-`testers/unit_tests/` 下共 **580 个 `.c`，全部有 runner**（216 + 10 + 72 + 7 + 275 = 580）：
+`testers/unit_tests/` 下共 **587 个 `.c`，全部有 runner**（220 + 10 + 75 + 7 + 275 = 587）：
 
 | 目录 | 文件数 | 谁来跑 |
 |---|---|---|
-| `check/` | 216 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
+| `check/` | 220 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
 | `t/` | 98 | `runall.mjs`（早期按主题分的用例，`2dc683e` 起纳入） |
-| `negative/` | 72 | `negative.mjs` |
+| `negative/` | 75 | `negative.mjs` |
 | `suite/` | 50 | `runall.mjs` |
 | `mem/` | 25 | `runall.mjs` |
 | `tests/` | 25 | `runall.mjs`（另有手工的 `batch.mjs [baseline]`） |
@@ -95,7 +95,7 @@
 
 ## check/ 的编号约定
 
-`check/` 用 `tNN_主题.c` 命名，**编号 1–203 已用满，没有空号**，下一个用例是 `t204`。
+`check/` 用 `tNN_主题.c` 命名，**编号 1–207 已用满，没有空号**，下一个用例是 `t208`。
 另有 13 个不带编号的（`m1`–`m3`、`n1`–`n2`、`rw1`–`rw2`、`seq1`、`memsp2`–`memsp3`），
 它们早于编号制，保留原名。
 
@@ -202,6 +202,10 @@
 | `t201` | **§7.22**：`printf` 的 `%d`/`%s`/`%f`，格式串编译期拆分；输出 `a=3 s=hi f=2.5` |
 | `t202` | **§7.22**：`assert(1)` 不阻断 + `__FILE__`/`__LINE__`；输出 `<source> 1 9` |
 | `t203` | **§7.22**：`assert(0)` 打印并 `stop`，后续代码不可达；输出为空 |
+| `t204` | **§7.23**：多成员 union 强制内存——offset 0、`sizeof` = 最大成员、嵌套 struct、单成员 union 仍可用寄存器；输出 `7 7 0 2 4 1` |
+| `t205` | **§7.24**：unsigned 位域寄存器布局——3/5/12/26-bit、LSB-first、掩码、`++`/`+=`、52-bit 上限、超过换 cell；输出 `7 3 1 0 5 4095 1234 2345 3456 67108863 33554431 1 7 3 2 3 134217727 1 2` |
+| `t206` | **§7.24**：内存结构体中的位域——嵌入数组迫使内存，bitfield cell 仍用 mask/shift；输出 `7 3 2 3 9` |
+| `t207` | **§7.24**：signed 位域——3-bit 的 -1/-4、内存回退、52-bit 边界；输出 `-1 3 3 -4 -2 3 -1 2251799813685247` |
 
 设计背景见 `docs/PLAN_array_layout.md`。
 
@@ -214,7 +218,7 @@
 在它想守住的那条检查被删掉之后**依然会通过**——这正是删掉的检查不被发现的方式。
 所以每条 `MESSAGE:` 都必须匹配到编译器真实给出的某一条错误。
 
-**负债已清零**（`1584cf3`）。`negative/` 的 72 个用例全部带 `MESSAGE:`，没有
+**负债已清零**（`1584cf3`）。`negative/` 的 75 个用例全部带 `MESSAGE:`，没有
 `KNOWN-GAP`：原先那两个（`ovl_auto.c`、`ovl_pragma.c`）已删除——自动模板 / 重载
 已经实现，`check/t109`、`check/t110` 用正向用例断言同一事实。
 `remote_as_value_refused.c`（§7.3）是第一个真正用上 `NOT-MESSAGE:` 的用例，

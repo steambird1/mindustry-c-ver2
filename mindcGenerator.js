@@ -22,7 +22,7 @@ import { findRecursiveFunctions } from "./mindcBase.js";
 
 import { ensureMemspHelper, remoteDeviceRegOf, remoteNameRegOf, RemotePointerRet, RemoteArrayRet, RemoteStoredPointerRet, LookupArrayRet, NameStructPointerRet, NameStructDerefRet,
 	RemoteStructPointerRet,
-	NameArrayRet, ArrayHandleRet, ensureArrayHandle, arrayLengthOfType, componentCountOf, isFlatComponentType, CATEGORY_ALIASES, Globals, VariableRet, ImmediateRet, BasicRet, IntRet, BoolRet, FloatRet, ContentRet, packHandle, HANDLE_MASK, HANDLE_FIELD_BITS,
+	NameArrayRet, ArrayHandleRet, ensureArrayHandle, arrayLengthOfType, componentCountOf, isFlatComponentType, CATEGORY_ALIASES, Globals, VariableRet, ImmediateRet, BasicRet, IntRet, BitfieldRet, BoolRet, FloatRet, ContentRet, packHandle, HANDLE_MASK, HANDLE_FIELD_BITS,
 	TraditionalArrayRet,
 	PointerRet, RefPointerRet, MemPointerRet, VolatilePointerRet, MemoryRefRet, StructRefRet,
 	symbolRef, ExportRet, valueClassOf, readThrough, writeThrough, pointerStep,
@@ -1453,6 +1453,7 @@ export class CodeGenerator extends ASTVisitor {
 							 * @param {MemberInfo} member
 							 */
 							member => {
+								if (member.isBitfield === true) return new Instruction();
 								const result = new Instruction(
 									type.isNear() ? [
 										InstructionBuilder.op('add', '__ptrpos', '__ptrpos', member.offset - latest)
@@ -1481,6 +1482,7 @@ export class CodeGenerator extends ASTVisitor {
 						 * @param {MemberInfo} member
 						 */
 						member => {
+							if (member.isBitfield === true) return new Instruction();
 							const result = new Instruction(
 								finalSourceType.isNear() ? [
 									InstructionBuilder.op('add', '__ptrpos', '__ptrpos', member.offset - latest)
@@ -1503,6 +1505,7 @@ export class CodeGenerator extends ASTVisitor {
 					 * @param {MemberInfo} member 
 					 */
 					member => {
+						if (member.isBitfield === true) return new Instruction();
 						/*
 						A member that carries a NAME is one word, not a
 						block/offset pair. Copying it as a pointer wrote
@@ -2487,6 +2490,7 @@ export class CodeGenerator extends ASTVisitor {
 				const name = `${prefix}.${member.name}`;
 				const memberType = member.type;
 				if (!memberType) continue;
+				if (member.isBitfield === true) continue;
 				const kind = memberType.kind;
 				if (kind === 'struct' || kind === 'union') {
 					zeroMembers(name, memberType);
@@ -2907,13 +2911,34 @@ export class CodeGenerator extends ASTVisitor {
 		if (knownType && knownType.isRegStruct()) {
 			// Structure demands special processor
 			let result = new Instruction();
-			for (let i = 0; i < knownType.members.length && i < node.children.length; i++) {
+			/*
+			Bitfield storage cells are internal members. User initializers map to
+			the visible members (including bitfields), not to `__bitsN`.
+			*/
+			const visibleMembers = knownType.members.filter(m => m.isBitfieldStorage !== true);
+			if (knownType.bitfieldStorages?.length) {
+				const base = tmpVar.getAssemblySymbol();
+				knownType.bitfieldStorages.forEach(storage => {
+					result.concat(InstructionBuilder.set(`${base}.${storage.name}`, '0'));
+				});
+			}
+			for (let i = 0; i < visibleMembers.length && i < node.children.length; i++) {
+				const current = visibleMembers[i];
 				if (node.children[i].type === 'InitializerList') {
-					node.children[i].dataType = knownType.members[i].type;
+					node.children[i].dataType = current.type;
 				}
 				const ret = this.visitAndRead(node.children[i]);
-				const current = knownType.members[i];
-				const currentTarget = `${tmpVar.getAssemblySymbol()}.${current.name}`;
+				const base = tmpVar.getAssemblySymbol();
+				if (current.isBitfield === true) {
+					const storage = new BasicRet(this.glob, [],
+						`${base}.${current.storageName}`, this.semantic.getTypeInfo('int'), true);
+					const bitfield = new BitfieldRet(this.glob, storage, current.type,
+						current.bitOffset, current.bitWidth, current.isSigned);
+					result.concat(bitfield.set(ExportRet(this.glob, ret,
+						node.children[i].dataType ?? current.type)));
+					continue;
+				}
+				const currentTarget = `${base}.${current.name}`;
 				if (ret.getAttribute('disallowReplacement')) {
 					result.concat(ret);
 					result.concat(this.copyObject(currentTarget, 
@@ -2927,6 +2952,13 @@ export class CodeGenerator extends ASTVisitor {
 			result.setAttribute('isTemporary', true);
 			return result;
 		} else {
+			if (knownType?.bitfieldStorages?.length) {
+				this.addError(
+					'Initializer lists for memory-backed structs with bitfields are not supported yet; '
+					+ 'assign the fields individually',
+					node.location);
+				return result;
+			}
 			//let currentPointer = 0;
 			/**
 			 * 
@@ -4114,7 +4146,9 @@ export class CodeGenerator extends ASTVisitor {
 					}	// Otherwise, already modified.
 				} else {
 					result.concat(InstructionBuilder.op(node.operator === '++' ? 'add' : 'sub', result.instructionReturn, result.instructionReturn, '1'));
-						if (node.argument.type !== 'Identifier' || !readIsTheVariable) {
+						if (target instanceof BitfieldRet) {
+							result.concat(target.set(ExportRet(this.glob, result, node.dataType)));
+						} else if (node.argument.type !== 'Identifier' || !readIsTheVariable) {
 						result.concat(this.processLValGetter(node.argument).replace('value_entry', result.instructionReturn));
 					}
 				}
@@ -4659,6 +4693,13 @@ export class CodeGenerator extends ASTVisitor {
 					`${object.instructionReturn}.${node.children[1].name}`,
 					node.dataType, false);
 			}
+			const memberInfo = node.memberInfo ?? null;
+			if (memberInfo?.isBitfield === true) {
+				const storage = object.member(memberInfo.storageName,
+					this.semantic.getTypeInfo('int'));
+				return new BitfieldRet(glob, storage, node.dataType,
+					memberInfo.bitOffset, memberInfo.bitWidth, memberInfo.isSigned);
+			}
 			return object.member(node.children[1].name, node.dataType);
 		}
 		/*
@@ -4835,6 +4876,11 @@ export class CodeGenerator extends ASTVisitor {
 			address.name, node.dataType, true);
 		reference.setAttribute('isNearPointer', isNearPointerHere);	// inherit the feature
 		reference.setAttribute('isFromRegStruct', false);
+		const bitfieldInfo = node.memberInfo ?? null;
+		if (bitfieldInfo?.isBitfield === true) {
+			return new BitfieldRet(glob, reference, node.dataType,
+				bitfieldInfo.bitOffset, bitfieldInfo.bitWidth, bitfieldInfo.isSigned);
+		}
 		/*
 		The same member, but in a struct that lives in memory: the name is READ
 		out of the struct first, and only then is it a name pointer.
