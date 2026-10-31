@@ -1,14 +1,31 @@
 # mindustry-c: A JavaScript program compiling C code to Mindustry Assembly
 
-[中文 README（更新可能有延迟）](https://github.com/steambird1/mindustry-c/blob/main/docs/LiyueSprache/README.md)
+[中文 README](https://github.com/steambird1/mindustry-c/blob/main/docs/LiyueSprache/README.md)
 
 ## What is Mindustry-C?
 
-## Current Plan
+Mindustry-C compiles a C-like dialect to Mindustry logic instructions. It is
+not a hosted C implementation: there is no operating system, file I/O, or
+dynamic allocation; values live in processor registers or linked memory
+blocks. The language and library references below describe the exact
+differences.
 
-Incomplete parts:
+## Documentation
 
-- Support of complex types.
+- [Language differences from C99](docs/DIFFERENCES_FROM_C99.md)
+- [Standard library and built-in reference](docs/STANDARD_LIBRARY.md)
+- [Types and functions (short, older)](docs/TYPES_AND_FUNCTIONS.md)
+- [ASM statement](docs/asm.md)
+- [Pseudo list](docs/PSEUDO_LIST.md)
+- Current work and known gaps: [OPEN_WORK.md](docs/OPEN_WORK.md)
+
+## Current status
+
+Complex types are supported: structs, fixed arrays and array handles,
+memory/register/encoded/remote array layouts, ordinary address pointers and
+one-word `byname` pointers, function pointers, and `remote` variables. Some
+C99 forms are intentionally unsupported or limited; the language reference is
+authoritative.
 
 ----
 
@@ -38,75 +55,86 @@ python -m http.server
 
 Or [if you want to make it 100% steambird-made](https://github.com/steambird1/MinServer-Old).
 
-For grammar introduction (about the features unique to Mindustry-C) and examples, refer to docs (might be in progress).
+For grammar introduction (about the features unique to Mindustry-C) and examples, see the documentation links above and the `testers` directory.
 
 ## Features about Mindustry-C
 
-- Most of C89 features
-  - Yes, you'll have structs, pointers, unions, and `typedef`!
-  - But you won't have `#elif` and VA_ARGS macro (**`#include` and other preprocessor instructions has been added**)
-  - Also, support for function pointers might be limited
- 
-- Some C99 features
-  - `//` comments (introduced in C99)
-  - `bool` type as well as `true` and `false`
-  - `inline` keyword
-
-- Some C++-like features:
-  - Partial support for `const` and `auto` (used to describe automatically-connected devices)
-  - Direct use of struct/union name as type name
-
-- Adding special types for Mindustry:
-  - `device` for device (conveyors, scatters, etc.)
-  - `null_t` for `null` in Mindustry (notice that it might **not** like `nullptr` or `(void*)0`)
-
-- Memory mapping (adjusted outside the code)
-
-- Function call stack
-
-- Mindustry "system calls"
-  - Building control
-  - Unit control
-
-- Direct "assembly" insertion
-
-- Compiler's optimizing
-  - Compile-time constant evaluation
-    - Including those in `for` or `while` loop (they won't be so efficient, though)!
-  - Removal of unused code/variable
-    - Including unused `if` branches or `while` loops
-  - Inlining functions
-  - **There's no** ~~Loop unrolling~~ (because instructions are expensive in Mindustry!)
+- C-like core: functions, structs, pointers, arrays, `typedef`,
+  `for`/`while`/`do-while`/`switch`, `break`/`continue`/`return`.
+- C99 conveniences: `//` comments, `bool`/`true`/`false`, `inline`,
+  declarations in `for` initializers.
+- Preprocessor: `#define` (object-like and function-like), `#undef`,
+  `#if`/`#elif`/`#else`/`#endif`, `#ifdef`/`#ifndef`, `#include`, `#pragma`.
+  Variadic macros are not supported; `goto` and VLAs are rejected.
+- Mindustry types: `device`, `content_t`, `null_t`, `item_t`, `liquid_t`,
+  `unit_t`, `block_t`, plus `remote` bindings.
+- `auto device` startup binding, plus `getlink` for runtime link access.
+- Arrays: fixed-size arrays, deduced last dimension, open array handles,
+  and `traditional` / `embedded` / `encoded` / lookup layouts.
+- Pointers: ordinary two-word address pointers and one-word `byname` name
+  pointers; `#pragma optimize(pointer)` and `struct_pointer`.
+- `auto` parameters, `auto` struct members, and function overloading.
+- `remote` access to another processor's variables, arrays, and pointers.
+- Memory blocks, function stack, recursion (memory-heavy), `asm`, and raw
+  Mindustry instructions.
+- Optimizer: constant folding, loop simulation, constant switch folding,
+  encoded switch dispatch, dead-code removal, inlining. Loop unrolling is
+  deliberately not done.
 
 ## Notice
 
-1. Following functions **rely on** memory allocation:
+1. Memory is required for:
 
-- Any `volatile` variable
-- Any variable that has address (`&var`)
-- Any array (If you don't want to use memory but still want arrays, refer to *pseudo list's* documents to look for possible alternatives.)
-- Any recursive function
+- `volatile` variables;
+- recursive functions (all their symbols go to memory);
+- `array("traditional", ...)` arrays;
+- ordinary `&x` pointers that cannot use a name;
+- objects too large or otherwise unsuitable for registers.
 
-2. If functions aren't called recursively, they does not take up memory space.
+Arrays can also live in registers, encoded strings, or a one-word handle, so
+“array” no longer implies a memory block.
 
-3. A pointer takes up 2 units of spaces, respectively storing the memory cell and address of the element it points to.
+2. A non-recursive function can keep its locals in registers, but arrays,
+`volatile` variables, and address-taken locals may still require memory.
 
-4. A union type takes up **the same** space and time (when copying) if stored **in register**.
+3. A normal pointer is two words (block + position). A `byname` name pointer
+or an array handle is one word; use `widthof` to see the difference.
 
-Using heap memory might be costly. Avoid declaring memory-demanding variables (listed above) in non-main functions (place them in global scope instead). It is also **strongly** recommended to prevent using recursive functions. They are supported but unstable and costly as the compiler is unsure about every variable's state.
+4. `union` and bit-fields are parsed, but are not a stable C99-compatible
+subset yet: do not rely on member aliasing or bit packing.
 
-Arrays might also take up additional spaces to store its previous/next cell of storage. Designing memory structure for this strange "cyber-" hardware is hard.
+Recursion is supported but expensive and less predictable; prefer globals and
+iterative code. Avoid declaring memory-demanding variables in non-main
+functions when a global would do. Memory layouts may also reserve block
+metadata; small arrays can often use register or encoded layouts instead.
 
 ## An Overview of Special Grammar
 
 ### Specialized for Mindustry
 
-- `device` type is used to describe buildings/units in Mindustry while `content_t` is used to describe objects.
-- Use `auto device conveyor1;` to register a connected device (**`auto` is essential**).
-- Use `extern` to declare that this variable should be declared.
-- Use `(volatile int*)` (or similar) to force to transmit registry variables to some functions (for builtin calls, especially `ulocate`).
-- Function pointers must have a `typedef` to declare its type before being used.
+- `device` describes building/unit handles; `content_t` describes content
+  handles. `item_t`, `liquid_t`, `unit_t`, and `block_t` are narrower content
+  types; `null_t` can hold any value.
+- Use `auto device conveyor1;` to bind a linked device at startup (`auto` is
+  required).
+- Use file-scope `extern` to keep a processor variable visible to other
+  processors by name; `remote(processor, name)` binds such a variable/array/
+  pointer on the other side. This is not C external linkage.
+- `remote int *p` and `int *remote p` mean different things: which side stores
+  the pointer depends on where `remote` is written.
+- `int *byname p` / `byname(&x)` stores a variable name in one register; such a
+  pointer cannot be used for pointer arithmetic.
+- `(volatile type*)(object)` passes a register raw to built-ins such as
+  `ulocate`.
+- Function pointers need a concrete `typedef`; an `auto` function needs a
+  concrete version to take its address.
+- `array("...", {...})` requests an array layout; see the language reference
+  for the available layouts.
 
 ### Different from C/C++
 
-- Initializer lists are recommended to be unwrapped and must be **non-empty (or the compiler will crash!)**.
+- Empty initializer lists are not a reliable form. `int a[] = {1, 2, 3};` is
+  supported: the last dimension is deduced from the initializer.
+- String literals are `char` values, not `char *`; there are no C string
+  functions.
+- The complete list is in [DIFFERENCES_FROM_C99.md](docs/DIFFERENCES_FROM_C99.md).

@@ -2,11 +2,13 @@
 
 ## 什么是 Mindustry-C？
 
-请注意：Mindustry-C 使用了一些 DeepSeek 生成的代码。
+请注意：Mindustry-C 含有一定量 AI 生成的代码。
 
 Mindustry-C 将 C 代码编译为 Mindustry 逻辑——因为后者太烧脑。
 
-有一些编译器能够将 C/C++/Python 转换为逻辑，但它们不好用。所以我们有了这个编译器。
+它不是宿主机上的 C 实现：没有操作系统、文件 I/O 或动态内存分配；值存放在处理器寄存器或链接的内存块里。完整的语言差异见
+[DIFFERENCES_FROM_C99.md](../DIFFERENCES_FROM_C99.md)；标准库与内建函数见
+[STANDARD_LIBRARY.md](../STANDARD_LIBRARY.md)。
 
 ## 安装
 
@@ -18,49 +20,69 @@ Mindustry-C 不需要安装。你只需要下载 `main.html` 和所有 JavaScrip
 
 ## Mindustry-C 特性
 
-- 大部分 C89 特性
-    - 结构体，联合体（未测试），`typedef`（注意：不支持匿名结构体）
-    - `#` 预处理器指令（除了 `#elif` 和可变参数宏）
-    - 但是对函数指针的支持有限
-
-- `const` 和 `auto` 的部分支持（`auto` 用于声明和处理器直接连接的建筑）
-- 内存布局（在编译器中指定）
-- Mindustry 的”系统调用“
-- 插入”汇编“（`asm`）
-- 部分编译器优化
-    - 常量优化（有时需要手动标注 `const` 以起到优化效果）
-    - 移除未使用的变量
-    - 内联函数（功能有限）
-    - **不支持循环展开（因为有代码行数限制）**
+- C 核心：函数、结构体、指针、数组、`typedef`、
+  `for`/`while`/`do-while`/`switch`、`break`/`continue`/`return`。
+- C99 便利：`//` 注释、`bool`/`true`/`false`、`inline`、`for` 初始化声明。
+- 预处理器：对象宏和函数宏、`#undef`、`#if`/`#elif`/`#else`/`#endif`、
+  `#ifdef`/`#ifndef`、`#include`、`#pragma`。
+  不支持可变参数宏；`goto` 和 VLA 会被拒绝。
+- Mindustry 类型：`device`、`content_t`、`null_t`、`item_t`、`liquid_t`、
+  `unit_t`、`block_t`，以及 `remote` 绑定。
+- `auto device` 启动时按链接名绑定设备；也可以用 `getlink` 在运行时取。
+- 数组：定长数组、推导最后一维、开放数组句柄，以及
+  `traditional` / `embedded` / `encoded` / lookup 布局。
+- 指针：普通两字地址指针，以及一字 `byname` 名字指针；
+  `#pragma optimize(pointer)` / `struct_pointer`。
+- `auto` 参数、`auto` 结构体成员和函数重载。
+- `remote`：访问另一个处理器的变量、数组和指针。
+- 内存块、函数栈、递归（开销较大）、`asm` 和原始 Mindustry 指令。
+- 优化：常量折叠、循环模拟、常量 switch 折叠、encoded switch 派发、
+  死代码删除、内联；不进行循环展开。
 
 ## 注意
 
-1. 以下功能需要至少一个内存元：
+1. 需要内存的情况：
 
-- `volatile` 变量
-- 被取地址的变量
-- 数组（如果你想要在无内存元的情况下实现数组，考虑阅读文档中关于伪列表（pseudo list）的相关内容）
-- 递归函数（**注意：使用递归函数将造成较大开销并可能不稳定。不建议这么做。**）
+- `volatile` 变量；
+- 递归函数（其所有符号都会进入内存）；
+- `array("traditional", ...)` 数组；
+- 无法使用名字表示的普通 `&x` 指针；
+- 太大或不适合放进寄存器的对象。
 
-2. 一个指针占用两个单位的空间。
-3. 使用内存的联合体类型占用的空间与预期一致；但使用寄存器变量的联合体占用大小与运行开销与相同声明的结构体一致。
+数组也可以放在寄存器、encoded 字符串或一个字的句柄里，所以“数组”不再自动等于“占用内存块”。
+
+2. 非递归函数的局部量可以留在寄存器，但数组、`volatile` 变量和取地址的局部量仍可能需要内存。
+
+3. 普通指针占两个字（block + position）；`byname` 名字指针或数组句柄占一个字。可以用 `widthof` 观察差异。
+
+4. `union` 和位域可以解析，但目前不是稳定的 C99 兼容子集：不要依赖成员重叠或位打包。
+
+递归受支持但昂贵且更难预测；优先使用全局变量和迭代写法。避免在非 `main` 函数里声明需要内存的变量。内存布局可能还会预留 block 元数据；小数组通常可以用寄存器或 encoded 布局。
 
 ## 特殊语法
 
 ### Mindustry 相关
 
-- `device` 用于描述建筑/单位，`content_t` 用于描述物品。这两者都**不能被放到内存中，考虑使用伪列表存储它们**。如果要存储物品类型，还可以使用 `item_t`、`block_t`、`unit_t`、`liquid_t` 类型。
-- 声明连接到处理器的建筑：`auto device converyor1;`（`auto` 是必须的）
-- 声明保留变量名称（从而可以被其它处理器访问）的变量，使用 `extern` 关键字。
-- 对于 `ulocate`，使用 `(volatile int*)` 转换变量为”引用“。
-- 函数指针必须使用 `typedef` 定义相应类型后再使用。
+- `device` 描述建筑/单位句柄，`content_t` 描述内容句柄；`item_t`、
+  `liquid_t`、`unit_t`、`block_t` 是更具体的内容类型，`null_t` 可以容纳任意值。
+  当前不建议把 `device`/`content_t` 放进数组或结构体成员；需要动态存储时用伪列表。
+- 用 `auto device conveyor1;` 绑定连接到处理器的建筑（`auto` 是必须的）。
+- 文件作用域的 `extern` 让处理器变量按名字对其他处理器可见；
+  `remote(processor, name)` 绑定另一侧的变量/数组/指针。这不是 C 的外部链接。
+- `remote int *p` 和 `int *remote p` 含义不同：`remote` 写在哪一侧，决定哪一侧存储指针。
+- `int *byname p` / `byname(&x)` 用名字表示变量，只占一个寄存器；这种指针不能做指针算术。
+- `(volatile type*)(object)` 把寄存器原样传给内置函数，尤其是 `ulocate`。
+- 函数指针需要具体的 `typedef`；指向 `auto` 函数时需要一个具体版本。
+- `array("...", {...})` 请求数组布局；可用布局见语言文档。
 
-### 编译器特性
+### 与 C/C++ 不同
 
-#### 特性
+- 空初始化列表不是可靠写法。`int a[] = {1, 2, 3};` 是支持的：最后一维由初始化列表推导。
+- 字符串字面量是 `char` 值，不是 `char *`；没有 C 字符串函数。
+- 完整差异见 [DIFFERENCES_FROM_C99.md](../DIFFERENCES_FROM_C99.md)。
 
-- 以相同顺序声明数组可以保证内存布局相同。
+## 旧文档
 
-#### Bug
-
-initializer_list（如 `{1,2,3}`）**不能**为空，否则将导致编译器崩溃！
+[TYPES_AND_FUNCTIONS.md](../TYPES_AND_FUNCTIONS.md) 是较早的简短参考；当前完整说明以
+[DIFFERENCES_FROM_C99.md](../DIFFERENCES_FROM_C99.md) 和
+[STANDARD_LIBRARY.md](../STANDARD_LIBRARY.md) 为准。

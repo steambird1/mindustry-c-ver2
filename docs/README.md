@@ -15,11 +15,11 @@ So here it is.
 
 ### Who is the Most Suitable for Mindustry-C?
 
-If your logic is becoming sufficiently complex or needs dynamic adjustment but does not care much about speed, then Mindustry-C might be your choice, as it provides almost 100% C features including free functions, structures and arrays' use.
+If your logic is becoming sufficiently complex or needs dynamic adjustment but does not care much about speed, then Mindustry-C might be your choice, as it provides a large practical subset of C including functions, structures, arrays, pointers, handles and remote-backed values.
 
 ## Introduction
 
-Mindustry-C is just like normal C, as I've said before. However, the standard library function differs (the only thing with the same name and the same behavior is `memcpy`). For example:
+Mindustry-C is just like normal C, as I've said before. The standard library is different: it is mostly Mindustry instructions and custom headers, and only a few C functions (such as `memcpy` and some math functions) keep their C names and behavior. See [STANDARD_LIBRARY.md](STANDARD_LIBRARY.md). For example:
 
 ```
 auto device message1;  // Declare message1 device useable in the program
@@ -32,7 +32,7 @@ void main() {          // The return type does not matter, but 'void' is recomme
 
 In examples of **`testers` directory**, you can see more practical examples.
 
-Also, the content like `@copper` and `@time` are of type `content_t` (in particular, `@copper` is of type `item_t` which can be converted into `content_t` for further use) which can be then converted.
+Also, names such as `@copper` are `content_t`/`item_t` handles, while names such as `@time` are numeric runtime values; both are Mindustry built-ins.
 
 We also have `null_t` which can refer to any type of data (by default used to contain `null`).
 
@@ -75,12 +75,13 @@ There are some additional features:
 - `do { ... } while (...)` loops are supported: the body runs once before the test
 - `switch (x) { case ...: ... default: ... }` follows C: fallthrough unless `break`
 
-*Note: `int a[] = {1, 2, 3};` — an initializer with no size — is still not allowed. The
-size has to come from somewhere.*
+*Note: `int a[] = {1, 2, 3};` is supported: the last dimension comes from the
+initializer. An empty initializer list is not a reliable form; write values or
+an explicit size.*
 
 ## Coding Style
 
-Mindustry-C compiler itself provides very limited optimize methods. Therefore, following coding styles are recommended to help speed up your program and reduce memory usage, as processors are slow and memory blocks are expensive and small.
+Mindustry-C is not a full optimizing compiler, but it does constant folding, loop simulation, constant switch folding, encoded switch dispatch, dead-code removal and inlining. The following styles still help keep execution and memory predictable:
 
 ### 1. Prevent using recursion
 
@@ -96,7 +97,7 @@ Recursion functions in Mindustry-C will be automatically labelled and compiled s
 
 Memory of global variables will be assigned exactly once; however, the variables in the functions will be assigned more than once, resulting in time complexity increment.
 
-*Note:* It is recommended not to use as few arrays and structures as you can to speed up execution. (~~But in this case, why don't you use other providers?~~)
+*Note:* Use no more arrays and structures than necessary; register or encoded layouts can reduce memory pressure, but large aggregates still cost instructions and memory.*
 
 ### 3. Control the Control Flow
 
