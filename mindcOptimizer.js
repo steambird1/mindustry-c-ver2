@@ -416,7 +416,7 @@ export class Optimizer extends ASTVisitor {
 		 */
 		const initializeScopes = scope => {
 			scope.symbols.forEach(child => {
-				child.isConstant = false;
+				if (child.isEnumConstant !== true) child.isConstant = false;
 			})
 			scope.children.forEach(child => initializeScopes(child));
 			this.localConstants.set(scope.getPath(), new Map());

@@ -1133,6 +1133,8 @@ export class SemanticAnalyzer extends ASTVisitor {
                 node.typeDefinitions.forEach(def => {
                     if (def.type === 'struct' || def.type === 'union') {
                         this.processStructOrUnionDefinition(def);
+                    } else if (def.type === 'TypeSpecifier' && def.typeName === 'enum') {
+                        this.processEnumDefinition(def, this.globalScope);
                     } else {
 						if ((!def.isStruct) && (!def.isUnion)) {
 							this.processTypedefDeclaration(def);
@@ -1144,6 +1146,11 @@ export class SemanticAnalyzer extends ASTVisitor {
                 });
             }
             
+            // 收集全局枚举定义
+            (node.enumDefinitions ?? []).forEach(def => {
+                this.processEnumDefinition(def, this.globalScope);
+            });
+
             // 收集全局结构体/联合体定义
             node.globalDeclarations.forEach(decl => {
                 if ((decl.type === 'VariableDeclaration' || decl.declarators) && decl.getAttribute('isStructOrUnion')) {
@@ -1335,6 +1342,12 @@ export class SemanticAnalyzer extends ASTVisitor {
 			});
 		} else {
 			// Traditional process
+			if (typedefNode.structDefinition) {
+				this.processStructOrUnionDefinition(typedefNode.structDefinition);
+			}
+			if (typedefNode.type?.type === 'TypeSpecifier' && typedefNode.type.typeName === 'enum') {
+				this.processEnumDefinition(typedefNode.type, this.currentScope);
+			}
 			let baseTypeName = this.getTypeNameFromTypeNode(typedefNode.type);
 			let baseType = this.getTypeInfo(baseTypeName);
 			
@@ -1358,6 +1371,106 @@ export class SemanticAnalyzer extends ASTVisitor {
 		}
     }
 	
+	/**
+	 * Register an enum definition and its enumerators.
+	 *
+	 * Enumerators are `int` constants in the surrounding scope (C, not a
+	 * scoped enum); `enum Tag` itself is an int-like type for variables.
+	 *
+	 * @param {TypeSpecifierNode} typeNode
+	 * @param {Scope} [scope]
+	 * @returns {void}
+	 */
+	processEnumDefinition(typeNode, scope = this.currentScope) {
+		if (!typeNode || typeNode.getAttribute?.('enumProcessed') === true) return;
+		typeNode.setAttribute('enumProcessed', true);
+		const name = typeNode.getAttribute('enumName') || 'enum';
+		const intType = this.typeTable.get('int');
+		/*
+		C enums are compatible with int; keeping the SAME TypeInfo means
+		`enum Color c = BLUE;`, arithmetic and array sizes all see an int.
+		*/
+		this.typeTable.set(name, intType);
+		typeNode.setAttribute('enumTypeName', name);
+
+		let next = 0;
+		for (const entry of typeNode.getAttribute('enumValues') ?? []) {
+			let value = next;
+			if (entry.value) {
+				const folded = this.enumConstantValue(entry.value, scope);
+				if (folded === null) {
+					this.addError(`Enumerator '${entry.name}' needs a constant expression`, entry.location);
+					continue;
+				}
+				value = folded;
+			}
+			next = value + 1;
+			if (scope.lookupCurrent(entry.name)) {
+				this.addError(`Enumerator '${entry.name}' is already declared in this scope`, entry.location);
+				continue;
+			}
+			const symbol = new SymbolEntry(entry.name,
+				{ type: intType, isConst: true },
+				scope, 'variable', entry.location);
+			symbol.isConst = true;
+			symbol.isEnumConstant = true;
+			symbol.markAsConstant(value);
+			scope.addSymbol(symbol);
+		}
+	}
+
+	/**
+	 * Fold the constant expression allowed in an enumerator initializer.
+	 *
+	 * @param {ASTNode} node
+	 * @param {Scope} scope
+	 * @returns {number?}
+	 */
+	enumConstantValue(node, scope) {
+		if (!node) return null;
+		switch (node.type) {
+			case 'NumericLiteral':
+				return Number(node.value);
+			case 'CharacterLiteral':
+				return (node.value ?? '').codePointAt(0) ?? null;
+			case 'Identifier': {
+				const symbol = scope.lookup(node.name) ?? this.globalScope.lookup(node.name);
+				return symbol?.isConstant ? Number(symbol.constantValue) : null;
+			}
+			case 'UnaryExpression': {
+				const value = this.enumConstantValue(node.argument, scope);
+				if (value === null) return null;
+				switch (node.operator) {
+					case '+': return value;
+					case '-': return -value;
+					case '~': return ~Math.trunc(value);
+					case '!': return value === 0 ? 1 : 0;
+					default: return null;
+				}
+			}
+			case 'BinaryExpression': {
+				const left = this.enumConstantValue(node.left, scope);
+				const right = this.enumConstantValue(node.right, scope);
+				if (left === null || right === null) return null;
+				switch (node.operator) {
+					case '+': return left + right;
+					case '-': return left - right;
+					case '*': return left * right;
+					case '/': return right === 0 ? null : Math.trunc(left / right);
+					case '%': return right === 0 ? null : left % right;
+					case '<<': return Math.trunc(left) << Math.trunc(right);
+					case '>>': return Math.trunc(left) >> Math.trunc(right);
+					case '|': return Math.trunc(left) | Math.trunc(right);
+					case '&': return Math.trunc(left) & Math.trunc(right);
+					case '^': return Math.trunc(left) ^ Math.trunc(right);
+					default: return null;
+				}
+			}
+			default:
+				return null;
+		}
+	}
+
 	processStructOrUnionDefinition(defNode) {
         const typeName = defNode.name || `anonymous_${defNode.type}_${Date.now()}`;
         const isUnion = defNode.type === 'union';
@@ -1917,6 +2030,9 @@ export class SemanticAnalyzer extends ASTVisitor {
     visitVariableDeclaration(node) {
         const baseTypeName = this.getTypeNameFromTypeNode(node.type);
         const qualifiers = node.type.getAttribute('qualifiers') || [];
+		if (node.type?.type === 'TypeSpecifier' && node.type.typeName === 'enum') {
+			this.processEnumDefinition(node.type, this.currentScope);
+		}
 		
 		// 检查是否有存储类说明符
 		const storageClass = node.type.storageClass; // auto, register, static, extern
@@ -3479,6 +3595,11 @@ export class SemanticAnalyzer extends ASTVisitor {
             const structName = typeNode.getAttribute('structOrUnionName');
             return prefix + (structName || typeNode.typeName) + ptrSuffix;
         }
+		// 枚举类型：`enum Tag` / `enum { ... }`
+		if (typeNode.type === 'TypeSpecifier' && typeNode.typeName === 'enum') {
+			const enumName = typeNode.getAttribute('enumName');
+			return prefix + (enumName || 'enum') + ptrSuffix;
+		}
 
 		if (typeNode.arrayDimensions && typeNode.arrayDimensions.length) {
 			/*
@@ -5085,6 +5206,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 		if (dim.type === 'NumericLiteral') return Number(dim.value);
 		if (dim.type === 'Identifier') {
 			const symbol = this.currentScope?.lookup(dim.name);
+			if (symbol?.isConstant) return Number(symbol.constantValue);
 			const init = symbol?.initializer ?? symbol?.declarator?.initializer ?? null;
 			if (symbol?.isConst && init && init.type === 'NumericLiteral') {
 				return Number(init.value);
@@ -7566,6 +7688,11 @@ export class SemanticAnalyzer extends ASTVisitor {
                 return Number.isFinite(Number(node.value)) ? Number(node.value) : undefined;
             case 'CharacterLiteral':
                 return (node.value ?? '').codePointAt(0) ?? 0;
+            case 'Identifier': {
+                const symbol = this.currentScope.lookup(node.name);
+                return symbol?.isEnumConstant === true
+                    ? Number(symbol.constantValue) : undefined;
+            }
             case 'UnaryExpression': {
                 const v = this.constantCaseValue(node.argument);
                 if (v === undefined) return undefined;

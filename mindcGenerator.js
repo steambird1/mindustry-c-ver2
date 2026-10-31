@@ -5514,6 +5514,9 @@ export class CodeGenerator extends ASTVisitor {
 		if (!symbol) {
 			throw new InternalGenerationFailure(`Unknown identifier ${node.name}`, node);
 		}
+		if (symbol.isEnumConstant === true && typeof symbol.constantValue === 'number') {
+			return new ImmediateRet(glob, String(symbol.constantValue), node.dataType ?? symbol.myType());
+		}
 		// `get()`: go through the reference and produce the value itself
 		return symbolRef(glob, symbol).get();
 	}

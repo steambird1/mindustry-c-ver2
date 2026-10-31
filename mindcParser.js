@@ -162,6 +162,16 @@ export class Parser {
                 }
             }
 
+            // 尝试解析 enum 定义（无变量声明）
+            if (this.matchToken(TokenType.ENUM)) {
+                const enumDef = this.parseStandaloneEnumDefinition();
+                if (enumDef) {
+                    typeDefinitions.push(enumDef);
+                    enumDef.parent = program;
+                    continue;
+                }
+            }
+
             // 跳过其他token
             this.consumeToken();
         }
@@ -200,6 +210,17 @@ export class Parser {
                 } else {
                     // 回退，可能是结构体/联合体变量声明
                     this.currentTokenIndex = startIndex;
+                }
+            }
+
+            // 尝试解析 enum 定义（无变量声明）
+            if (this.matchToken(TokenType.ENUM)) {
+                const enumDef = this.parseStandaloneEnumDefinition();
+                if (enumDef) {
+                    enumDef.parent = program;
+                    program.enumDefinitions = program.enumDefinitions || [];
+                    program.enumDefinitions.push(enumDef);
+                    continue;
                 }
             }
 
@@ -288,13 +309,41 @@ export class Parser {
 		}
 
         // 解析类型说明符
-        const baseType = this.parseTypeSpecifier();
+		let baseType = null;
+		let structDefinition = null;
+		if (this.matchToken(TokenType.STRUCT) || this.matchToken(TokenType.UNION)) {
+			/*
+			`typedef struct Tag { ... } Alias;` / `typedef struct { ... } Alias;`
+			used to fall into the generic type-specifier path, which SKIPPED the
+			member list. Parse the definition here and let the typedef point at
+			its tag (generated for the anonymous form).
+			*/
+			const typeDef = this.parseStructOrUnionDefinition();
+			if (!typeDef) {
+				this.addError('Expected struct/union definition after typedef');
+				return null;
+			}
+			if (!typeDef.name) {
+				typeDef.name = `__anon_${typeDef.type}_${this.anonymousTypeCounter ?? 0}`;
+				this.anonymousTypeCounter = (this.anonymousTypeCounter ?? 0) + 1;
+				this.addTypeName(typeDef.name);
+			}
+			baseType = ASTBuilder.typeSpecifier(typeDef.type);
+			baseType.setAttribute('location', typeDef.location);
+			baseType.setAttribute('structOrUnionName', typeDef.name);
+			baseType.setAttribute('qualifiers', []);
+			baseType.storageClass = '';
+			if (typeDef.isDefinition) structDefinition = typeDef;
+		} else {
+			baseType = this.parseTypeSpecifier();
+		}
         if (!baseType) {
             this.addError('Expected type specifier after typedef');
             return null;
         }
 		
 		const typedefDecl = ASTBuilder.typedefDeclaration(baseType, []);
+		if (structDefinition) typedefDecl.structDefinition = structDefinition;
 
         // 解析声明符（类型别名），可以有多个
         const declarators = [];
@@ -776,32 +825,65 @@ export class Parser {
         return structNode;
     }
 
+    /*
+    A standalone `enum Tag { ... };` has no declarator. Parse it only when the
+    closing brace is followed by `;`; otherwise rewind and let the ordinary
+    declaration parser handle `enum Tag { ... } var;`.
+    */
+    parseStandaloneEnumDefinition() {
+        const start = this.currentTokenIndex;
+        const typeNode = this.parseTypeSpecifier();
+        if (typeNode && typeNode.typeName === 'enum' && this.matchToken(TokenType.SEMICOLON)) {
+            this.consumeToken();
+            return typeNode;
+        }
+        this.currentTokenIndex = start;
+        return null;
+    }
+
     // 添加解析enum类型的方法
     parseEnumType(enumNode) {
         // 检查是否有枚举名称
         if (this.matchToken(TokenType.IDENTIFIER)) {
             const nameToken = this.consumeToken();
             enumNode.setAttribute('enumName', nameToken.value);
+            this.addTypeName(nameToken.value);
+        } else {
+            /*
+            An anonymous enum still needs a stable type name: a variable such as
+            `enum { A, B } x;` and a typedef such as `typedef enum { ... } E;`
+            both use it. The name is generated once, here.
+            */
+            const generated = `__enum_${this.anonymousTypeCounter ?? 0}`;
+            this.anonymousTypeCounter = (this.anonymousTypeCounter ?? 0) + 1;
+            enumNode.setAttribute('enumName', generated);
+            this.addTypeName(generated);
         }
 
         // 检查是否有枚举体（可选）
         if (this.matchToken(TokenType.LEFT_BRACE)) {
             this.consumeToken(); // 跳过 '{'
-            
+            const values = [];
             while (!this.matchToken(TokenType.RIGHT_BRACE) && !this.matchToken(TokenType.EOF)) {
-                // 跳过枚举值定义
-                if (this.matchToken(TokenType.SEMICOLON)) {
+                const nameToken = this.expectToken(TokenType.IDENTIFIER);
+                if (!nameToken) break;
+                let valueNode = null;
+                if (this.matchToken(TokenType.ASSIGN)) {
                     this.consumeToken();
-                } else {
-                    this.consumeToken();
+                    valueNode = this.parseExpression();
                 }
+                values.push({ name: nameToken.value, value: valueNode, location: nameToken.location });
+                if (this.matchToken(TokenType.COMMA)) {
+                    this.consumeToken();
+                    continue;
+                }
+                break;
             }
-            
-            if (this.matchToken(TokenType.RIGHT_BRACE)) {
-                this.consumeToken(); // 跳过 '}'
-            }
+            this.expectToken(TokenType.RIGHT_BRACE);
+            enumNode.setAttribute('enumValues', values);
+            enumNode.setAttribute('enumDefinition', true);
         }
-        
+
         return enumNode;
     }
 
@@ -2400,7 +2482,8 @@ export class Parser {
 			const next = this.peekToken(1);
 			return !!next && next.type !== TokenType.LEFT_PAREN;
 		}
-		return token.type === 'IDENTIFIER' && special.includes(token.value);
+		return token.type === 'IDENTIFIER' && (special.includes(token.value)
+			|| this.knownTypeNames?.has?.(token.value) === true);
 	}
 
 	/**
