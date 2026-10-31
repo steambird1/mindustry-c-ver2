@@ -46,13 +46,25 @@ Here provides a short reference table for some of the useful functions:
 
 (Refer to [this](https://github.com/steambird1/mindustry-c/blob/main/docs/TYPES_AND_FUNCTIONS.md) to learn more.)
 
+For the authoritative language differences and the library reference, see
+[DIFFERENCES_FROM_C99.md](DIFFERENCES_FROM_C99.md) and
+[STANDARD_LIBRARY.md](STANDARD_LIBRARY.md).
+
 ## Major Differences
 
-The following codes are **invalid**:
+> **Note:** this section predates the current compiler. See
+> [DIFFERENCES_FROM_C99.md](DIFFERENCES_FROM_C99.md) for the authoritative
+> list; some old limitations below no longer apply.
 
-- `int a[5] = {};` (Empty initializer list **(This will currently result in compiler crash!)**)
-- `int a[] = {1,2,3};` (Unclear length of array)
-- `struct a { struct b {} c; };` (Embedded struct or union structure)
+The following older examples are kept for history; check the new document for
+the current behavior:
+
+- `int a[5] = {};` — an empty initializer is not a reliable form; write the
+  values or the size explicitly.
+- `int a[] = {1,2,3};` — **now supported**; the last dimension is deduced
+  from the initializer.
+- `struct a { struct b {} c; };` — embedded struct/union remains limited;
+  give the inner struct a name.
 
 There are some additional features:
 

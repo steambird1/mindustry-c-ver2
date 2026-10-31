@@ -1,5 +1,10 @@
 # Types And Functions of Mindustry-C
 
+> This is an older short reference. See
+> [DIFFERENCES_FROM_C99.md](DIFFERENCES_FROM_C99.md) and
+> [STANDARD_LIBRARY.md](STANDARD_LIBRARY.md) for the current, complete
+> language and library reference.
+
 Types and functions similar to C are not listed below.
 
 ## Types
