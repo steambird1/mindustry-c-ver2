@@ -38,6 +38,7 @@ export const TokenType = {
     SIGNED: 'SIGNED',
     SIZEOF: 'SIZEOF',
 	WIDTHOF: 'WIDTHOF',
+	PERSISTENT: 'PERSISTENT',
     STATIC: 'STATIC',
     STRUCT: 'STRUCT',
     SWITCH: 'SWITCH',
@@ -199,7 +200,7 @@ export class Token {
             TokenType.IF, TokenType.INT, TokenType.LONG, TokenType.REGISTER, TokenType.RETURN,
             TokenType.SHORT, TokenType.SIGNED, TokenType.SIZEOF, TokenType.WIDTHOF, TokenType.STATIC, TokenType.STRUCT,
             TokenType.SWITCH, TokenType.TYPEDEF, TokenType.UNION, TokenType.UNSIGNED, TokenType.VOID,
-            TokenType.VOLATILE, TokenType.WHILE, TokenType.NULL
+            TokenType.VOLATILE, TokenType.WHILE, TokenType.NULL, TokenType.PERSISTENT
         ];
         return keywords.includes(this.type);
     }
@@ -237,6 +238,7 @@ export const KEYWORDS = {
     'signed': TokenType.SIGNED,
     'sizeof': TokenType.SIZEOF,
 	'widthof': TokenType.WIDTHOF,
+	'persistent': TokenType.PERSISTENT,
     'static': TokenType.STATIC,
     'struct': TokenType.STRUCT,
     'switch': TokenType.SWITCH, /* Unsupported */

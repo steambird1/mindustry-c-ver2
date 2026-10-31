@@ -161,6 +161,7 @@ export class SymbolEntry {
         this.isGlobal = false;
 		this.isRegister = false; // 标记是否为register变量
 		this.isStatic = (this.myType() instanceof TypeInfo) ? this.myType().isStatic() : false;
+		this.isPersistent = (this.myType() instanceof TypeInfo) ? this.myType().isPersistent() : false;
 		this.isExtern = (this.myType() instanceof TypeInfo) ? this.myType().isExtern() : false;
 		this.isRemote = (this.myType() instanceof TypeInfo) ? this.myType().isRemote() : false;
 		// Note: this is also available for functions:
@@ -312,6 +313,7 @@ export class SymbolEntry {
 			if (this.isVolatile || resultType.isVolatile()) withQualifier('volatile');
 			if (this.isExtern) withQualifier('extern');
 			if (this.isStatic) withQualifier('static');
+			if (this.isPersistent) withQualifier('persistent');
 			resultType.qualifiers = [...new Set(resultType.qualifiers)];
 			// }	// I guess it should crash otherwise. If there's no judgment, it will
 		} else {
@@ -543,6 +545,15 @@ export class TypeInfo {
 
 	isStatic() {
 		return this.qualifiers.includes('static');
+	}
+
+	/**
+	 * `persistent` is Mindustry-C's cross-run storage duration. It is not a
+	 * C99 storage class; it survives the implicit restart of the processor
+	 * program (unlike `static`, which is run-local here).
+	 */
+	isPersistent() {
+		return (this.qualifiers ?? []).includes('persistent');
 	}
 
 	isNear() {
@@ -1621,7 +1632,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 			return arr;
 		};
 		const checkQualifiers = ['const', 'volatile', 'near', 'extern', 'auto',
-			'static', 'register', 'remote', 'byname', 'byvaluename'];
+			'static', 'persistent', 'register', 'remote', 'byname', 'byvaluename'];
 		const chunks = String(typeNameRaw).split(/\s+/).filter(c => c.length > 0);
 		if (chunks.length === 0) {
 			return null;
@@ -2054,6 +2065,9 @@ export class SemanticAnalyzer extends ASTVisitor {
 			if (storageClass === 'static') {
 				varSymbol.isStatic = true;
 				//varSymbol.accessThroughPointer = true;	// i.e. [omitted] need memory allocation
+			}
+			if (storageClass === 'persistent') {
+				varSymbol.isPersistent = true;
 			}
 			if (storageClass === 'auto') {
 				varSymbol.isAuto = true;
@@ -5902,7 +5916,7 @@ export class SemanticAnalyzer extends ASTVisitor {
                     therefore always 'memory', and the 'name' version of an
                     `auto` function was never emitted.
                     */
-                    const movable = !symbol.isVolatile && !symbol.isExtern && !symbol.isStatic
+                    const movable = !symbol.isVolatile && !symbol.isExtern && !symbol.isStatic && !symbol.isPersistent
                         && !symbol.needMemoryAllocation;
                     if (oneRegister && movable && this.namePointersEnabled(symbol)) return 'name';
                     return 'memory';
@@ -5916,7 +5930,7 @@ export class SemanticAnalyzer extends ASTVisitor {
                     ...(declaration?.declarator?.type?.getAttribute?.('qualifiers') ?? [])
                 ];
                 const forced = qualifierList.includes('volatile') || qualifierList.includes('extern')
-                    || qualifierList.includes('static');
+                    || qualifierList.includes('static') || qualifierList.includes('persistent');
                 const typeName = String(declaration?.declarator?.type?.typeName
                     ?? declaration?.declaration?.type?.typeName ?? '');
                 const composite = /\bstruct\b|\bunion\b|\[/.test(typeName);
@@ -7646,7 +7660,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 		older, lossier parsing used to make both read the same -- which is what
 		made the two spellings match here.
 		*/
-		const ignoredQualifiers = ['auto', 'static', 'extern', 'near', 'register', 'byname', 'byvaluename', 'volatile'];
+		const ignoredQualifiers = ['auto', 'static', 'persistent', 'extern', 'near', 'register', 'byname', 'byvaluename', 'volatile'];
 		const strip = t => {
 			let head = t;
 			while (head) {
@@ -7700,7 +7714,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 		sourceType = sourceType.duplicate();
         
 		// Remove auto and volatile qualifier for both sides:
-		const ignoredQualifiers = ['auto', 'volatile', 'static', 'extern', 'near'];
+		const ignoredQualifiers = ['auto', 'volatile', 'static', 'persistent', 'extern', 'near'];
 		sourceType.qualifiers = sourceType.qualifiers.filter(
 			item => (!ignoredQualifiers.includes(item) && (sourceType.isStrictPointerImpl() || item !== 'const')) );	// 'const' of source does not matter
 		targetType.qualifiers = targetType.qualifiers.filter(

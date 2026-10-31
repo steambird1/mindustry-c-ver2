@@ -492,7 +492,7 @@ export class Parser {
         }
 		*/
 		
-		const storageTokens = ['static', 'register', 'extern', 'auto'];
+		const storageTokens = ['static', 'persistent', 'register', 'extern', 'auto'];
 
 		const typeTokens = [
             TokenType.INT, TokenType.CHAR, TokenType.FLOAT, TokenType.VOID, TokenType.BOOL,
@@ -703,7 +703,7 @@ export class Parser {
         const qualifiers = [];
         while (this.matchTokenTypeAt(this.currentTokenIndex, [
             TokenType.CONST, TokenType.VOLATILE,
-            TokenType.STATIC, TokenType.EXTERN, TokenType.AUTO, TokenType.REGISTER,
+            TokenType.STATIC, TokenType.PERSISTENT, TokenType.EXTERN, TokenType.AUTO, TokenType.REGISTER,
 			TokenType.NEAR, TokenType.BYNAME
         ])) {
 			const qualifierToken = this.consumeToken();
@@ -817,7 +817,7 @@ export class Parser {
         // 跳过类型限定符和存储类说明符
         while (this.matchTokenTypeAt(currentIndex, [
             TokenType.CONST, TokenType.VOLATILE,
-            TokenType.STATIC, TokenType.EXTERN, TokenType.AUTO, TokenType.REGISTER
+            TokenType.STATIC, TokenType.PERSISTENT, TokenType.EXTERN, TokenType.AUTO, TokenType.REGISTER
         ])) {
             currentIndex++;
         }
@@ -1009,6 +1009,7 @@ export class Parser {
         let isInline = false;
         
         while (this.matchToken(TokenType.STATIC) || 
+               this.matchToken(TokenType.PERSISTENT) ||
                this.matchToken(TokenType.INLINE) || 
                this.matchToken(TokenType.EXTERN) ||
                this.matchToken(TokenType.VOLATILE) ||
@@ -1017,6 +1018,7 @@ export class Parser {
             if (token.type === TokenType.INLINE) {
                 isInline = true;
             } else if (token.type === TokenType.STATIC || 
+                      token.type === TokenType.PERSISTENT ||
                       token.type === TokenType.EXTERN) {
                 storageClass = token.value;
             }
@@ -2393,7 +2395,7 @@ export class Parser {
 		// but `remote(x, y)` / `byname(&c)` are calls: a following `(` means the
 		// parenthesized text is an expression, not a type name.
 		if (['REMOTE', 'BYNAME', 'CONST', 'VOLATILE', 'NEAR', 'REGISTER', 'STATIC',
-			'EXTERN', 'AUTO'].includes(token.type)) {
+			'PERSISTENT', 'EXTERN', 'AUTO'].includes(token.type)) {
 			const next = this.peekToken(1);
 			return !!next && next.type !== TokenType.LEFT_PAREN;
 		}

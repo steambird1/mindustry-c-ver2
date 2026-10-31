@@ -615,7 +615,7 @@ export class Optimizer extends ASTVisitor {
 			// Only something that fits a single register can be named
 			if (['pointer', 'array', 'struct', 'union'].includes(type.kind)) continue;
 			// These have to live in memory, so there is no register to name
-			if (symbol.isVolatile || symbol.isExtern || symbol.isStatic) continue;
+			if (symbol.isVolatile || symbol.isExtern || symbol.isStatic || symbol.isPersistent) continue;
 			if (this.isRecursiveSymbol?.(symbol)) continue;
 			symbol.addressedAsBuiltinOutput = true;
 		}
@@ -866,7 +866,7 @@ export class Optimizer extends ASTVisitor {
 					block/offset pair and no single register to name.
 					*/
 					if (widthOfType(typeOfSymbol(symbol)) === 1) {
-						if (symbol.isVolatile || symbol.isStatic
+						if (symbol.isVolatile || symbol.isStatic || symbol.isPersistent
 							|| (symbol.isExtern && !symbol.isGlobal)) {
 							return { kind: 'invalid', target: null, targetSymbol: symbol };
 						}
@@ -883,7 +883,7 @@ export class Optimizer extends ASTVisitor {
 				worked. A local `extern` has no such name, so it stays out.
 				*/
 				const nameable = symbol.isExtern && !symbol.isGlobal;
-				if (symbol.isVolatile || nameable || symbol.isStatic) {
+				if (symbol.isVolatile || nameable || symbol.isStatic || symbol.isPersistent) {
 					return { kind: 'invalid', target: null, targetSymbol: symbol };
 				}
 				if (!isSingleRegister(typeOfSymbol(symbol))) {
@@ -1036,6 +1036,7 @@ export class Optimizer extends ASTVisitor {
 			if (symbol.isVolatile) return `'${symbol.name}' is volatile`;
 			if (symbol.isExtern && !symbol.isGlobal) return `'${symbol.name}' is declared extern`;
 			if (symbol.isStatic) return `'${symbol.name}' is static`;
+			if (symbol.isPersistent) return `'${symbol.name}' is persistent`;
 			if (isArraySymbol(symbol)) return `'${symbol.name}' is an array, which has no single register to name`;
 			if (!isSingleRegister(typeOfSymbol(symbol))) {
 				return `'${symbol.name}' is not a single register`
@@ -1473,7 +1474,7 @@ export class Optimizer extends ASTVisitor {
 	 * @returns {boolean}
 	 */
 	isRecursiveSymbol(symbol) {
-		if (!symbol || symbol.isStatic) return false;
+		if (!symbol || symbol.isStatic || symbol.isPersistent) return false;
 		const region = symbol.getFunctionRegion?.() ?? null;
 		return !!region && this.recursiveFunctions?.has(region);
 	}
@@ -2305,7 +2306,7 @@ export class Optimizer extends ASTVisitor {
 			const localConstants = this.localConstants.get(scopePath);
 			const variableUses = this.variableUses.get(scopePath);
 			
-			const canOptimizeThis = !(symbol.isVolatile || symbol.isStatic || symbol.isExtern
+			const canOptimizeThis = !(symbol.isVolatile || symbol.isStatic || symbol.isPersistent || symbol.isExtern
 				|| symbol.isRemoteTarget);
             symbol.variableReferrer.rejecting = !canOptimizeThis;
 
@@ -4970,7 +4971,7 @@ export class Optimizer extends ASTVisitor {
 			(`static`), or somebody took its address.
 			*/
 			if (varSymbol && (varSymbol.isVolatile || varSymbol.isExtern
-				|| varSymbol.isStatic || varSymbol.isAddressed)) {
+				|| varSymbol.isStatic || varSymbol.isPersistent || varSymbol.isAddressed)) {
 				return false;
 			}
 			const scopePath = (varInfo.scope ?? this.currentScope.lookupScopeOf(varName)).getPath();
@@ -5765,7 +5766,7 @@ export class Optimizer extends ASTVisitor {
 		never reads it back. Deleting the write would delete the message.
 		*/
 		if (symbol.isRemote) return false;
-		return  (!symbol.isVolatile) && (!symbol.isExtern) && (!symbol.isStatic)
+		return  (!symbol.isVolatile) && (!symbol.isExtern) && (!symbol.isStatic) && (!symbol.isPersistent)
 			&& (!symbol.isAddressed) && (!symbol.isRemoteTarget) && varOk;
 	}
 
@@ -6718,6 +6719,17 @@ export class Optimizer extends ASTVisitor {
 		if (!info) return false;
 		if (funcName === 'main') return false;
 		if (!info.node || !info.node.body) return false;
+		/*
+		A function with a `static` / `persistent` local owns one object per
+		declaration. Inlining clones the body (and its scopes), which would
+		create one object per call site: `static int s` then starts at 0 at
+		each site. Keeping the function out of the inliner preserves the single
+		object; the explicit `inline` keyword cannot override this hard veto.
+		*/
+		if (info.node.scope
+			&& info.node.scope.recursivelyGetAllSymbols().some(s => s && (s.isStatic || s.isPersistent))) {
+			return false;
+		}
 		// Reachable through a function pointer: the call sites are not all known
 		if (info.isAddressed) return false;
 		if (this.recuriveInfo?.has(funcName)) return false;
@@ -7052,6 +7064,7 @@ export class Optimizer extends ASTVisitor {
 				if (node.dataType && (node.dataType.isPointerImpl() ||
 					node.dataType.qualifiers.includes('volatile') 
 					|| node.dataType.qualifiers.includes('static')
+					|| node.dataType.qualifiers.includes('persistent')
 					|| node.dataType.qualifiers.includes('extern'))) {	// 'extern' means that the variable might be modified from the outside
 					return true;
 				}
@@ -7063,6 +7076,7 @@ export class Optimizer extends ASTVisitor {
 				if (node.left.dataType && (node.left.dataType.isPointerImpl() ||
 					node.left.dataType.qualifiers.includes('volatile') 
 					|| node.left.dataType.qualifiers.includes('static')
+					|| node.left.dataType.qualifiers.includes('persistent')
 					|| node.left.dataType.qualifiers.includes('extern'))) {
 					return true;
 				}

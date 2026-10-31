@@ -85,6 +85,8 @@ export async function compileAndRun(source, memoryBlocks = [{ name: 'bank1', siz
 export async function simulate(pathOrSource, memoryBlocks, extraAttributes = {}) {
 	const source = pathOrSource.includes('\n') || !/\.c$/.test(pathOrSource)
 		? pathOrSource : fs.readFileSync(pathOrSource, 'utf8');
+	const runs = Math.max(1, Math.min(100,
+		Number((source.match(/\/\/\s*RUNS:\s*(\d+)/i) || [])[1]) || 1));
 	const { result, memoryBlocks: blocks } = await compileAndRun(source, memoryBlocks, extraAttributes);
 	if (!result.success) {
 		return { success: false, errors: (result.errors ?? []).map(e => e.message ?? String(e)), output: '', warnings: [] };
@@ -258,7 +260,7 @@ export async function simulate(pathOrSource, memoryBlocks, extraAttributes = {})
 		};
 	}
 	const proc = runProgram(String(result.code ?? ''), {
-		links, devices, maxSteps: 5_000_000,
+		links, devices, maxSteps: 5_000_000, runs,
 		...worldOptions
 	});
 	return {

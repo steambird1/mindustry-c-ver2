@@ -164,6 +164,8 @@ export class Processor {
 		this.steps = 0;
 		this.pc = 0;
 		this.halted = false;
+		this.stopped = false;
+		this.ended = false;
 		this.trap = null;
 		// Callbacks a test may install to model the world itself
 		this.sensorProvider = options.sensorProvider ?? null;
@@ -441,8 +443,17 @@ export class Processor {
 				this.draws.push(ins.text);
 				next(); return;
 			}
-			case 'stop':
+			case 'stop': {
+				this.stopped = true;
+				this.halted = true; return;
+			}
 			case 'end': {
+				/*
+				A processor restarts at instruction 0 after `end`; the runner's
+				`runs` option reuses this flag to preserve registers/memory
+				between passes. A single-run caller still sees a halted program.
+				*/
+				this.ended = true;
 				this.halted = true; return;
 			}
 			case 'noop':
@@ -823,5 +834,14 @@ export function runProcessors(sources, options = {}) {
 export function runProgram(code, options = {}) {
 	const instructions = parseProgram(code);
 	const proc = new Processor(instructions, options);
-	return proc.run();
+	const runs = Math.max(1, Math.min(100, Number(options.runs) || 1));
+	for (let pass = 0; pass < runs; pass++) {
+		proc.pc = 0;
+		proc.steps = 0;
+		proc.halted = false;
+		proc.ended = false;
+		proc.run();
+		if (proc.stopped || proc.trap) break;
+	}
+	return proc;
 }

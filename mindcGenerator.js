@@ -409,7 +409,7 @@ export class CodeGenerator extends ASTVisitor {
 	 * @returns {boolean}
 	 */
 	isInRecursiveFunction(symbol) {
-		if (symbol.isStatic) return false;
+		if (symbol.isStatic || symbol.isPersistent) return false;
 		const region = symbol.getFunctionRegion?.() ?? null;
 		return !!region && this.recursiveInfo.has(region);
 	}
@@ -573,7 +573,7 @@ export class CodeGenerator extends ASTVisitor {
 						this.decideSymbolStorage(symb, ctx);
 						this.allocateSymbolMemory(symb, ctx);
 					});
-					const immediate = !ctx.staticAllocOnly || symbol.isStatic || symbol.isVirtualSymbol;
+					const immediate = !ctx.staticAllocOnly || symbol.isStatic || symbol.isPersistent || symbol.isVirtualSymbol;
 					if (immediate) symbol.memberHandler = { stackSymbols, regStructMem };
 					break;
 				}
@@ -660,7 +660,7 @@ export class CodeGenerator extends ASTVisitor {
 		if (!(symbol.accessThroughPointer || symbol.needMemoryAllocation)) return;
 		if (symbol.kind === 'function') return;
 
-		const immediate = !ctx.staticAllocOnly || symbol.isStatic || symbol.isVirtualSymbol;
+		const immediate = !ctx.staticAllocOnly || symbol.isStatic || symbol.isPersistent || symbol.isVirtualSymbol;
 		if (!immediate) {
 			/*
 			The allocation is deferred to the top of the function call. Note it
@@ -1251,7 +1251,7 @@ export class CodeGenerator extends ASTVisitor {
 				symbol => {
 				// Symbol values
 					const symType = symbol.myType();
-					if ((symbol.accessThroughPointer || symbol.needMemoryAllocation) && !(symbol.isStatic)) {
+					if ((symbol.accessThroughPointer || symbol.needMemoryAllocation) && !(symbol.isStatic || symbol.isPersistent)) {
 						stackSymbols.push(symbol);
 					}
 			});
@@ -1273,7 +1273,12 @@ export class CodeGenerator extends ASTVisitor {
 		const allSymbols = this.semantic.globalScope.recursivelyGetAllSymbols();
 		let staticProcessor = new Instruction();
 		allSymbols.forEach(symbol => {
-			if (symbol.isStatic && !symbol.isGlobal) {
+			/*
+			`static` is run-local in this dialect: its initialization guard is
+			reset at the start of every run. `persistent` keeps its guard, so it
+			initializes only once for the processor lifetime.
+			*/
+			if (symbol.isStatic) {
 				const endTag = `${symbol.getAssemblySymbol()}:_static_tag`;
 				staticProcessor.concat(InstructionBuilder.set(endTag, 'false'));
 			}
@@ -2372,6 +2377,80 @@ export class CodeGenerator extends ASTVisitor {
 	 * @param {ASTNode} initializer An InitializerList
 	 * @returns {Instruction}
 	 */
+	/**
+	 * Zero every element of a static/persistent array.
+	 *
+	 * The array can be in memory or in registers; `arrayViewOf` chooses the
+	 * same representation a subscript would use. Encoded/remote/lookup
+	 * layouts are skipped: an encoded array is immutable, and a remote or
+	 * lookup table has no local cells to zero.
+	 *
+	 * @param {SymbolEntry} symbol
+	 * @returns {Instruction}
+	 */
+	zeroLifetimeArray(symbol) {
+		// An unbound handle is one register waiting for `a = b;`; it has no
+		// elements to zero.
+		if (symbol.isUnboundHandle) return new Instruction();
+		const style = this.arrayStyleFor(symbol);
+		if (!style || style.type === 'encoded'
+			|| style.implement === 'lookup' || symbol.isRemote) {
+			return new Instruction();
+		}
+		const length = this.arrayLengthOf(symbol);
+		if (!Number.isFinite(length) || length <= 0) return new Instruction();
+		if (style.type === 'traditional') {
+			const base = symbol.memoryRef?.();
+			if (!base) return new Instruction();
+			const cells = Math.max(1, Number(symbol.myType()?.size) || length);
+			const result = new Instruction();
+			for (let i = 0; i < cells; i++) {
+				result.concat(this.memory.outputStorageOf(
+					base.duplicate().forwarding(i), '0'));
+			}
+			return result;
+		}
+		const view = this.arrayViewOf(symbol);
+		if (!view) return new Instruction();
+		const result = new Instruction();
+		for (let i = 0; i < length; i++) {
+			const element = view.element(i);
+			result.concat(element.set(new ImmediateRet(this.glob, '0', element.type ?? null)));
+		}
+		return result;
+	}
+
+	zeroLifetimeAggregate(symbol) {
+		const type = symbol.myType();
+		if (!type) return new Instruction();
+		const base = symbol.memoryRef?.();
+		if (base && (symbol.needMemoryAllocation || symbol.accessThroughPointer
+			|| type.isPointerImpl?.())) {
+			const cells = Math.max(1, this.semantic.calculateTypeSize(type) || type.size || 1);
+			const result = new Instruction();
+			for (let i = 0; i < cells; i++) {
+				result.concat(this.memory.outputStorageOf(
+					base.duplicate().forwarding(i), '0'));
+			}
+			return result;
+		}
+		const result = new Instruction();
+		const zeroMembers = (prefix, structType) => {
+			for (const member of structType.members ?? []) {
+				const name = `${prefix}.${member.name}`;
+				const memberType = member.type;
+				const kind = memberType?.kind ?? null;
+				if (kind === 'struct' || kind === 'union') {
+					zeroMembers(name, memberType);
+				} else if (kind !== 'array') {
+					result.concat(InstructionBuilder.set(name, '0'));
+				}
+			}
+		};
+		zeroMembers(symbol.getAssemblySymbol(), type);
+		return result;
+	}
+
 	initializeEmbeddedArray(symbol, style, initializer) {
 		const items = initializer.values ?? initializer.children ?? null;
 		if (!Array.isArray(items) || items.length === 0) return new Instruction();
@@ -2537,6 +2616,28 @@ export class CodeGenerator extends ASTVisitor {
 		const arrayStyle = this.arraySymbolOfIdentifier(symbol)
 			? this.arrayStyleFor(symbol) : null;
 		/*
+		`static` is run-local and `persistent` lives for the processor
+		lifetime, but both need their initializer to run only once per
+		lifetime. The tag is reset at run start for `static` only; see the
+		generated prologue.
+		*/
+		const hasLifetimeTag = symbol.isStatic || symbol.isPersistent;
+		const endTag = `${symbol.getAssemblySymbol()}:_static_tag`;
+		/*
+		Ordinary globals are per-run in this dialect. Their initializer (if
+		any) already runs every pass; an uninitialized one needs an explicit
+		zero because registers/memory may retain a previous run's value.
+		`extern`/`remote` are owned elsewhere, and `persistent` is the opt-in
+		exception.
+		*/
+		const runGlobalReset = !hasLifetimeTag && symbol.isGlobal
+			&& !symbol.isExtern && !symbol.isRemote && !node.initializer;
+		let endJumper = null;
+		if (hasLifetimeTag) {
+			endJumper = InstructionBuilder.jump('{skip_init}', 'notEqual', endTag, 'false');
+			finalize.concat(endJumper);
+		}
+		/*
 		An array held in registers still needs its elements FILLED IN: the
 		layout only decides where they live, not what they contain. Only an
 		`encoded` array is genuinely nothing but its own contents (they are the
@@ -2547,15 +2648,13 @@ export class CodeGenerator extends ASTVisitor {
 			if (arrayStyle.type !== 'encoded') {
 				finalize.concat(this.initializeEmbeddedArray(symbol, arrayStyle, node.initializer));
 			}
+			if (hasLifetimeTag) {
+				finalize.concat(InstructionBuilder.set(endTag, 'true'));
+				finalize.concat(new InstructionReferrer(endJumper, 'skip_init', 0));
+			}
 			return finalize;
 		}
-		if (!symbol.memoryLocation || node.initializer) {
-			let endJumper = null;
-			const endTag = `${symbol.getAssemblySymbol()}:_static_tag`;
-			if (symbol.isStatic) {
-				endJumper = InstructionBuilder.jump('{skip_init}', 'notEqual', endTag, 'false');
-				finalize.concat(endJumper);
-			}
+		if (!symbol.memoryLocation || node.initializer || hasLifetimeTag || runGlobalReset) {
 			// This is reserved
 			let evaluation = node.initializer ? this.visitAndRead(node.initializer) : new Instruction();
 			
@@ -2660,9 +2759,23 @@ export class CodeGenerator extends ASTVisitor {
 				} else {
 					finalize.concat(evaluation.replace_variable(symbol.getAssemblySymbol(), evaluation.instructionReturn));
 				}
+			} else if (!node.initializer && (hasLifetimeTag || runGlobalReset)) {
+				/*
+				C leaves static storage zero-initialized. Do it explicitly:
+				memory cells and registers may otherwise contain values from a
+				previous run or a previous use of the block.
+				*/
+				const kind = symbol.myType()?.kind;
+				if (kind === 'basic' || kind === 'pointer' || kind === 'device' || kind === 'null') {
+					finalize.concat(this.writeSymbol(symbol, 0));
+				} else if (kind === 'array') {
+					finalize.concat(this.zeroLifetimeArray(symbol));
+				} else if (kind === 'struct' || kind === 'union') {
+					finalize.concat(this.zeroLifetimeAggregate(symbol));
+				}
 			}
 			
-			if (symbol.isStatic) {
+			if (hasLifetimeTag) {
 				finalize.concat(InstructionBuilder.set(endTag, 'true'));
 				finalize.concat(new InstructionReferrer(endJumper, 'skip_init', 0));
 			}

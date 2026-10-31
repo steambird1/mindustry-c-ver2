@@ -9,6 +9,7 @@ Also used for linter; this assume that you have already ignored any error.
 
 #include <stdbool.h>
 #define auto
+#define persistent
 
 typedef unsigned int content_t;
 typedef unsigned int device;
