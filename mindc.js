@@ -423,6 +423,36 @@ export class Compiler {
 									if (Number.isFinite(parsed)) optimizerConfig.structPointerThreshold = parsed;
 								}
 								break;
+							case "switch_table":
+								/*
+								The encoded switch jump table is normally chosen by
+								a density heuristic. This pragma can force it or turn
+								it off:
+								  #pragma optimize(switch_table)       -- force
+								  #pragma optimize(switch_table, 256)  -- force, max range
+								  #pragma optimize(switch_table, off)  -- never
+								  #pragma optimize(switch_table, auto) -- heuristic
+								The table only changes dispatch, never program output.
+								*/
+								if (config.length >= 2 && config[1] === 'off') {
+									optimizerConfig.switchTableMode = 'off';
+								} else if (config.length >= 2 && config[1] === 'auto') {
+									optimizerConfig.switchTableMode = 'auto';
+								} else if (config.length >= 2 && config[1] === 'on') {
+									optimizerConfig.switchTableMode = 'on';
+								} else {
+									optimizerConfig.switchTableMode = 'on';
+									if (config.length >= 2) {
+										const parsed = Number(config[1]);
+										if (!Number.isFinite(parsed) || parsed <= 0) {
+											throw new InternalGenerationFailure(
+												`#pragma optimize(switch_table, ...) expects off, auto, on`
+												+ ` or a positive maximum, but got '${config[1]}'`);
+										}
+										optimizerConfig.switchTableMax = Math.min(Math.floor(parsed), 4096);
+									}
+								}
+								break;
 						}
 					} else if (info.startsWith("overload")) {
 						/*

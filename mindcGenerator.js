@@ -1964,8 +1964,8 @@ export class CodeGenerator extends ASTVisitor {
 	 * base-57 digits.
 	 *
 	 * The table stores target line numbers, so a single character is enough
-	 * only for tiny programs: two digits cover 0..3248, which is the default
-	 * instruction budget. Sparse ranges and old target versions keep the
+	 * only for tiny programs: two digits cover 0..3248, well above the default
+	 * 1000-instruction budget. Sparse ranges and old target versions keep the
 	 * comparison chain.
 	 *
 	 * @param {number} caseCount number of non-default case labels
