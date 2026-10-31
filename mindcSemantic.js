@@ -767,7 +767,7 @@ export class TypeInfo {
 		if (['array', 'pointer'].includes(this.kind)) {
 			return this.extractSingle();
 		} else if (['struct', 'union'].includes(this.kind)) {
-			return this.members[k];
+			return this.members[k]?.type ?? null;
 		} else {
 			return null;
 		}

@@ -2378,6 +2378,58 @@ export class CodeGenerator extends ASTVisitor {
 	 * @returns {Instruction}
 	 */
 	/**
+	 * Does a type contain a pointer anywhere?
+	 *
+	 * Static/persistent storage is not zeroed for pointers: Mindustry has no
+	 * meaningful "null address", so writing 0 to a pointer (or to one half of
+	 * a two-word pointer) is not an initialization. A member or array that
+	 * contains one is skipped by the zeroing helpers.
+	 */
+	containsPointerType(type, seen = new Set()) {
+		if (!type || typeof type !== 'object' || seen.has(type)) return false;
+		seen.add(type);
+		if (type.kind === 'pointer') return true;
+		if (type.kind === 'array') return this.containsPointerType(type.pointerTo, seen);
+		if (type.kind === 'struct' || type.kind === 'union') {
+			return (type.members ?? []).some(member => this.containsPointerType(member.type, seen));
+		}
+		return false;
+	}
+
+	zeroMemoryCells(base, offset, cells) {
+		const result = new Instruction();
+		const count = Math.max(0, Number(cells) || 0);
+		for (let i = 0; i < count; i++) {
+			result.concat(this.memory.outputStorageOf(
+				base.duplicate().forwarding(offset + i), '0'));
+		}
+		return result;
+	}
+
+	zeroMemoryAggregate(base, type, offset = 0) {
+		const result = new Instruction();
+		if (!type) return result;
+		for (const member of type.members ?? []) {
+			const memberType = member.type;
+			if (!memberType) continue;
+			const memberOffset = offset + (member.offset ?? 0);
+			if (memberType.kind === 'struct' || memberType.kind === 'union') {
+				result.concat(this.zeroMemoryAggregate(base, memberType, memberOffset));
+				continue;
+			}
+			if (this.containsPointerType(memberType)) continue;
+			if (memberType.kind === 'array') {
+				result.concat(this.zeroMemoryCells(base, memberOffset,
+					memberType.size ?? 0));
+			} else {
+				result.concat(this.zeroMemoryCells(base, memberOffset,
+					memberType.size || 1));
+			}
+		}
+		return result;
+	}
+
+	/**
 	 * Zero every element of a static/persistent array.
 	 *
 	 * The array can be in memory or in registers; `arrayViewOf` chooses the
@@ -2397,18 +2449,17 @@ export class CodeGenerator extends ASTVisitor {
 			|| style.implement === 'lookup' || symbol.isRemote) {
 			return new Instruction();
 		}
+		const type = symbol.myType();
+		const elementType = type?.pointerTo ?? null;
+		// A pointer has no meaningful all-zero value; do not initialize it.
+		if (this.containsPointerType(elementType)) return new Instruction();
 		const length = this.arrayLengthOf(symbol);
 		if (!Number.isFinite(length) || length <= 0) return new Instruction();
 		if (style.type === 'traditional') {
 			const base = symbol.memoryRef?.();
 			if (!base) return new Instruction();
-			const cells = Math.max(1, Number(symbol.myType()?.size) || length);
-			const result = new Instruction();
-			for (let i = 0; i < cells; i++) {
-				result.concat(this.memory.outputStorageOf(
-					base.duplicate().forwarding(i), '0'));
-			}
-			return result;
+			const cells = Math.max(1, Number(type?.size) || length);
+			return this.zeroMemoryCells(base, 0, cells);
 		}
 		const view = this.arrayViewOf(symbol);
 		if (!view) return new Instruction();
@@ -2426,23 +2477,24 @@ export class CodeGenerator extends ASTVisitor {
 		const base = symbol.memoryRef?.();
 		if (base && (symbol.needMemoryAllocation || symbol.accessThroughPointer
 			|| type.isPointerImpl?.())) {
-			const cells = Math.max(1, this.semantic.calculateTypeSize(type) || type.size || 1);
-			const result = new Instruction();
-			for (let i = 0; i < cells; i++) {
-				result.concat(this.memory.outputStorageOf(
-					base.duplicate().forwarding(i), '0'));
-			}
-			return result;
+			return this.zeroMemoryAggregate(base, type, 0);
 		}
 		const result = new Instruction();
 		const zeroMembers = (prefix, structType) => {
 			for (const member of structType.members ?? []) {
 				const name = `${prefix}.${member.name}`;
 				const memberType = member.type;
-				const kind = memberType?.kind ?? null;
+				if (!memberType) continue;
+				const kind = memberType.kind;
 				if (kind === 'struct' || kind === 'union') {
 					zeroMembers(name, memberType);
-				} else if (kind !== 'array') {
+					continue;
+				}
+				// A pointer has no meaningful all-zero value; arrays that
+				// contain one are left alone as a whole (walking into an
+				// arbitrary pointer shape would be worse than leaving it).
+				if (this.containsPointerType(memberType)) continue;
+				if (kind !== 'array') {
 					result.concat(InstructionBuilder.set(name, '0'));
 				}
 			}
@@ -2766,7 +2818,7 @@ export class CodeGenerator extends ASTVisitor {
 				previous run or a previous use of the block.
 				*/
 				const kind = symbol.myType()?.kind;
-				if (kind === 'basic' || kind === 'pointer' || kind === 'device' || kind === 'null') {
+				if (kind === 'basic' || kind === 'device' || kind === 'null') {
 					finalize.concat(this.writeSymbol(symbol, 0));
 				} else if (kind === 'array') {
 					finalize.concat(this.zeroLifetimeArray(symbol));

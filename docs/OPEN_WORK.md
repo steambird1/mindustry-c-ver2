@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 202 passed, 0 failed (139 shape assertions, 885 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 203 passed, 0 failed (139 shape assertions, 890 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 64 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
@@ -805,21 +805,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 558 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 559 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 558 under `testers/unit_tests`, every one of
+bring the count to 559 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 202 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `check.mjs` | 203 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
 | `negative.mjs` | 64 | `negative/` |
 | `nomem.mjs` | 7 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-202 + 10 + 64 + 7 + 275 = 558. The caveat that replaces "no runner" is weaker but real:
+203 + 10 + 64 + 7 + 275 = 559. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -1334,7 +1334,13 @@ storage duration that survives the implicit restart. The prologue resets
 all static initialization tags (including file-scope statics); persistent
 tags are left alone. Uninitialized static/persistent scalars, arrays and
 structs are explicitly zeroed, and embedded-array initializers now sit
-behind the same lifetime guard. Ordinary globals are per-run: initialized
+behind the same lifetime guard. Pointers are deliberately NOT zeroed:
+Mindustry has no meaningful null address, so writing 0 to a pointer (or to
+one half of its two-word representation) is not an initialization.
+Non-pointer members of nested structs are still zeroed, and nested
+aggregate initializers (`{{1, 2}, 3}`) now work; the crash there was
+`TypeInfo.extractKth` returning a `MemberInfo` where a `TypeInfo` was
+required. Ordinary globals are per-run: initialized
 ones rerun their initializer, uninitialized ones are zeroed;
 `extern`/remote are left to their owners, though an `extern` WITH an
 initializer still performs that initializer on this side every run.
@@ -1348,4 +1354,5 @@ while preserving registers/memory, so cross-run behavior is testable.
 `stop()` still halts permanently. Cases: t186 (static local/global ->
 `2 1` twice), t187 (persistent local/global/uninitialized -> `2 1 0` then
 `4 2 1`), t188 (static/persistent arrays and structs, ordinary globals),
-and t189 (`extern` with/without an initializer).
+t189 (`extern` with/without an initializer), and t190 (nested struct
+initialization, pointer members skipped while non-pointer members zero).

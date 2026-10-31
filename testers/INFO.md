@@ -13,7 +13,7 @@
 
 | 命令（从 `testers/unit_tests` 执行） | 读哪个目录 | 当前结果 | 判定标准 |
 |---|---|---|---|
-| `node ..\tools\check.mjs` | `check/` | **202 passed, 0 failed**（139 shape assertions, 885 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
+| `node ..\tools\check.mjs` | `check/` | **203 passed, 0 failed**（139 shape assertions, 890 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
 | `node ..\tools\negative.mjs` | `negative/` | **64 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
 | `node ..\tools\nomem.mjs` | `nomem/` | **7 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
 | `node ..\tools\loadorder.mjs` | 仓库根的 `mindc*.js` | **12 passed, 0 failed, 2 exempt** | 每个入口单独起一个 `node` 进程导入，不得有循环依赖 |
@@ -67,11 +67,11 @@
 
 ## 目录地图
 
-`testers/unit_tests/` 下共 **558 个 `.c`，全部有 runner**（202 + 10 + 64 + 7 + 275 = 558）：
+`testers/unit_tests/` 下共 **559 个 `.c`，全部有 runner**（203 + 10 + 64 + 7 + 275 = 559）：
 
 | 目录 | 文件数 | 谁来跑 |
 |---|---|---|
-| `check/` | 202 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
+| `check/` | 203 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
 | `t/` | 98 | `runall.mjs`（早期按主题分的用例，`2dc683e` 起纳入） |
 | `negative/` | 64 | `negative.mjs` |
 | `suite/` | 50 | `runall.mjs` |
@@ -95,7 +95,7 @@
 
 ## check/ 的编号约定
 
-`check/` 用 `tNN_主题.c` 命名，**编号 1–189 已用满，没有空号**，下一个用例是 `t190`。
+`check/` 用 `tNN_主题.c` 命名，**编号 1–190 已用满，没有空号**，下一个用例是 `t191`。
 另有 13 个不带编号的（`m1`–`m3`、`n1`–`n2`、`rw1`–`rw2`、`seq1`、`memsp2`–`memsp3`），
 它们早于编号制，保留原名。
 
@@ -188,6 +188,7 @@
 | `t187` | **§7.17**：`persistent` 跨运行持久——局部/全局/未初始化 persistent 输出 `2 1 0`，下一次运行 `4 2 1` |
 | `t188` | **§7.17**：存储形状——static/persistent 的 embedded 数组、未初始化数组、未初始化 struct、普通全局变量；两次运行输出 `2 3 0 2 3 0 0 2 3 0 4 5 0 0` |
 | `t189` | **§7.17**：`extern` 显式初始化仍在本侧每次运行执行（`10 0`），无初始化器的 `extern` 不重置（下一次运行 `10 1`）；`// RUNS: 2` |
+| `t190` | **§7.17**：嵌套结构体初始化 `{{1,2},3}`；static 每次运行重置、persistent 跨运行累加；指针成员不置零、非指针成员正常置零 → `123 223 0 0 123 323 0 0` |
 
 设计背景见 `docs/PLAN_array_layout.md`。
 
