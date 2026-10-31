@@ -6,12 +6,13 @@ rule rebuilds the target address in O(1).
 The filler is only there to push `classify` past line 57, so both base-57
 planes are used and the encoded characters include `$`/`&` (which would be
 mishandled by a multi-character replacement). The filler itself produces no
-output.
+output. There is no `default`: `classify(9)` must go to `switch_end` and
+print nothing.
 
 `EMIT` assertions on the table read and counter write prove the table path;
 the runner re-runs this under the invariance pragmas.
 */
-/* EXPECT: 10 13 17 99 */
+/* EXPECT: 10 13 17 */
 /* EMIT: read __switch_tgt_ */
 /* EMIT: set @counter __switch_tgt_ */
 auto device message1;
@@ -41,7 +42,6 @@ void classify(int x) {
 		case 5: print(15); break;
 		case 6: print(16); break;
 		case 7: print(17); break;
-		default: print(99);
 	}
 }
 
