@@ -29,7 +29,8 @@ import { ensureMemspHelper, remoteDeviceRegOf, remoteNameRegOf, RemotePointerRet
 	RegistryStructRet, NamePointerRet, MemoryNamePointerRet,
 	arrayRetOf, selectArrayImplementation, accessCostOf,
 	pointerToValue, valueToPointer, contentTypeOf, SPECIAL_CONTENT_TYPES,
-	arithmetic, widthOfType, knownContentIdOf, memberTypeOf, InvalidCastException, InfrastructureNotImplementedExpection
+	arithmetic, widthOfType, knownContentIdOf, memberTypeOf, InvalidCastException, InfrastructureNotImplementedExpection,
+	ENCODED_OFFSET, ENCODED_RADIX
  } from "./mindcInfrastructure.js";
 
 export class InternalGenerationFailure {
@@ -1837,45 +1838,195 @@ export class CodeGenerator extends ASTVisitor {
 
 		const statements = node.body?.statements ?? [];
 		const labels = new Map();
-		const comparisons = [];
-		let fallback = 'switch_end';
+		const caseByValue = new Map();
+		let fallbackNode = null;
+		let testCaseCount = 0;
 		let index = 0;
-		const dispatch = new Instruction();
 		for (const stmt of statements) {
 			if (stmt.type !== 'CaseClause') continue;
 			const label = `case_${serial}_${index++}`;
 			labels.set(stmt, label);
 			if (stmt.test) {
-				const jumper = InstructionBuilder.jump(`{${label}}`, 'equal', discReg, String(stmt.getAttribute('caseValue')));
-				dispatch.concat(jumper);
-				comparisons.push([jumper, label]);
+				testCaseCount++;
+				caseByValue.set(Number(stmt.getAttribute('caseValue')), stmt);
 			} else {
-				fallback = label;
+				fallbackNode = stmt;
 			}
 		}
-		const fallbackJumper = InstructionBuilder.jump(`{${fallback}}`, 'always');
-		dispatch.concat(fallbackJumper);
+		const fallback = fallbackNode ? labels.get(fallbackNode) : 'switch_end';
+
+		/*
+		Every jump into a case ends up as an InstructionReferrer placed at the
+		case's label. The table path also puts referrers there: each one writes
+		the final line number, digit by digit, into the string table used by a
+		`read`. Keeping both paths in `pending` makes the body loop unaware of
+		which dispatch was chosen.
+		*/
+		const pending = new Map();
+		const addPending = (label, item) => {
+			let list = pending.get(label);
+			if (!list) {
+				list = [];
+				pending.set(label, list);
+			}
+			list.push(item);
+		};
+		const flushPending = label => {
+			for (const item of pending.get(label) ?? []) {
+				result.concat(new InstructionReferrer(item.towards, item.name, 0, item.transmission));
+			}
+		};
+
+		const table = this.planSwitchTable(testCaseCount, [...caseByValue.keys()], caseByValue.size);
+		const dispatch = new Instruction();
+		if (table) {
+			/*
+			An encoded jump table. The case targets are line numbers, so they
+			cannot be written down until the final layout is known. Each digit
+			plane is a string of placeholders; the referrer placed at a case
+			encodes that (now known) line as one base-57 character. `read` pulls
+			a character back out in one instruction and Horner rebuilds the
+			address. No memory block and no per-case instruction are needed.
+			*/
+			const idxReg = `__switch_idx_${serial}`;
+			const tgtReg = `__switch_tgt_${serial}`;
+			const digitReg = `__switch_digit_${serial}`;
+			const readByK = new Map();
+			for (let k = table.digits - 1; k >= 0; k--) {
+				const cells = [];
+				for (let i = 0; i < table.range; i++) {
+					cells.push(`{__switch_cell_${serial}_${k}_${i}}`);
+				}
+				const dest = (k === table.digits - 1) ? tgtReg : digitReg;
+				readByK.set(k, InstructionBuilder.read(dest, `"${cells.join('')}"`, idxReg));
+			}
+
+			dispatch.concat(InstructionBuilder.op('sub', idxReg, discReg, String(table.min)));
+			const lowEdge = InstructionBuilder.jump(`{${fallback}}`, 'lessThan', idxReg, '0');
+			const highEdge = InstructionBuilder.jump(`{${fallback}}`, 'greaterThan', idxReg, String(table.range - 1));
+			dispatch.concat(lowEdge);
+			dispatch.concat(highEdge);
+			addPending(fallback, { towards: lowEdge, name: fallback, transmission: null });
+			addPending(fallback, { towards: highEdge, name: fallback, transmission: null });
+
+			for (let k = table.digits - 1; k >= 0; k--) {
+				dispatch.concat(readByK.get(k));
+				if (k !== table.digits - 1) {
+					dispatch.concat(InstructionBuilder.op('mul', tgtReg, tgtReg, String(ENCODED_RADIX)));
+					dispatch.concat(InstructionBuilder.op('add', tgtReg, tgtReg, digitReg));
+				}
+			}
+			dispatch.concat(InstructionBuilder.op('sub', tgtReg, tgtReg, String(table.correction)));
+			dispatch.concat(InstructionBuilder.set('@counter', tgtReg));
+
+			for (let i = 0; i < table.range; i++) {
+				const caseNode = caseByValue.get(table.min + i);
+				const target = caseNode ? labels.get(caseNode) : fallback;
+				for (let k = 0; k < table.digits; k++) {
+					addPending(target, {
+						towards: readByK.get(k),
+						name: `__switch_cell_${serial}_${k}_${i}`,
+						transmission: this.switchTableTransmission(k, table.digits)
+					});
+				}
+			}
+		} else {
+			for (const stmt of statements) {
+				if (stmt.type !== 'CaseClause' || !stmt.test) continue;
+				const label = labels.get(stmt);
+				const jumper = InstructionBuilder.jump(`{${label}}`, 'equal', discReg, String(stmt.getAttribute('caseValue')));
+				dispatch.concat(jumper);
+				addPending(label, { towards: jumper, name: label, transmission: null });
+			}
+			const fallbackJumper = InstructionBuilder.jump(`{${fallback}}`, 'always');
+			dispatch.concat(fallbackJumper);
+			addPending(fallback, { towards: fallbackJumper, name: fallback, transmission: null });
+		}
 		result.concat(dispatch);
 
 		for (const stmt of statements) {
 			if (stmt.type === 'CaseClause') {
-				const label = labels.get(stmt);
-				for (const [jumper, target] of comparisons) {
-					if (target === label) result.concat(new InstructionReferrer(jumper, target));
-				}
-				if (fallback === label) result.concat(new InstructionReferrer(fallbackJumper, fallback));
+				flushPending(labels.get(stmt));
 				continue;
 			}
 			result.concat(this.visit(stmt));
 		}
-		if (fallback === 'switch_end') {
-			result.concat(new InstructionReferrer(fallbackJumper, 'switch_end'));
-		}
+		if (fallback === 'switch_end') flushPending('switch_end');
 
 		this.currentBreaks.forEach(breaks => result.concat(new InstructionReferrer(breaks, 'loop_break')));
 		this.exitSwitch();
 		this.currentScope = previousScope;
 		return result;
+	}
+
+	/**
+	 * Whether a `switch` should use the encoded jump table, and with how many
+	 * base-57 digits.
+	 *
+	 * The table stores target line numbers, so a single character is enough
+	 * only for tiny programs: two digits cover 0..3248, which is the default
+	 * instruction budget. Sparse ranges and old target versions keep the
+	 * comparison chain.
+	 *
+	 * @param {number} caseCount number of non-default case labels
+	 * @param {number[]} values unique case values
+	 * @param {number} uniqueCount `values.length`, passed to detect duplicates
+	 * @returns {?{min: number, max: number, range: number, digits: number, correction: number}}
+	 */
+	planSwitchTable(caseCount, values, uniqueCount = values.length) {
+		if ((this.targetVersion ?? 0) < 150) return null;
+		const config = this.compiler?.extraConfig?.getAttribute('optimizeOption') ?? {};
+		if (config.switchTableMode === 'off') return null;
+		const forced = config.switchTableMode === 'on';
+		if (!forced && caseCount < 8) return null;
+		if (caseCount <= 0 || uniqueCount !== caseCount) return null;
+		if (!values.length || values.some(v => !Number.isInteger(v) || !Number.isSafeInteger(v))) return null;
+
+		let min = Infinity, max = -Infinity;
+		for (const v of values) {
+			if (v < min) min = v;
+			if (v > max) max = v;
+		}
+		const range = max - min + 1;
+		if (!Number.isSafeInteger(range) || range <= 0) return null;
+		const configuredMax = Number(config.switchTableMax);
+		const rangeLimit = (forced && Number.isFinite(configuredMax) && configuredMax > 0)
+			? configuredMax : 256;
+		if (range > rangeLimit) return null;
+		if (!forced && range > 2 * caseCount + 8) return null;
+
+		const budget = Math.max(2, (this.instructionBudget() || 0) + 1);
+		const digits = Math.max(2, Math.ceil(Math.log(budget) / Math.log(ENCODED_RADIX)));
+		if (!Number.isFinite(digits) || digits > 3) return null;
+		let spanSum = 0;
+		for (let k = 0; k < digits; k++) spanSum += Math.pow(ENCODED_RADIX, k);
+		return { min, max, range, digits, correction: ENCODED_OFFSET * spanSum };
+	}
+
+	/**
+	 * The referrer transmission that turns a final line number into one
+	 * base-57 character for digit plane `k`.
+	 *
+	 * A single character is returned on purpose: `Instruction.raw_replace`
+	 * uses a string replacement, where a two-character value could contain
+	 * `$&`, `$$` or `$'`; a lone `$` is literal. The encoded character set
+	 * (35..91) contains `$`, so this is not theoretical.
+	 *
+	 * @param {number} k digit plane, 0 is least significant
+	 * @param {number} digits total planes
+	 * @returns {(position: number) => string}
+	 */
+	switchTableTransmission(k, digits) {
+		const limit = Math.pow(ENCODED_RADIX, digits);
+		const power = Math.pow(ENCODED_RADIX, k);
+		return position => {
+			if (!Number.isSafeInteger(position) || position < 0 || position >= limit) {
+				throw new InternalGenerationFailure(
+					`switch jump table address ${position} does not fit in ${digits} base-${ENCODED_RADIX} digits`);
+			}
+			const digit = Math.floor(position / power) % ENCODED_RADIX;
+			return String.fromCharCode(ENCODED_OFFSET + digit);
+		};
 	}
 
 	visitWhileStatement(node) {
