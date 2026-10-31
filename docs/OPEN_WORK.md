@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 197 passed, 0 failed (137 shape assertions, 861 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 198 passed, 0 failed (139 shape assertions, 865 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 64 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
@@ -69,6 +69,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | encoded switch jump table (§7.13) | **done** — `f84b829`; case addresses live in base-57 strings, one `read` per plane | §7.13 |
 | switch table pragma (§7.14) | **done** — `304611d`; force, disable or bound the encoded table | §7.14 |
 | for-init loop scopes and switch side effects (§7.15) | **done** — `6c0c2a4`; per-scope seeding and switch-aware side effects | §7.15 |
+| shift operators (§7.16) | **done** — `37dca8e`; `<<`/`>>` precedence and `<<=`/`>>=` tokenization | §7.16 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -803,21 +804,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 553 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 554 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 553 under `testers/unit_tests`, every one of
+bring the count to 554 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 197 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `check.mjs` | 198 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
 | `negative.mjs` | 64 | `negative/` |
 | `nomem.mjs` | 7 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-197 + 10 + 64 + 7 + 275 = 553. The caveat that replaces "no runner" is weaker but real:
+198 + 10 + 64 + 7 + 275 = 554. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -878,7 +879,7 @@ Every item here is now fixed or closed; each points at the record and the case t
 ## 7. Decisions on the defects in §3 and §6
 
 Recorded so these are not re-opened, in the order they were given. **§1, §2 and §3 are
-closed**: their defects have decisions either in their own §3 record or below; §7.15 is the last one added.
+closed**: their defects have decisions either in their own §3 record or below; §7.16 is the last one added.
 
 ### 7.1 `'x'` is an `int` holding its ASCII value
 
@@ -1306,3 +1307,19 @@ the side-effect check, so an enclosing loop could be considered
 side-effect-free and deleted. Cases t182–t184 cover fallthrough/break
 accumulators, other for-init loop shapes, and the conservative
 side-effecting/unsafe guards.
+
+### 7.16 Shift operators
+
+**Done in `37dca8e`.** The lexer already had `LEFT_SHIFT` / `RIGHT_SHIFT`
+tokens and the generator already mapped `<<` / `>>` to `shl` / `shr`, but
+the expression parser had no shift precedence level, so the tokens were
+rejected. The lexer also matched only two-character operators, which split
+`a <<= b` into `<<` and `=`.
+
+- `parseShiftExpression` now sits between additive and relational
+  precedence; both sides of a relational operator use it;
+- `readOperator` tries three-character operators (`<<=`, `>>=`) before
+  two-character ones;
+- `t185_shift_operators.c` covers runtime and constant shifts, precedence
+  with `+` and `<`, left associativity, compound assignments, unsigned
+  values, a variable shift count, and `case 1 << 3`.
