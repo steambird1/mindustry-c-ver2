@@ -173,7 +173,7 @@
 | `t174` | **§7.11**：常量 discriminant 的 switch 被折叠成实际路径；顶层 `switch(2)` → `print 5`，`while` 内 `switch(0)` → `print 3`；`EMIT-NOT: op lessThan` |
 | `t175` | **§7.11/§7.12**：折叠的保守边界——`if` 内的 switch `break`、平铺层声明保持 switch；case 块内声明可折；并在循环内运行条件 `break` 的 switch（防陈旧常量折叠）；输出 `1 5 7 3` |
 | `t176` | **§7.12**：`switch(i)` 的逐轮模拟——统一步长、非统一步长、带 fallthrough 的累加变量；三个循环全部折叠为常量，输出 `3 3 4 221`；`EMIT-NOT: op lessThan` |
-| `t177` | **§7.13**：密集 switch 的 encoded 跳转表——base-57 字符串存目标行号，`read` + Horner + `set @counter`；filler 把 switch 推到 57 行之后，覆盖高低位与 `$`/`&`；输出 `10 13 17 99`；`EMIT: read __switch_tgt_` |
+| `t177` | **§7.13**：密集 switch 的 encoded 跳转表——base-57 字符串存目标行号，`read` + Horner + `set @counter`；filler 把 switch 推到 57 行之后，覆盖高低位与 `$`/`&`；无 default（越界走 `switch_end`），输出 `10 13 17`；`EMIT: read __switch_tgt_` |
 | `t178` | **§7.13**：稀疏 range（0..6 与 100000）回退比较链；输出 `10 17 99`；`EMIT-NOT: read __switch_tgt_` |
 | `t179` | **§7.13**：encoded 表保持 default 居中、fallthrough、循环内 break/continue、嵌套 switch；输出 `100 9 1 3 200 9 1 99 99 99 3 299` |
 | `t180` | **§7.14**：`#pragma optimize(switch_table, off)` 让密集 switch 保持比较链；输出 `10 13 17 99` |
