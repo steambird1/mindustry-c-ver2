@@ -40,7 +40,7 @@ void main() {
 | 变长数组（VLA） | **不支持**。数组维度必须是编译期常量；`int a[n];` 会报 “Variable length arrays are not supported”。 |
 | C 字符串 / `char *` | 字符串字面量是 `string_t`（Mindustry 原生字符串值），不是 `char *`。`const char* p = "hi";` 可以指向只读字符数组；`char* p = "hi";` 会被拒绝；需要可写副本时写 `char a[] = "hi";`。 |
 | 用户自定义可变参数函数 | **不支持**。`print`、`draw` 等内置函数和扩展可以变参；普通函数参数表必须固定。 |
-| `printf` / `scanf` / `FILE` / `malloc` / `free` / `str*` 等 | `printf`、`scanf`、`FILE`、动态分配不提供；`strlen`/`strcpy`/`strcat`/`strcmp` 由 `include/string.h` 按 `char*` 提供。见 [STANDARD_LIBRARY.md](STANDARD_LIBRARY.md)。 |
+| `printf` / `scanf` / `FILE` / `malloc` / `free` / `str*` 等 | `printf` 是编译器内建（格式串必须是字面量；支持 `%d/%i/%u/%f/%s/%%`）；`assert` 也是内建；`scanf`、`FILE`、动态分配不提供；`strlen`/`strcpy`/`strcat`/`strcmp` 由 `include/string.h` 按 `char*` 提供。见 [STANDARD_LIBRARY.md](STANDARD_LIBRARY.md)。 |
 | `setjmp` / `longjmp`、信号、线程、文件 | 不提供。 |
 | 联合体（`union`） | 语法上可以解析，但当前代码生成**不保证** C 的成员重叠语义；不要依赖 `u.a` 写入后从 `u.b` 读出同一个值。 |
 | 位域（bit-field） | 语法上可以解析，但位宽当前**未用于打包**；每个成员实际仍按普通单元处理，`a : 3` 不会自动掩码到 3 位。 |
@@ -50,6 +50,8 @@ void main() {
 | 空初始化列表等边界形式 | 行为以当前编译器为准；数组初始化建议显式写出长度或初值。 |
 
 `int a[] = {1, 2, 3};` 现在可以从初始化列表推导最后一维；不带初始化列表的 `int a[];` 不是数组，而是“以后绑定到某个数组”的一字句柄，见 §7.3。
+
+`enum`（含匿名/typedef）和 `typedef struct { ... } Name;` 现在受支持；`union`/位域仍只有语法解析，语义见上表。
 
 ---
 
@@ -408,7 +410,9 @@ remote int *p = remote(processor1, qq);      // 指针本身在对端
 - `#include "..."` / `#include <...>`；
 - `#pragma`（见 §12）。
 
-`__MINDUSTRY__` 在编译器模式下预定义为 `1`，`mindc_min.h` 用它区分“真正的 Mindustry-C 编译”和“给 linter 看的普通 C 声明”。
+`__MINDUSTRY__` 在编译器模式下预定义为 `1`，`mindc_min.h` 用它区分“真正的 Mindustry-C 编译”和“给 linter 看的普通 C 声明”。`__LINE__` 是当前行号，`__FILE__` 当前展开为 `<source>`。
+
+兼容头：`include/stdbool.h`（`bool`/`true`/`false` 本身是关键字）、`include/stdio.h`（`printf` 是内建）、`include/assert.h`（`assert` 是内建；`NDEBUG` 暂未生效）。
 
 ### 11.1 `#include "*.js"` 是编译器扩展
 
@@ -478,7 +482,7 @@ asm("print ${x}");
 
 写移植自 C99 的程序时，先检查：
 
-- 有没有 `goto`、VLA、`printf`/`malloc`/文件等宿主机功能？
+- 有没有 `goto`、VLA、`scanf`/`malloc`/文件等宿主机功能？（`printf`/`assert` 已提供，但格式串需为字面量。）
 - 字符串是否仍按 `char*` 处理？`string_t` 是原生字符串值；`char*` 只用于真正的字符数组/缓冲区，`const char*` 可以指向字面量。
 - 数组长度是否编译期常量？数组是否需要在寄存器/内存/远程之间传递？
 - 指针是否需要做算术？如果需要，不能用 `byname`/名字指针。

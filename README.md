@@ -63,6 +63,10 @@ For grammar introduction (about the features unique to Mindustry-C) and examples
   `for`/`while`/`do-while`/`switch`, `break`/`continue`/`return`.
 - C99 conveniences: `//` comments, `bool`/`true`/`false`, `inline`,
   declarations in `for` initializers.
+- C surface: real `enum` (including `typedef enum`), `typedef struct { ... }
+  Name;` (anonymous, tagged, self-referential), short-circuit `&&`/`||` and
+  single-branch `?:`, `printf` (literal format; `%d/%i/%u/%f/%s/%%`),
+  `assert`, and `<stdbool.h>`/`<stdio.h>`/`<assert.h>` compatibility headers.
 - C characters and native strings are separate: `char` is a one-cell
   character/number with real `char*` pointers and NUL-terminated arrays;
   `string_t` is the one-cell Mindustry string value. `#include <string.h>`

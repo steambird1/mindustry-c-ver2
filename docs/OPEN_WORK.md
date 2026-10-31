@@ -20,8 +20,8 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 209 passed, 0 failed (140 shape assertions, 920 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 69 passed, 0 failed |
+| `node ../tools/check.mjs` | 216 passed, 0 failed (140 shape assertions, 955 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 72 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
@@ -73,6 +73,9 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | run-local static / cross-run persistent (§7.17) | **done** — `b4ecba9`; explicit lifetimes, zeroing, inlining veto, multi-run tests | §7.17 |
 | `char` numeric / `string_t` / `char*` / `string_view` (§7.18) | **done**; v150 gates, message `@bufferSize`, literal materialisation | §7.18 |
 | A3 integral builtins skip redundant `floor` (§7.19) | **done**; `abs`/`min`/`max` over ints return `IntRet`, test t196 | §7.19 |
+| conditional evaluation order + `stdbool.h` (§7.20) | **done**; short-circuit/`?:` side effects, tests t197/t198 | §7.20 |
+| `enum` + `typedef struct` (§7.21) | **done**; constants, typedef members, tests t199/t200 | §7.21 |
+| `printf` / `assert` / `__FILE__` / `__LINE__` (§7.22) | **done**; builtins, tests t201–t203 | §7.22 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -807,21 +810,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 570 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 580 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 570 under `testers/unit_tests`, every one of
+bring the count to 580 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 209 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 69 | `negative/` |
+| `check.mjs` | 216 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `negative.mjs` | 72 | `negative/` |
 | `nomem.mjs` | 7 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-209 + 10 + 69 + 7 + 275 = 570. The caveat that replaces "no runner" is weaker but real:
+216 + 10 + 72 + 7 + 275 = 580. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -1415,3 +1418,51 @@ arrays, A4 loop budget, A5 alias-aware CSE, A6 error levels, A7 unused helper
 pruning, A8 out-of-bounds policy, A9 version-gated representation selection.
 They need calibration against real generated code before changing the default
 layout or optimization budget.
+
+### 7.20 Conditional evaluation order and `<stdbool.h>`
+
+C requires `&&`/`||` to short-circuit and `?:` to evaluate only one branch. The
+optimizer used to inline a call on the right of `&&`/`||` (or inside a `?:`
+branch), moving its side effects out of the condition; `a && f()` therefore
+called `f` even when `a` was false.
+
+- `collectFunctionCallSites` now marks calls in a short-circuit RHS / `?:`
+  branch as conditional and leaves them at the call site.
+- The generator's purity test is a whitelist, and `?:` uses `select` only when
+  both branches are pure; otherwise it emits a real branch.
+- `emitShortCircuitLogical` reads member/subscript operands through `ExportRet`
+  (it used to emit `set temp [object Object]`).
+- `include/stdbool.h` is a compatibility header; `bool`/`true`/`false` remain
+  compiler keywords.
+- Cases: t197 (short-circuit, `?:`, runtime-true/false paths) and t198
+  (`#include <stdbool.h>`).
+
+### 7.21 `enum` and `typedef struct`
+
+- Enum bodies are parsed for real: explicit values, auto-increment, anonymous
+  enums, `typedef enum`, array sizes and switch labels. Enumerators are `int`
+  constants in the surrounding scope; `enum Tag` is int-compatible. Enum
+  constants survive the optimizer's per-round constant reset.
+- `typedef struct { ... } Name;`, `typedef struct Tag { ... } Name;` and
+  `typedef struct Tag Name;` parse the member list instead of skipping it.
+  Anonymous structs get a stable generated tag; the struct is registered
+  before the typedef alias. Self-referential, nested and pointer typedefs work.
+- `sizeof(TypedefName)` now recognises typedef names as type starts.
+- Cases: t199 (enum values/auto-increment/typedef/array size/switch), t200
+  (anonymous/tagged/self-referential/nested/pointer typedef structs), plus
+  negatives for a non-constant enumerator and an unknown member type.
+
+### 7.22 `printf`, `assert`, `__FILE__` and `__LINE__`
+
+- `printf` is a compiler builtin because user functions cannot be variadic.
+  The format must be a literal; it is split into one `print` with `{n}`
+  placeholders and one `format` per argument. `%d/%i/%u/%f/%s/%%` are
+  supported; a runtime format or an unsupported conversion is a clean error.
+- `assert(expr)` evaluates once, skips the failure block when true, and on
+  failure prints a source-line message and stops the processor. `NDEBUG` is
+  not applied yet.
+- `__FILE__` (currently `<source>`) and `__LINE__` are predefined lexer values.
+- Compatibility headers `include/stdio.h` and `include/assert.h` exist for
+  portable sources; `assert` itself is the builtin, not a libc function.
+- Cases: t201 (printf), t202 (true assert and predefined macros), t203 (failed
+  assert stops), plus a negative for a runtime printf format.

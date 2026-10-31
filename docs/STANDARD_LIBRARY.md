@@ -426,6 +426,35 @@ ERR_IN_PROGRESS ERR_OK ERR_MINE_NOT_FOUND
 
 `string_view` 是只读视图：没有指针算术、不能写入；message 被覆盖后旧视图内容会改变。需要稳定副本时复制到 `char[]` 缓冲区。`string_t` 与 `char*` 不隐式互转；`char*` 只指向真正的字符数组。
 
+### 5.15 `stdio.h`
+
+```c
+#include <stdio.h>
+```
+
+兼容头；`printf` 是**编译器内建**：
+
+- 格式串必须是字面量；
+- 支持 `%d` / `%i` / `%u` / `%f` / `%s` / `%%`；
+- 编译期拆成一条 `print`（带 `{n}` 占位符）加若干 `format`；
+- `scanf`、`FILE` 等不提供。
+
+### 5.16 `assert.h`
+
+```c
+#include <assert.h>
+```
+
+兼容头；`assert(expr)` 是内建：条件为假时打印 `assertion failed at line N` 并 `stop()`。`NDEBUG` 目前不会移除断言。
+
+### 5.17 `stdbool.h`
+
+```c
+#include <stdbool.h>
+```
+
+兼容头；`bool` / `true` / `false` 本身是编译器关键字。
+
 ---
 
 ## 6. 与 C 标准库的关系
@@ -436,12 +465,14 @@ ERR_IN_PROGRESS ERR_OK ERR_MINE_NOT_FOUND
 - `sin`、`cos`、`tan`、`asin`、`acos`、`atan`、`ceil`、`floor`、`sqrt`、`pow`、`abs`（内建）；
 - `memset`、`memset_near`（`memory.h`，自定义实现）；
 - `strlen`、`strcpy`、`strcat`、`strcmp`（`string.h`，按 `char*` 实现，不是 `string_t`）；
+- `printf`（内建；格式串必须是字面量，支持 `%d/%i/%u/%f/%s/%%`）；
+- `assert`（内建；失败时打印并 `stop()`）；
 - `time()`（`time.h`，基于 `@time`）；
 - `errno`（`error.h`，实际是 `_errId` 宏）。
 
 **不提供：**
 
-- `printf`、`scanf`、`puts`、`getchar`；
+- `scanf`、`puts`、`getchar`；
 - `malloc`、`calloc`、`realloc`、`free`；
 - `FILE`、`fopen`、文件/目录/网络 API；
 - `qsort`、`bsearch`、`atexit`、`exit`；
@@ -462,5 +493,7 @@ ERR_IN_PROGRESS ERR_OK ERR_MINE_NOT_FOUND
 - `archon.h`/`archon.js` 生成的指令依赖目标 Mindustry 版本；不同版本支持的动作/参数可能不同。
 - `format`、`unpackcolor` 等较新的指令需要相应版本；`format` 和字符级的字符串操作要求 v150+，默认目标版本是 `154.3`。
 - 没有动态内存分配；数组大小、结构体布局和句柄表示在编译期确定。
+- `printf` 的格式串必须是字面量；`%d/%i/%u/%f/%s/%%` 已支持，字段宽度/精度暂未应用。
+- `assert` 失败时会打印并入 `stop()`；`NDEBUG` 暂未接入。
 
 语言层的差异（`goto`、VLA、`char`/`string_t` 的拆分、`remote`、`byname`、`auto`、数组布局、`#pragma` 等）见 [DIFFERENCES_FROM_C99.md](DIFFERENCES_FROM_C99.md)。
