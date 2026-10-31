@@ -13,7 +13,7 @@
 
 | 命令（从 `testers/unit_tests` 执行） | 读哪个目录 | 当前结果 | 判定标准 |
 |---|---|---|---|
-| `node ..\tools\check.mjs` | `check/` | **208 passed, 0 failed**（139 shape assertions, 915 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
+| `node ..\tools\check.mjs` | `check/` | **209 passed, 0 failed**（140 shape assertions, 920 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
 | `node ..\tools\negative.mjs` | `negative/` | **69 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
 | `node ..\tools\nomem.mjs` | `nomem/` | **7 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
 | `node ..\tools\loadorder.mjs` | 仓库根的 `mindc*.js` | **12 passed, 0 failed, 2 exempt** | 每个入口单独起一个 `node` 进程导入，不得有循环依赖 |
@@ -67,11 +67,11 @@
 
 ## 目录地图
 
-`testers/unit_tests/` 下共 **569 个 `.c`，全部有 runner**（208 + 10 + 69 + 7 + 275 = 569）：
+`testers/unit_tests/` 下共 **570 个 `.c`，全部有 runner**（209 + 10 + 69 + 7 + 275 = 570）：
 
 | 目录 | 文件数 | 谁来跑 |
 |---|---|---|
-| `check/` | 208 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
+| `check/` | 209 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
 | `t/` | 98 | `runall.mjs`（早期按主题分的用例，`2dc683e` 起纳入） |
 | `negative/` | 69 | `negative.mjs` |
 | `suite/` | 50 | `runall.mjs` |
@@ -95,7 +95,7 @@
 
 ## check/ 的编号约定
 
-`check/` 用 `tNN_主题.c` 命名，**编号 1–195 已用满，没有空号**，下一个用例是 `t196`。
+`check/` 用 `tNN_主题.c` 命名，**编号 1–196 已用满，没有空号**，下一个用例是 `t197`。
 另有 13 个不带编号的（`m1`–`m3`、`n1`–`n2`、`rw1`–`rw2`、`seq1`、`memsp2`–`memsp3`），
 它们早于编号制，保留原名。
 
@@ -194,6 +194,7 @@
 | `t193` | **§7.18**：`const char*` 上下文的字面量物化——赋值、函数参数、返回值；可写 `char[]` 仍通过 `char*` 修改；输出 `72 72 105` |
 | `t194` | **§7.18**：`include/string.h` 的 C 字符缓冲区函数——`strcat`、`strcpy`、`strlen`、`strcmp` 作用于真正的 `char*`；输出 `4 0 97 100` |
 | `t195` | **§7.18**：`#pragma legacy_char_string` 过渡入口——`char` 在词法层读作 `string_t`；`char s="hi"; s[0]` 输出 `104 105` |
+| `t196` | **§7.19**：01-A3——`abs`/`min`/`max` 的整型参数结果不再多插一条 `op floor`；输出 `4 3 7`，`EMIT-NOT: op floor/` |
 
 设计背景见 `docs/PLAN_array_layout.md`。
 

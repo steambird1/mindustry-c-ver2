@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 208 passed, 0 failed (139 shape assertions, 915 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 209 passed, 0 failed (140 shape assertions, 920 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 69 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
@@ -72,6 +72,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | shift operators (§7.16) | **done** — `37dca8e`; `<<`/`>>` precedence and `<<=`/`>>=` tokenization | §7.16 |
 | run-local static / cross-run persistent (§7.17) | **done** — `b4ecba9`; explicit lifetimes, zeroing, inlining veto, multi-run tests | §7.17 |
 | `char` numeric / `string_t` / `char*` / `string_view` (§7.18) | **done**; v150 gates, message `@bufferSize`, literal materialisation | §7.18 |
+| A3 integral builtins skip redundant `floor` (§7.19) | **done**; `abs`/`min`/`max` over ints return `IntRet`, test t196 | §7.19 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -806,21 +807,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 569 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 570 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 569 under `testers/unit_tests`, every one of
+bring the count to 570 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 208 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `check.mjs` | 209 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
 | `negative.mjs` | 69 | `negative/` |
 | `nomem.mjs` | 7 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-208 + 10 + 69 + 7 + 275 = 569. The caveat that replaces "no runner" is weaker but real:
+209 + 10 + 69 + 7 + 275 = 570. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -1393,3 +1394,24 @@ argument and return), t194 (`strlen`/`strcpy`/`strcat`/`strcmp` on real
 mutable `char*` from a literal, a too-small char array, scalar `char` from a
 string, and the v149 gates. Existing string tests and samples were migrated
 from `char` to `string_t`.
+
+### 7.19 Integral builtins do not need a second `floor`
+
+The first item taken from the 01 AST/semantic-layer optimization notes is A3:
+
+- `floor`/`ceil` always return an integer, and `abs`/`min`/`max` do when all
+  their arguments are integer-typed (or `bool`).
+- The generator's builtin handlers now return an `IntRet` for those shapes,
+  and the declaration conversion skips `implicitFloorRaw` when the initializer
+  is one of them. `sqrt`, `pow`, `rand`, `sin`, ... deliberately keep their
+  `floor`.
+- Example: `int r = abs(a - b);` with integer `a`, `b` emits `op abs r -4 x`
+  instead of `op abs t -4 x; op floor r t null`.
+- t196 asserts both the output and `EMIT-NOT: op floor/`.
+
+The remaining 01 items are larger and are recorded here as candidates rather
+than implemented in this pass: A1 array cost model, A2 formula/packed const
+arrays, A4 loop budget, A5 alias-aware CSE, A6 error levels, A7 unused helper
+pruning, A8 out-of-bounds policy, A9 version-gated representation selection.
+They need calibration against real generated code before changing the default
+layout or optimization budget.

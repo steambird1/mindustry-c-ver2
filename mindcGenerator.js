@@ -2717,7 +2717,8 @@ export class CodeGenerator extends ASTVisitor {
 						evaluation = this.implicitToContentRaw(evaluation, referrer(node.initializer.dataType.name));
 					} else if (special.includes(symbol.myType().name) && !this.semantic.isSameType(symbol.type.type, node.initializer.dataType)) {
 						evaluation = this.implicitContentToNumericRaw(evaluation);
-					} else if (this.semantic.isTypeCompatible(symbol.myType(), 'int', true) && this.semantic.isTypeCompatible(node.initializer.dataType, 'float', true)) {
+					} else if (this.semantic.isTypeCompatible(symbol.myType(), 'int', true) && this.semantic.isTypeCompatible(node.initializer.dataType, 'float', true)
+						&& !this.isProvablyIntegralExpression(node.initializer)) {
 						evaluation = this.implicitFloorRaw(evaluation);
 					}
 				}
@@ -3063,6 +3064,31 @@ export class CodeGenerator extends ASTVisitor {
 	}
 
 	/**
+	 * Whether an expression returning a float-valued type is nevertheless
+	 * guaranteed to be integral, so converting it to `int` needs no `op floor`.
+	 *
+	 * Only builtins whose result is integral for ALL inputs, or whose integer
+	 * arguments make the result integral, are listed. `sqrt`, `pow`, `rand`,
+	 * `sin` and friends are deliberately absent.
+	 *
+	 * @param {ASTNode} node
+	 * @returns {boolean}
+	 */
+	isProvablyIntegralExpression(node) {
+		const name = node?.functionName ?? node?.callee?.name ?? null;
+		if (!name) return false;
+		if (['floor', 'ceil', 'round'].includes(name)) return true;
+		if (!['abs', 'min', 'max'].includes(name)) return false;
+		const args = node.arguments ?? [];
+		if (args.length === 0) return false;
+		return args.every(arg => {
+			const type = arg?.dataType;
+			if (!type) return false;
+			return this.semantic.isIntegerType(type.name) || type.name === 'bool';
+		});
+	}
+
+	/**
 	 * 
 	 * @param {ASTNode} node 
 	 * @returns {Instruction} Return something with implicit conversion to int
@@ -3086,6 +3112,13 @@ export class CodeGenerator extends ASTVisitor {
 					return result;
 					break;
 				case 'float': case 'double':
+					/*
+					`abs(int)` / `min(int,int)` / `floor(x)` already produce an
+					integer value; inserting another `op floor` is pure waste.
+					*/
+					if (this.isProvablyIntegralExpression(node)) {
+						return this.visitAndRead(node);
+					}
 					return this.implicitFloorRaw(this.visitAndRead(node));
 					break;
 				case 'content_t':
@@ -5636,6 +5669,23 @@ export class CodeGenerator extends ASTVisitor {
 			result.set_returns(returner);
 			return result;
 		};
+		/*
+		A3: `floor`/`ceil` always return an integer, and `abs`/`min`/`max`
+		do when every argument is already an integer. Returning an IntRet
+		here stops the assignment/conversion path from adding a redundant
+		`op floor`.
+		*/
+		const integralOpProcesser = (name, params, integral) => {
+			const result = opProcesser(name, params);
+			if (!integral) return result;
+			return new IntRet(this.glob, result.instructions, result.instructionReturn,
+				this.semantic.getTypeInfo('int'), true);
+		};
+		const allIntegerArgs = params => (params ?? []).length > 0
+			&& params.every(param => {
+				const type = param?.dataType;
+				return !!type && (this.semantic.isIntegerType(type.name) || type.name === 'bool');
+			});
 
 		const handlers = {
 			end: ast => {
@@ -5848,19 +5898,19 @@ export class CodeGenerator extends ASTVisitor {
 				return opProcesser(`angleDiff`, ast.arguments);
 			},
 			min: ast => {
-				return opProcesser(`min`, ast.arguments);
+				return integralOpProcesser(`min`, ast.arguments, allIntegerArgs(ast.arguments));
 			},
 			max: ast => {
-				return opProcesser(`max`, ast.arguments);
+				return integralOpProcesser(`max`, ast.arguments, allIntegerArgs(ast.arguments));
 			},
 			abs: ast => {
-				return opProcesser(`abs`, ast.arguments);
+				return integralOpProcesser(`abs`, ast.arguments, allIntegerArgs(ast.arguments));
 			},
 			ceil: ast => {
-				return opProcesser(`ceil`, ast.arguments);
+				return integralOpProcesser(`ceil`, ast.arguments, true);
 			},
 			floor: ast => {
-				return opProcesser(`floor`, ast.arguments);
+				return integralOpProcesser(`floor`, ast.arguments, true);
 			},
 			sqrt: ast => {
 				return opProcesser(`sqrt`, ast.arguments);
