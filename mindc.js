@@ -332,7 +332,10 @@ export class Compiler {
 
 		this.memoryInfo = memoryInfo;
 		
-        this.lexer = new Lexer(sourceCode);
+        this.lexer = new Lexer(sourceCode, {}, false, {}, {
+			legacyCharString: this.config.getAttribute('legacyCharString') === true
+				|| /(?:^|\n)[ \t]*#[ \t]*pragma[ \t]+legacy_char_string\b/.test(sourceCode)
+		});
 		this.lexer.macros['__MINDC_TARGET_VERSION__'] =
 			String(this.config.getAttribute('targetVersion'));
 		let parserConfig = new AttributeClass();

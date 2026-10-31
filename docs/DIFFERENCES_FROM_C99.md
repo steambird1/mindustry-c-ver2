@@ -303,6 +303,7 @@ const char* q = "hi";   // 只读字符数组；字面量被物化一次
 - 字符串拼接没有 `+` 之外的隐式构造：`string_t + string_t` 只允许两个字面量在编译期合并。运行时拼接必须显式指定目的地：`char` 缓冲区（`strcpy`/`strcat`，全版本）或 message 建筑（`concat_to_message`）。
 - `concat_to_message(msg, a, b)` 把字符逐字写入 message 建筑并 flush，返回 `string_view`。message 的长度来自 `sensor msg @bufferSize`，**不是** `@size`；message 文本没有 NUL，视图是只读、带长度的，而且再次覆盖 message 后旧视图内容会改变。需要稳定副本时复制到 char 缓冲区。
 - 字符串索引 `s[i]`、`@size`、`@bufferSize`、从字符串/message `read`、`printchar`、`format` 和 `string_view` 的字符级操作都要求 **v150+**；低版本会编译期拒绝，或只提供 `concat_print` 这种纯输出拼接。
+- 过渡期可用 `#pragma legacy_char_string`：词法层把 `char` 读作 `string_t`，旧代码不必立刻改成 `string_t`。这是模式切换，不是让 `char` 同时有两种含义。
 
 ---
 
@@ -425,6 +426,7 @@ remote int *p = remote(processor1, qq);      // 指针本身在对端
 | Pragma | 作用 |
 |---|---|
 | `#pragma comment(name, json)` | 设置一个解析器/编译器属性；例如 `#pragma comment(maxInstructions, 2000)`。不是 C 标准 pragma。 |
+| `#pragma legacy_char_string` | 过渡入口：让词法层把 `char` 读作 `string_t`，兼容旧代码；不是长期双语义。 |
 | `#pragma optimize(array)` | 打开数组自动布局选择；`array("...")` 仍然优先。 |
 | `#pragma optimize(array, ...)` | 给自动布局传可选的 JSON 配置；一般优先用显式 `array("...")`。 |
 | `#pragma optimize(pointer)` | 允许可命名的 `&x` 使用名字指针（v150+）；不要对受影响指针做算术。 |

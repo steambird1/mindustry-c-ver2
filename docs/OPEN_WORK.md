@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 207 passed, 0 failed (139 shape assertions, 910 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 208 passed, 0 failed (139 shape assertions, 915 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 69 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
@@ -806,21 +806,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 568 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 569 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 568 under `testers/unit_tests`, every one of
+bring the count to 569 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 207 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `check.mjs` | 208 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
 | `negative.mjs` | 69 | `negative/` |
 | `nomem.mjs` | 7 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-207 + 10 + 69 + 7 + 275 = 568. The caveat that replaces "no runner" is weaker but real:
+208 + 10 + 69 + 7 + 275 = 569. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -1381,10 +1381,15 @@ The two are now separate:
   `printchar`, `format` and the character-level view helpers require v150+.
   A lower target gets a compile-time refusal (or `concat_print` for output-only
   concatenation).
+- Transitional entry: `#pragma legacy_char_string` (or the compiler
+  `legacyCharString` attribute) makes the lexer read `char` as `string_t`, so
+  old `char s = "..."` sources keep compiling. It is a mode switch, not a
+  second meaning for `char`; new code should migrate to `string_t`.
 
 Cases: t191 (char literal/arithmetic/array/pointer/sizeof), t192 (`string_t`,
 `string_view`, `@bufferSize`, concatenation), t193 (`const char*` assignment,
 argument and return), t194 (`strlen`/`strcpy`/`strcat`/`strcmp` on real
-`char*` buffers), plus negatives for mutable `char*` from a literal, a
-too-small char array, scalar `char` from a string, and the v149 gates. Existing
-string tests and samples were migrated from `char` to `string_t`.
+`char*` buffers), t195 (`#pragma legacy_char_string`), plus negatives for
+mutable `char*` from a literal, a too-small char array, scalar `char` from a
+string, and the v149 gates. Existing string tests and samples were migrated
+from `char` to `string_t`.

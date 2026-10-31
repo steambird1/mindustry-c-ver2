@@ -351,7 +351,7 @@ export const PUNCTUATORS = {
 
 
 export class Lexer {
-    constructor(sourceCode, macros = {}, suppressMacroExpansion = false, macroParams = {}) {
+    constructor(sourceCode, macros = {}, suppressMacroExpansion = false, macroParams = {}, options = {}) {
         this.sourceCode = sourceCode;
         this.position = 0;
         this.line = 1;
@@ -359,6 +359,14 @@ export class Lexer {
         this.tokens = [];
         this.errors = [];
         this.suppressMacroExpansion = suppressMacroExpansion;
+		/*
+		Legacy entry: before `string_t` existed, `char` was the native string
+		type. A project can opt back into that spelling for one transition
+		period; the lexer then reads `char` as `string_t` and every other rule
+		stays the same.
+		*/
+		this.legacyCharString = options.legacyCharString === true;
+		this.lexerOptions = { ...options };
         
         // 预处理器状态
         this.macros = {...macros, '__MINDUSTRY__': '1'}; // 存储宏定义 {name: value}
@@ -1420,12 +1428,19 @@ export class Lexer {
                 }
             }
             if (!this.suppressMacroExpansion) {
-                const macroProcessor = new Lexer(this.macros[value], repls, false, this.macroParams);
+                const macroProcessor = new Lexer(this.macros[value], repls, false, this.macroParams, this.lexerOptions);
                 const macroResult = await macroProcessor.tokenize();
                 this.tokens.push(...macroResult.tokens.filter(token => token.type != TokenType.EOF));
                 this.errors.push(...macroResult.errors);
             }
-        } else if (KEYWORDS[value]) {
+        } else if (this.legacyCharString && value === 'char') {
+			/*
+			Legacy `char`-as-string mode: hand the parser `string_t` instead of
+			the `char` keyword. The rest of the type system then sees the same
+			native string type it always did.
+			*/
+			this.tokens.push(new Token(TokenType.IDENTIFIER, 'string_t', startLocation));
+		} else if (KEYWORDS[value]) {
             this.tokens.push(new Token(KEYWORDS[value], value, startLocation));
         } else if (SPECIAL_INSTRUCTIONS[value]) {
             this.tokens.push(new Token(SPECIAL_INSTRUCTIONS[value], value, startLocation));
