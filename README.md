@@ -67,9 +67,13 @@ For grammar introduction (about the features unique to Mindustry-C) and examples
   Name;` (anonymous, tagged, self-referential), short-circuit `&&`/`||` and
   single-branch `?:`, `printf` (literal format; `%d/%i/%u/%f/%s/%%`),
   `assert`, and `<stdbool.h>`/`<stdio.h>`/`<assert.h>` compatibility headers.
+- Declarations: function prototypes (including `auto` patterns), struct/union
+  forward declarations (`struct P;`, `typedef struct P P;`), and block-scope
+  typedefs, struct definitions, enums and prototypes with shadowing. Nested
+  function definitions and C11 anonymous members are not supported.
 - Data layout: multi-member `union` overlays members in memory; unsigned and
   signed bitfields pack LSB-first into 52-bit cells in both register and memory
-  structs.
+  structs. Cross-type union reads are value aliases, not byte-level casts.
 - C characters and native strings are separate: `char` is a one-cell
   character/number with real `char*` pointers and NUL-terminated arrays;
   `string_t` is the one-cell Mindustry string value. `#include <string.h>`
@@ -115,8 +119,12 @@ Arrays can also live in registers, encoded strings, or a one-word handle, so
 3. A normal pointer is two words (block + position). A `byname` name pointer
 or an array handle is one word; use `widthof` to see the difference.
 
-4. `union` and bit-fields are parsed, but are not a stable C99-compatible
-subset yet: do not rely on member aliasing or bit packing.
+4. `union` and bit-fields are a documented, deliberately non-C99-compatible
+move: multi-member unions live in memory and cross-type reads are value
+aliases; bitfields are capped at 52 bits per cell. Treat them as Mindustry-C
+types, not as a byte-exact C layout. Forward declarations and function
+prototypes follow C's declaration rules, with the limitations listed in the
+language reference.
 
 Recursion is supported but expensive and less predictable; prefer globals and
 iterative code. Avoid declaring memory-demanding variables in non-main
@@ -152,5 +160,7 @@ metadata; small arrays can often use register or encoded layouts instead.
   supported: the last dimension is deduced from the initializer.
 - String literals are native `string_t` values. `char` is an ordinary
   one-cell character/number; `char*` is a real pointer to a `char` array, and
-  `const char*` may point at a literal. There are no C string functions.
+  `const char*` may point at a literal. `#include <string.h>` provides
+  length-bounded `strlen`/`strcpy`/`strcat`/`strcmp` and a read-only
+  `string_view`.
 - The complete list is in [DIFFERENCES_FROM_C99.md](docs/DIFFERENCES_FROM_C99.md).

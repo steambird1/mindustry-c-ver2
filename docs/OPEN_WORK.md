@@ -20,8 +20,8 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 220 passed, 0 failed (140 shape assertions, 975 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 75 passed, 0 failed |
+| `node ../tools/check.mjs` | 225 passed, 0 failed (140 shape assertions, 1000 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 82 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
@@ -78,6 +78,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | `printf` / `assert` / `__FILE__` / `__LINE__` (§7.22) | **done**; builtins, tests t201–t203 | §7.22 |
 | union layout: multi-member unions in memory (§7.23) | **done**; offset 0, max size, nested members, test t204 | §7.23 |
 | unsigned/signed bitfields, register + memory (§7.24) | **done**; 52-bit cells, mask/shift, tests t205–t207 | §7.24 |
+| prototypes, forward declarations, block scope (§7.25) | **done**; signature merge, incomplete types completed in place, local types/prototypes, tests t208–t212 | §7.25 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -812,21 +813,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 587 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 599 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 587 under `testers/unit_tests`, every one of
+bring the count to 599 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 220 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 75 | `negative/` |
+| `check.mjs` | 225 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `negative.mjs` | 82 | `negative/` |
 | `nomem.mjs` | 7 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-220 + 10 + 75 + 7 + 275 = 587. The caveat that replaces "no runner" is weaker but real:
+225 + 10 + 82 + 7 + 275 = 599. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -1503,3 +1504,40 @@ called `f` even when `a` was false.
   the fields individually (register struct initializer lists work).
 - Cases: t205 (register, widths, split at 52), t206 (memory), t207 (signed);
   negatives for width 53, address-of-bitfield and bitfields in a union.
+
+### 7.25 Function prototypes, forward declarations and block scope
+
+- A function may be declared before its definition (`int f(int);`) and called
+  from there. A prototype and its definition share one signature-keyed entry
+  and one mangled name, so they are not overloads of each other. Prototypes may
+  repeat; two definitions with the same parameter types, or a return-type
+  mismatch, are errors.
+- A prototype that is never called may stay undefined. A call to a prototype
+  with no definition is reported at the end of semantic analysis
+  (`Function 'f' is declared but never defined`).
+- `auto` function prototypes join the pattern entry; only the definition
+  creates concrete versions. A prototype-only `auto` function does not expand.
+- Prototypes are removed from the AST after semantic analysis: only definitions
+  reach the optimizer and code generation, so a declaration is never mistaken
+  for a second function.
+- `struct P;` / `union P;` and `typedef struct P P;` create an incomplete type.
+  A later definition fills the **same** `TypeInfo`, so pointers, typedef
+  aliases and mutually referring structs keep their identity. Pointers to an
+  incomplete type are fine; a by-value variable, member or `sizeof` on one is
+  an error. Template structs (with `auto` members) follow the same rule.
+- Block-scope declarations are supported: function prototypes, `struct`/`union`
+  definitions and forwards, typedefs and enums. A local tag or typedef shadows
+  an outer one and disappears with the block. A block-scope prototype may name
+  a later global definition; otherwise calling it is the usual
+  "declared but never defined" error.
+- Nested function definitions remain an error — C allows declarations in a
+  block, not definitions. C11 anonymous members such as
+  `union { union { int a; int b }; int c }` are **not** supported and are not
+  planned.
+- Cases: t208 (prototypes, redundant declaration, overloads, uncalled
+  prototype), t209 (`auto` prototype), t210 (mutual structs and typedef
+  forwards), t211 (template struct forward), t212 (block-scope prototypes,
+  local structs/typedefs/enums and shadowing). Negatives: called prototype
+  without definition, duplicate definition, return-type mismatch, incomplete
+  value, incomplete `sizeof`, block prototype without definition, nested
+  function definition.

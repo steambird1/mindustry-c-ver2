@@ -24,7 +24,8 @@ Mindustry-C 不需要安装。你只需要下载 `main.html` 和所有 JavaScrip
   `for`/`while`/`do-while`/`switch`、`break`/`continue`/`return`。
 - C99 便利：`//` 注释、`bool`/`true`/`false`、`inline`、`for` 初始化声明。
 - C 表面：真正的 `enum`（含 `typedef enum`）、`typedef struct { ... } Name;`（匿名/具名/自引用）、`&&`/`||` 短路与 `?:` 单分支求值、`printf`（格式串需字面量；`%d/%i/%u/%f/%s/%%`）、`assert`，以及 `<stdbool.h>`/`<stdio.h>`/`<assert.h>` 兼容头。
-- 数据布局：多成员 `union` 在内存中重叠；unsigned/signed 位域按 LSB-first 打包进 52-bit cell，寄存器和内存结构体都支持。
+- 声明：函数原型（含 `auto` 模式）、结构体/联合体前向声明（`struct P;`、`typedef struct P P;`），以及块作用域内的 typedef、结构体定义、enum 和函数原型（支持遮蔽）。不支持嵌套函数定义和 C11 匿名成员。
+- 数据布局：多成员 `union` 在内存中重叠；unsigned/signed 位域按 LSB-first 打包进 52-bit cell，寄存器和内存结构体都支持。跨类型 union 读取是数值别名，不是字节级 bitcast。
 - `char` 与原生字符串分离：`char` 是 1-cell 字符/数值，`char*` 是普通指针、`char[]` 是 NUL 结尾的 C 数组；`string_t` 是 1-cell 的 Mindustry 字符串。`#include <string.h>` 提供只读 `string_view` 和 message 拼接（字符级操作要求 v150+）。
 - 存储期：自动局部变量按调用；`static` 在本次运行内；`persistent` 跨处理器重启；普通文件作用域变量每次运行重置。
 - 预处理器：对象宏和函数宏、`#undef`、`#if`/`#elif`/`#else`/`#endif`、
@@ -59,7 +60,7 @@ Mindustry-C 不需要安装。你只需要下载 `main.html` 和所有 JavaScrip
 
 3. 普通指针占两个字（block + position）；`byname` 名字指针或数组句柄占一个字。可以用 `widthof` 观察差异。
 
-4. `union` 和位域可以解析，但目前不是稳定的 C99 兼容子集：不要依赖成员重叠或位打包。
+4. `union` 和位域有明确的、有意不同于 C99 的模型：多成员 union 放在内存里，跨类型读取是数值别名；位域每个 cell 最多 52 bit。请把它们当作 Mindustry-C 的类型，而不是字节精确的 C 布局。前向声明和函数原型遵循 C 的声明规则，限制见语言文档。
 
 递归受支持但昂贵且更难预测；优先使用全局变量和迭代写法。避免在非 `main` 函数里声明需要内存的变量。内存布局可能还会预留 block 元数据；小数组通常可以用寄存器或 encoded 布局。
 
@@ -82,7 +83,7 @@ Mindustry-C 不需要安装。你只需要下载 `main.html` 和所有 JavaScrip
 ### 与 C/C++ 不同
 
 - 空初始化列表不是可靠写法。`int a[] = {1, 2, 3};` 是支持的：最后一维由初始化列表推导。
-- 字符串字面量是原生 `string_t` 值。`char` 是普通的 1-cell 字符/数值；`char*` 是真正的字符数组指针，`const char*` 可以指向字面量。没有 C 字符串函数。
+- 字符串字面量是原生 `string_t` 值。`char` 是普通的 1-cell 字符/数值；`char*` 是真正的字符数组指针，`const char*` 可以指向字面量。`#include <string.h>` 提供有长度上界的 `strlen`/`strcpy`/`strcat`/`strcmp` 和只读 `string_view`。
 - 完整差异见 [DIFFERENCES_FROM_C99.md](../DIFFERENCES_FROM_C99.md)。
 
 ## 旧文档
