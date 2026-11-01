@@ -49,7 +49,7 @@ mOpRet_t unit_bind(content_t type, bool rebind) {
 
 mOpRet_t go_to(float x, float y, float radius) {
     bool is_within;
-    ucontrol("within", x, y, radius, (volatile bool*)is_within);
+    ucontrol("within", x, y, radius, &is_within);
     if (is_within) return (mOpRet_t)({true, OP_GOTO});
     ucontrol("pathfind", x, y);
     return (mOpRet_t)({false, OP_GOTO});

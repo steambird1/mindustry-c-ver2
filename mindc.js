@@ -58,6 +58,13 @@ export class CompilerExtensionBase {
 	 * @returns {TypeInfo}
 	 */
 	/**
+	 * `nominalPointers` lists parameter indices that accept a NOMINAL pointer
+	 * (`&x`): the builtin writes its output there. An index may be beyond
+	 * `parameters.length` when the output argument is optional; pair it with
+	 * `hasVarArgs: true` so the extra argument is accepted. Handlers should use
+	 * `cg.nominalPointerOperand(ast.arguments[index])`.
+	 */
+	/**
 	 * 
 	 * @typedef {{
 	 * 		name: string,
@@ -65,6 +72,7 @@ export class CompilerExtensionBase {
 	 * 		returnTypeEval: returnTypeCallback?,
 	 * 		parameters: string[],
 	 * 		hasVarArgs: boolean | undefined,
+	 * 		nominalPointers: number[] | undefined,
 	 * 		special: string | null | undefined
 	 * }} addinFunctionInfo
 	 */

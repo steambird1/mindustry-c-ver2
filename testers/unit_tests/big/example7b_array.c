@@ -80,10 +80,10 @@ bool controllable(device target) {
 void preFetch() {
     if (preFetchWork) {
         ulocate("building", "core", false,
-            (volatile int*)coreX,
-            (volatile int*)coreY,
-            (volatile int*)coreFound,
-            (volatile device*)coreDevice);
+            &coreX,
+            &coreY,
+            &coreFound,
+            &coreDevice);
         preFetchWork = false;
     }
 }
@@ -91,7 +91,7 @@ void preFetch() {
 // To keep the unit control alive, this will send control instruction!
 bool isApproaching(int x, int y, float r) {
     bool state;
-    ucontrol("within", x, y, r, (volatile bool*)state);
+    ucontrol("within", x, y, r, &state);
     return state;
 }
 

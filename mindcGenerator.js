@@ -965,6 +965,35 @@ export class CodeGenerator extends ASTVisitor {
 	}
 
 	/**
+	 * Resolve a NOMINAL pointer argument (`&x`) for a builtin or JS extension.
+	 *
+	 * The instruction takes a register NAME as an output slot. When `&x` can be
+	 * named, that name is returned directly. Otherwise the helper computes the
+	 * real pointer and gives a temporary operand; `after` stores the result back
+	 * through that pointer.
+	 *
+	 * @param {ASTNode} arg
+	 * @returns {{operand: string, before: Instruction, after: Instruction}}
+	 */
+	nominalPointerOperand(arg) {
+		if (!arg || arg.type === 'NullLiteral'
+			|| (arg.type === 'Identifier' && arg.name === 'null')) {
+			return { operand: 'null', before: new Instruction(), after: new Instruction() };
+		}
+		const name = this.builtinOutputName(arg);
+		if (name) {
+			return { operand: name, before: new Instruction(), after: new Instruction() };
+		}
+		const fetched = this.visitForContent(arg);
+		const temp = this.getTempSymbol();
+		return {
+			operand: temp.getAssemblySymbol(),
+			before: fetched,
+			after: this.memory.outputPointerStorageOf(fetched.instructionReturn, temp.getAssemblySymbol())
+		};
+	}
+
+	/**
 	 * The old name of `writeSymbol`, still called from the builtin handlers in
 	 * mindc.js (pdcreate / pdread).
 	 *
@@ -6072,14 +6101,42 @@ export class CodeGenerator extends ASTVisitor {
 				return packer(`ubind`, ast.arguments);
 			},
 			ucontrol: ast => {
-				if (ast.arguments[0].type === 'StringLiteral') {
-					return packer(`ucontrol ${ast.arguments[0].value}`, ast.arguments.slice(1), null, 5);
-				} else {
-					throw `Parameter 1 for ucontrol() must be string literal`
+				if (ast.arguments[0]?.type !== 'StringLiteral') {
+					throw `Parameter 1 for ucontrol() must be string literal`;
 				}
+				/*
+				`&x` is a nominal output; use `nominalPointerOperand` so a target
+				that lives in memory gets a temporary and a write-back instead of
+				passing a pointer pair where the instruction expects a name.
+				*/
+				const before = new Instruction();
+				const after = new Instruction();
+				const reads = [];
+				const operands = [];
+				for (const arg of ast.arguments.slice(1)) {
+					if (arg?.type === 'UnaryExpression' && arg.operator === '&') {
+						const out = this.nominalPointerOperand(arg);
+						before.concat(out.before);
+						after.concat(out.after);
+						operands.push(out.operand);
+					} else {
+						const fetched = this.visitForContent(arg);
+						reads.push(fetched);
+						operands.push(`{op_r${reads.length - 1}}`);
+					}
+				}
+				while (operands.length < 5) operands.push('x');
+				const result = new Instruction();
+				result.concat(before);
+				result.concat(this.operatesReads(reads, new SingleInstruction({
+					content: `ucontrol ${ast.arguments[0].value} ${operands.join(' ')}`,
+					referrer: []
+				})));
+				result.concat(after);
+				return result;
 			},
 			ulocate: ast => {
-				let result = new Instruction(), tmpRet = this.getTempVariable();
+				let result = new Instruction();
 				let postConcat = new Instruction();
 				if (ast.arguments[0].type === 'StringLiteral') {
 					let preConcat = "", subArg1, tailPosition = 1;
@@ -6108,27 +6165,10 @@ export class CodeGenerator extends ASTVisitor {
 							break;
 					}
 					for (let i = tailPosition; i < tailPosition + 4; i++) {
-						// `&x` naming a register: ulocate writes into it directly
-						const outputName = this.builtinOutputName(ast.arguments[i]);
-						if (outputName) {
-							preConcat += ` ${outputName}`;
-							continue;
-						}
-						const argContent = this.visitForContent(ast.arguments[i]);
-						/*
-						The instructions that COMPUTE the address used to be dropped
-						here, so the pointer halves were never written.
-						*/
-						result.concat(argContent);
-						if (argContent.getAttribute('fromCast') && ast.arguments[i].dataType.qualifiers
-							&& ast.arguments[i].dataType.qualifiers.includes('volatile')) {
-								preConcat += ` ${argContent.instructionReturn}`;
-						} else {
-							const tmpVar = this.getTempSymbol(); //this.getTempVariable();
-							preConcat += ` ${tmpVar.getAssemblySymbol()}`;
-							postConcat.concat(this.memory.outputPointerStorageOf(argContent.instructionReturn, tmpVar.getAssemblySymbol()));
-							// postConcat.concat(InstructionBuilder.writes(tmpVar, `${argContent.instructionReturn}_block`, `${argContent.instructionReturn}_pos`));
-						}
+						const out = this.nominalPointerOperand(ast.arguments[i]);
+						result.concat(out.before);
+						preConcat += ` ${out.operand}`;
+						postConcat.concat(out.after);
 					}
 					result.concat(new SingleInstruction({
 						content: `ulocate ${preConcat}`,

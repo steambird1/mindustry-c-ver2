@@ -511,7 +511,12 @@ export class Optimizer extends ASTVisitor {
 	markBuiltinOutputTargets() {
 		/** @type {Map<string, {total: number, builtin: number, symbol: any}>} */
 		const uses = new Map();
-		const isOutputBuiltin = name => name === 'ulocate' || name === 'ucontrol';
+		const isOutputBuiltin = (name, index) => {
+			if (name === 'ulocate' || name === 'ucontrol') return true;
+			const symbol = this.globalScope?.lookup?.(name) ?? null;
+			return Array.isArray(symbol?.type?.nominalPointers)
+				&& symbol.type.nominalPointers.includes(index);
+		};
 		const symbolOf = (expr, scope) => {
 			if (!expr || expr.type !== 'Identifier') return null;
 			return scope?.lookup?.(expr.name) ?? null;
@@ -534,7 +539,7 @@ export class Optimizer extends ASTVisitor {
 			if (node.type === 'FunctionCall' || node.type === 'BuiltinCall') {
 				// A builtin keeps its name on `functionName`, a user call on `callee`
 				const callee = node.callee?.name ?? node.functionName ?? node.name ?? null;
-				for (const arg of node.arguments ?? []) {
+				for (const [index, arg] of (node.arguments ?? []).entries()) {
 					if (arg && arg.type === 'UnaryExpression' && arg.operator === '&') {
 						/*
 						The walk reaches this node again when it descends into
@@ -542,7 +547,7 @@ export class Optimizer extends ASTVisitor {
 						an ordinary address use.
 						*/
 						arg.__outputParameter = true;
-						note(symbolOf(arg.argument, scope), isOutputBuiltin(callee), null, 'call:' + callee);
+						note(symbolOf(arg.argument, scope), isOutputBuiltin(callee, index), null, 'call:' + callee);
 					}
 				}
 			} else if (node.type === 'UnaryExpression' && node.operator === '&'

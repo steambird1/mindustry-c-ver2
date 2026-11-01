@@ -878,7 +878,12 @@ export class SemanticAnalyzer extends ASTVisitor {
 			if (!table.has(key)) table.set(key, { builtin: 0, pointers: new Set(), other: 0 });
 			return table.get(key);
 		};
-		const isOutputBuiltin = name => name === 'ulocate' || name === 'ucontrol';
+		const isOutputBuiltin = (name, index) => {
+			if (name === 'ulocate' || name === 'ucontrol') return true;
+			const candidates = symbolsOf(name);
+			return candidates.some(symbol => Array.isArray(symbol?.type?.nominalPointers)
+				&& symbol.type.nominalPointers.includes(index));
+		};
 
 		const walk = (node, parent) => {
 			if (!node || typeof node !== 'object') return;
@@ -891,7 +896,8 @@ export class SemanticAnalyzer extends ASTVisitor {
 				if (entry) {
 					if (parent && (parent.type === 'FunctionCall' || parent.type === 'BuiltinCall')) {
 						const callee = parent.callee?.name ?? parent.functionName ?? parent.name ?? null;
-						if (isOutputBuiltin(callee)) entry.builtin++;
+						const argIndex = Array.isArray(parent.arguments) ? parent.arguments.indexOf(node) : -1;
+						if (isOutputBuiltin(callee, argIndex)) entry.builtin++;
 						else entry.other++;
 					} else if (parent && parent.type === 'VariableDeclarator') {
 						/*
@@ -1273,7 +1279,7 @@ export class SemanticAnalyzer extends ASTVisitor {
         builtins.forEach(func => {
             const symbol = new SymbolEntry(
                 func.name,
-                { returnType: func.returnType, parameters: func.parameters, hasVarArgs: func.hasVarArgs ?? false, special: func.special ?? null },
+                { returnType: func.returnType, parameters: func.parameters, hasVarArgs: func.hasVarArgs ?? false, nominalPointers: func.nominalPointers ?? [], special: func.special ?? null },
                 this.currentScope,
                 'function'
             );
@@ -4808,11 +4814,11 @@ export class SemanticAnalyzer extends ASTVisitor {
 			this.markVariableAsAddressed(object);
 		} else if (node.type === 'CastExpression') {
 			/*
-			`(T*)x`, where x is a plain variable, is the idiom of this dialect
-			for an output parameter -- `ulocate(..., (volatile int*)coreX, ...)`
-			means "write the result into coreX". So it is `&x` in disguise and
-			the variable has to live in memory. A cast of something that is
-			already a pointer is an ordinary conversion instead.
+			`(T*)x` was the old output-parameter spelling. That use is removed:
+			`ulocate`/`ucontrol` now reject it and require `&x`. A plain pointer
+			cast is still treated as an address-taking conversion for other
+			contexts; a cast of something already pointer-like is an ordinary
+			conversion.
 			*/
 			const target = node.dataType ?? null;
 			const inner = node.expression ?? null;
@@ -7774,6 +7780,36 @@ export class SemanticAnalyzer extends ASTVisitor {
 		node.setAttribute('isFunctionPointer', isFunctionPointer);
     }
 
+    /**
+     * `(volatile T*)x` used to be an output-parameter spelling. It is removed
+     * in favour of `&x`; reject it here instead of letting the generator treat
+     * the cast as a pointer value.
+     *
+     * @param {BuiltinCallNode} node
+     * @returns {void}
+     */
+    rejectRemovedOutputPointerCasts(node) {
+        const name = node.functionName;
+        const symbol = this.currentScope.lookup(name);
+        const outputIndices = (name === 'ulocate' || name === 'ucontrol')
+            ? (node.arguments ?? []).map((_, index) => index).slice(1)
+            : (symbol?.type?.nominalPointers ?? []);
+        for (const index of outputIndices) {
+            const arg = node.arguments?.[index];
+            if (arg?.type !== 'CastExpression') continue;
+            const typeNode = arg.typeNode ?? null;
+            const qualifiers = [
+                ...(typeNode?.getAttribute?.('qualifiers') ?? []),
+                ...(arg.dataType?.qualifiers ?? [])
+            ];
+            const pointerDepth = typeNode?.pointerDepth ?? arg.dataType?.pointerDepth ?? 0;
+            if (pointerDepth > 0 && qualifiers.includes('volatile')) {
+                this.addError(`(volatile T*) output parameters were removed; use '&x' instead`,
+                    arg.location ?? node.location);
+            }
+        }
+    }
+
     visitBuiltinCall(node) {
 		const funcSymbol = this.currentScope.lookup(node.functionName);
 		if (!funcSymbol || funcSymbol.kind !== 'function') {
@@ -7790,6 +7826,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 
 		// 检查参数
 		node.arguments.forEach(arg => this.visit(arg));
+		this.rejectRemovedOutputPointerCasts(node);
 
 		// 特殊的内建函数参数检查
 		switch (node.functionName) {
