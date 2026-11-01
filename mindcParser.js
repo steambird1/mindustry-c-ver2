@@ -232,8 +232,14 @@ export class Parser {
                 const enumDef = this.parseStandaloneEnumDefinition();
                 if (enumDef) {
                     enumDef.parent = program;
-                    program.enumDefinitions = program.enumDefinitions || [];
-                    program.enumDefinitions.push(enumDef);
+                    /*
+                    Enums go into the SAME source-ordered list as structs and
+                    typedefs. Keeping them in a separate array made every enum
+                    look as if it appeared after every struct, so
+                    `struct S { enum Color c; };` could not see `Color`.
+                    */
+                    program.typeDefinitions = program.typeDefinitions || [];
+                    program.typeDefinitions.push(enumDef);
                     continue;
                 }
             }
@@ -244,6 +250,17 @@ export class Parser {
                 if (declaration.type === 'FunctionDeclaration') {
                     program.functions.push(declaration);
                 } else {
+                    /*
+                    `enum Color { ... } x;` carries its definition on the
+                    declaration's type. Register it at the position where the
+                    declaration appears, for the same reason as above.
+                    */
+                    if (declaration.type?.type === 'TypeSpecifier'
+                        && declaration.type.typeName === 'enum'
+                        && declaration.type.getAttribute?.('enumDefinition')) {
+                        program.typeDefinitions = program.typeDefinitions || [];
+                        program.typeDefinitions.push(declaration.type);
+                    }
                     program.globalDeclarations.push(declaration);
                 }
 				declaration.parent = program;

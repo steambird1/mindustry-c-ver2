@@ -1146,11 +1146,6 @@ export class SemanticAnalyzer extends ASTVisitor {
                 });
             }
             
-            // 收集全局枚举定义
-            (node.enumDefinitions ?? []).forEach(def => {
-                this.processEnumDefinition(def, this.globalScope);
-            });
-
             // 收集全局结构体/联合体定义
             node.globalDeclarations.forEach(decl => {
                 if ((decl.type === 'VariableDeclaration' || decl.declarators) && decl.getAttribute('isStructOrUnion')) {
@@ -1572,6 +1567,16 @@ export class SemanticAnalyzer extends ASTVisitor {
         
         if (defNode.members && defNode.members.length > 0) {
             defNode.members.forEach(member => {
+                /*
+                `struct S { enum Color { ... } c; };` -- the enum is declared
+                inside the member list, so it has to be registered before the
+                member's type name is looked up.
+                */
+                if (member?.type?.type === 'TypeSpecifier'
+                    && member.type.typeName === 'enum'
+                    && member.type.getAttribute?.('enumDefinition')) {
+                    this.processEnumDefinition(member.type, this.currentScope);
+                }
                 // const memberTypeName = this.getTypeNameFromTypeNode(member.type);
 				const memberTypeName = this.getTypeNameFromDeclarator(member);
                 const memberType = this.getTypeInfo(memberTypeName);
