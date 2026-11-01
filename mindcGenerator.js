@@ -1229,8 +1229,16 @@ export class CodeGenerator extends ASTVisitor {
 	visitProgram(node) {
 		let result = new Instruction();
 		let mainSymbol = null;
+		/**
+		 * All functions must exist in the function registerer BEFORE any body is
+		 * visited: a definition may follow `main` (especially when a prototype
+		 * made the call legal), and a call needs a target entry.
+		 */
+		const functionPlans = [];
 		node.functions.forEach(func => {
 			//result.concat();
+			// A prototype has a symbol but no body to emit.
+			if (!func.body) return;
 			// Check the scope that this function owns
 			const funcSymbol = this.currentScope.lookup(func.name);
 			/*
@@ -1258,6 +1266,9 @@ export class CodeGenerator extends ASTVisitor {
 			const { stackSymbols: extraSymbols, singular, regStructMem } = this.handleStructExtra(currentSymbols);
 			stackSymbols = [...stackSymbols, ...extraSymbols];
 			this.functionManagement.addFunction(func.name, new Instruction(), funcSymbol.owningScope, stackSymbols, func.name === 'main', this.recursiveInfo.has(func.name));
+			functionPlans.push({ func, singular });
+		});
+		functionPlans.forEach(({ func, singular }) => {
 			/**
 			 * @type {Instruction}
 			 */

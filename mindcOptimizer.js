@@ -633,7 +633,8 @@ export class Optimizer extends ASTVisitor {
 			if (!node || typeof node !== 'object') return;
 			if (Array.isArray(node)) { node.forEach(collect); return; }
 			if (node.type === 'FunctionDeclaration' && node.name) {
-				this.functionDeclarations.set(node.name, node);
+				const previous = this.functionDeclarations.get(node.name);
+				if (!previous || node.body) this.functionDeclarations.set(node.name, node);
 			}
 			for (const key of ['functions', 'globalDeclarations', 'statements',
 				'declarations', 'children', 'body']) {
@@ -645,7 +646,10 @@ export class Optimizer extends ASTVisitor {
 		collect(this.ast ?? this.globalScope?.astNode ?? null);
 		const collectFromScope = scope => {
 			if (scope?.astNode?.type === 'FunctionDeclaration' && scope.astNode.name) {
-				this.functionDeclarations.set(scope.astNode.name, scope.astNode);
+				const previous = this.functionDeclarations.get(scope.astNode.name);
+				if (!previous || scope.astNode.body) {
+					this.functionDeclarations.set(scope.astNode.name, scope.astNode);
+				}
 			}
 			scope?.children?.forEach(collectFromScope);
 		};

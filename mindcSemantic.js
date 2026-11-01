@@ -1957,20 +1957,48 @@ export class SemanticAnalyzer extends ASTVisitor {
 		*/
         node.functions.forEach(func => this.visit(func));
 		if (this.overloadMode() !== 'none') this.expandAutoTemplates(node);
+		this.validateFunctionDefinitions();
 		/*
 		After the versions exist: an `auto` function reached through a pointer
 		is pinned by the version that was made for it, so what is left are the
 		functions that have only themselves.
 		*/
 		this.pinValueTakenRepresentations(node);
+		/*
+		Prototypes have done their job during semantic analysis. Keeping them in
+		the AST makes the optimizer treat a declaration and its definition as two
+		functions with the same name; drop the body-less nodes now that calls have
+		resolved to their symbols.
+		*/
+		node.functions = node.functions.filter(func => !!func.body);
     }
 
     visitFunctionDeclaration(node) {
         // 检查函数是否已声明
         const existingSymbol = this.currentScope.lookupCurrent(node.name);
+        let funcSymbol = null;
+        let reuse = false;
         if (existingSymbol) {
-            this.addError(`Function '${node.name}' is already declared`, node.location);
-            return;
+            if (existingSymbol.kind !== 'function') {
+                this.addError(`'${node.name}' is already declared and is not a function`, node.location);
+                return;
+            }
+            /*
+            A prototype and a definition share one signature-keyed entry. A
+            prototype may repeat, and a definition may follow one; two
+            definitions were already rejected by the prescan.
+            */
+            if (!node.body) {
+                this.validateFunctionRedeclaration(existingSymbol, node);
+                return;
+            }
+            if (existingSymbol.isDefined === true) {
+                this.addError(`Function '${node.name}' is already defined`, node.location);
+                return;
+            }
+            funcSymbol = existingSymbol;
+            reuse = true;
+            this.validateFunctionRedeclaration(existingSymbol, node);
         }
 
 		// 获取返回类型名称
@@ -1983,27 +2011,43 @@ export class SemanticAnalyzer extends ASTVisitor {
 		}
 
         // 创建函数符号
-        const funcSymbol = new SymbolEntry(
-            node.name,
-            {
-                returnType: this.typeToString(this.getTypeNameFromTypeNode(node.returnType)),
-                parameters: node.parameters.map(param => ({
-                    name: param.name,
-                    type: this.getTypeNameFromTypeNode(param) /*param.type.typeName*/
-					/* Modified in 5th conversation. Whether this is correct remains to be seen! */
-                }))
-            },
-            this.currentScope,
-            'function',
-            node.location
-        );
+        if (!funcSymbol) {
+            funcSymbol = new SymbolEntry(
+                node.name,
+                {
+                    returnType: this.typeToString(this.getTypeNameFromTypeNode(node.returnType)),
+                    parameters: node.parameters.map(param => ({
+                        name: param.name,
+                        type: this.getTypeNameFromTypeNode(param) /*param.type.typeName*/
+                        /* Modified in 5th conversation. Whether this is correct remains to be seen! */
+                    }))
+                },
+                this.currentScope,
+                'function',
+                node.location
+            );
+            this.currentScope.addSymbol(funcSymbol);
+        } else {
+            funcSymbol.type.returnType = this.typeToString(this.getTypeNameFromTypeNode(node.returnType));
+            funcSymbol.type.parameters = node.parameters.map(param => ({
+                name: param.name,
+                type: this.getTypeNameFromTypeNode(param)
+            }));
+        }
+        funcSymbol.isPrototype = !node.body;
+        funcSymbol.isDefined = !!node.body;
+        funcSymbol.declarationNode = node;
+        /*
+        A prototype only registers the signature; its parameters do not get a
+        scope until a definition exists.
+        */
+        if (!node.body) return;
 		/*
 		Not yet: the scope above may not exist yet (a function built by the
 		compiler, such as an `auto` instantiation, has none until the next
 		lines make one). It is assigned again once it surely does.
 		*/
 
-        this.currentScope.addSymbol(funcSymbol);
         this.currentFunction = funcSymbol;
 
         // 进入函数作用域
@@ -2088,6 +2132,43 @@ export class SemanticAnalyzer extends ASTVisitor {
         // 返回父作用域
         this.currentScope = this.currentScope.parent;
         this.currentFunction = null;
+    }
+
+    /**
+     * A prototype and a definition (or two prototypes) must agree on the
+     * return type and parameter types. Parameter NAMES may differ.
+     *
+     * @param {SymbolEntry} existing
+     * @param {any} node
+     * @returns {void}
+     */
+    validateFunctionRedeclaration(existing, node) {
+        const returnType = this.typeToString(this.getTypeNameFromTypeNode(node.returnType));
+        if (existing.type?.returnType && returnType !== existing.type.returnType) {
+            this.addError(`Function '${node.name}' is redeclared with return type `
+                + `'${returnType}', previously '${existing.type.returnType}'`, node.location);
+        }
+        const now = (node.parameters ?? []).map(p => String(this.getTypeNameFromTypeNode(p)));
+        const before = (existing.type?.parameters ?? []).map(p => String(p?.type ?? p));
+        if (before.length !== now.length || before.some((t, i) => t !== now[i])) {
+            this.addError(`Function '${node.name}' is redeclared with a different parameter list`,
+                node.location);
+        }
+    }
+
+    /**
+     * A prototype is allowed to have no definition, but a call to it is not.
+     *
+     * @returns {void}
+     */
+    validateFunctionDefinitions() {
+        this.globalScope.symbols.forEach(symbol => {
+            if (symbol.kind !== 'function') return;
+            if (symbol.isPrototype === true && symbol.called === true) {
+                this.addError(`Function '${symbol.name}' is declared but never defined`,
+                    symbol.declarationNode?.location ?? symbol.location);
+            }
+        });
     }
 
 	// Modified on 1 Dec, to be verified
@@ -5730,29 +5811,48 @@ export class SemanticAnalyzer extends ASTVisitor {
      * @returns {void}
      */
     prescanFunctionDeclarations(ast) {
-        /** @type {Map<string, {node: any, paramTypes: string[]}[]>} */
-        this.overloadSets = new Map();
+        /** @type {Map<string, Map<string, {name: string, node: any, paramTypes: string[], declarations: any[], definition: any?, mangledName: string?}>>} */
+        const byName = new Map();
         for (const func of (ast?.functions ?? [])) {
             if (!func || func.type !== 'FunctionDeclaration' || !func.name) continue;
-            if (!this.overloadSets.has(func.name)) this.overloadSets.set(func.name, []);
-            this.overloadSets.get(func.name).push({ node: func, paramTypes: this.parameterTypeNamesOf(func) });
-        }
-        for (const [name, list] of this.overloadSets) {
-            list.forEach((entry, index) => {
-                entry.node.name = this.mangleFunctionName(name, index);
-            });
-            /*
-            Two functions with the same name AND the same parameter list are
-            not overloads -- they are a redefinition.
-            */
-            for (let i = 0; i < list.length; i++) {
-                for (let j = i + 1; j < list.length; j++) {
-                    if (list[i].paramTypes.join(',') === list[j].paramTypes.join(',')) {
-                        this.addError(`Function '${name}' is already declared with these parameter types`,
-                            list[j].node.location);
-                    }
-                }
+            const paramTypes = this.parameterTypeNamesOf(func);
+            const signature = paramTypes.join(',');
+            let entries = byName.get(func.name);
+            if (!entries) { entries = new Map(); byName.set(func.name, entries); }
+            let entry = entries.get(signature);
+            if (!entry) {
+                entry = { name: func.name, node: func, paramTypes, declarations: [], definition: null, mangledName: null };
+                entries.set(signature, entry);
             }
+            entry.declarations.push(func);
+            func.setAttribute('overloadSignature', signature);
+            func.overloadEntry = entry;
+            if (func.body) {
+                if (entry.definition && entry.definition !== func) {
+                    this.addError(`Function '${func.name}' is already defined with these parameter types`,
+                        func.location);
+                } else {
+                    entry.definition = func;
+                    entry.node = func;
+                }
+            } else {
+                func.isPrototype = true;
+            }
+        }
+
+        this.overloadSets = new Map();
+        for (const [name, entries] of byName) {
+            const list = [...entries.values()];
+            list.forEach((entry, index) => {
+                const mangled = this.mangleFunctionName(name, index);
+                entry.mangledName = mangled;
+                entry.node.name = mangled;
+                entry.declarations.forEach(decl => {
+                    decl.name = mangled;
+                    decl.mangledName = mangled;
+                });
+            });
+            this.overloadSets.set(name, list);
         }
     }
 
@@ -6410,7 +6510,7 @@ export class SemanticAnalyzer extends ASTVisitor {
      */
     expandAutoTemplates(ast) {
         const templates = (ast?.functions ?? []).filter(
-            func => (func?.parameters ?? []).some((param, i) => this.hasAutoQualifier(param)));
+            func => func?.body && (func?.parameters ?? []).some((param, i) => this.hasAutoQualifier(param)));
         if (!templates.length) return;
 
         /** @type {any[]} */
@@ -7394,6 +7494,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 				expectedParams = funcType.parameters || [];
 			}
 		}
+		if (funcSymbol) funcSymbol.called = true;
 
 		/*
 		A literal may satisfy a `const char*` parameter by materialising a
