@@ -66,8 +66,10 @@ For grammar introduction (about the features unique to Mindustry-C) and examples
 - C surface: real `enum` (including `typedef enum`, and enum-typed struct/union
   members and function parameters/returns), `typedef struct { ... }
   Name;` (anonymous, tagged, self-referential), short-circuit `&&`/`||` and
-  single-branch `?:`, `printf` (literal format; `%d/%i/%u/%f/%s/%%`),
-  `assert`, and `<stdbool.h>`/`<stdio.h>`/`<assert.h>` compatibility headers.
+  single-branch `?:`, `printf` (literal format; `%d/%i/%u/%f/%s/%%`;
+  v150+ uses `format`, older targets use several `print`s; constant arguments
+  honour flags/width/precision), `assert`, and
+  `<stdbool.h>`/`<stdio.h>`/`<assert.h>` compatibility headers.
 - Declarations: function prototypes (including `auto` patterns), struct/union
   forward declarations (`struct P;`, `typedef struct P P;`), and block-scope
   typedefs, struct definitions, enums and prototypes with shadowing. Nested

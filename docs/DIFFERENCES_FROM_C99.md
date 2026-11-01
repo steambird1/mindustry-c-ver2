@@ -40,7 +40,7 @@ void main() {
 | 变长数组（VLA） | **不支持**。数组维度必须是编译期常量；`int a[n];` 会报 “Variable length arrays are not supported”。 |
 | C 字符串 / `char *` | 字符串字面量是 `string_t`（Mindustry 原生字符串值），不是 `char *`。`const char* p = "hi";` 可以指向只读字符数组；`char* p = "hi";` 会被拒绝；需要可写副本时写 `char a[] = "hi";`。 |
 | 用户自定义可变参数函数 | **不支持**。`print`、`draw` 等内置函数和扩展可以变参；普通函数参数表必须固定。 |
-| `printf` / `scanf` / `FILE` / `malloc` / `free` / `str*` 等 | `printf` 是编译器内建（格式串必须是字面量；支持 `%d/%i/%u/%f/%s/%%`）；`assert` 也是内建；`scanf`、`FILE`、动态分配不提供；`strlen`/`strcpy`/`strcat`/`strcmp` 由 `include/string.h` 按 `char*` 提供。见 [STANDARD_LIBRARY.md](STANDARD_LIBRARY.md)。 |
+| `printf` / `scanf` / `FILE` / `malloc` / `free` / `str*` 等 | `printf` 是编译器内建（格式串必须是字面量；支持 `%d/%i/%u/%f/%s/%%`；v150+ 用 `format`，低版本逐段用 `print`；常量参数的宽度/精度生效）；`assert` 也是内建；`scanf`、`FILE`、动态分配不提供；`strlen`/`strcpy`/`strcat`/`strcmp` 由 `include/string.h` 按 `char*` 提供。见 [STANDARD_LIBRARY.md](STANDARD_LIBRARY.md)。 |
 | `setjmp` / `longjmp`、信号、线程、文件 | 不提供。 |
 | 联合体（`union`） | **布局已支持**：所有成员 offset 0、大小为最大成员；多成员 union 目前强制放内存。跨不同类型读取是**数值别名**，不是 C 的字节级 bitcast。union 内位域暂不支持。 |
 | 位域（bit-field） | **unsigned/signed 已支持**：按声明顺序 LSB-first 打包，每 cell 最多 52 bit；写入按宽度掩码，signed 读取做符号扩展。`&bitfield` 会被拒绝；内存结构体的位域初始化列表暂不支持。 |
@@ -409,6 +409,7 @@ remote int *p = remote(processor1, qq);      // 指针本身在对端
 - 块作用域：块内允许函数原型、`struct`/`union` 定义或前向声明、typedef 和 enum。局部 tag/typedef 遮蔽外层同名类型，离开块后恢复；块内原型可以指向之后出现的全局定义。**不允许嵌套函数定义**。
 - enum 成员：enum 类型可以作为 struct/union 成员，也可以作为函数参数和返回值；顶层 enum 与 struct/typedef 按源码顺序处理，成员列表里内联或匿名的 enum 会先注册。enum tag 仍须先声明后使用。
 - C11 匿名成员（如 `union { union { int a; int b }; int c }`）不支持。
+- 低于 v150 时 `printf` 逐段生成 `print`；常量参数的 flags/宽度/精度会生效，运行时参数带这些修饰会报错。无内存块不等于必须用 `byname`：普通 stdio 程序在低版本也能编译，只有真正需要名字指针或内存时才会报错。
 
 ---
 

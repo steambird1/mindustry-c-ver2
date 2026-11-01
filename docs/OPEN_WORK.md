@@ -20,9 +20,9 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 226 passed, 0 failed (140 shape assertions, 1005 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 83 passed, 0 failed |
-| `node ../tools/nomem.mjs` | 7 passed, 0 failed |
+| `node ../tools/check.mjs` | 228 passed, 0 failed (141 shape assertions, 1010 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 84 passed, 0 failed |
+| `node ../tools/nomem.mjs` | 8 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
 
@@ -80,6 +80,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | unsigned/signed bitfields, register + memory (§7.24) | **done**; 52-bit cells, mask/shift, tests t205–t207 | §7.24 |
 | prototypes, forward declarations, block scope (§7.25) | **done**; signature merge, incomplete types completed in place, local types/prototypes, tests t208–t212 | §7.25 |
 | enum types in struct/union members and function parameters (§7.26) | **done**; source-ordered enum collection, inline member enums, test t213 | §7.26 |
+| low-version `printf` / stdio and no-memory byname (§7.27) | **done**; multi-`print` below v150, constant width/precision, no-memory pass fix, tests t214/t215 | §7.27 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -814,21 +815,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 601 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 605 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 601 under `testers/unit_tests`, every one of
+bring the count to 605 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 226 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 83 | `negative/` |
-| `nomem.mjs` | 7 | `nomem/` |
+| `check.mjs` | 228 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `negative.mjs` | 84 | `negative/` |
+| `nomem.mjs` | 8 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-226 + 10 + 83 + 7 + 275 = 601. The caveat that replaces "no runner" is weaker but real:
+228 + 10 + 84 + 8 + 275 = 605. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -1459,9 +1460,15 @@ called `f` even when `a` was false.
 ### 7.22 `printf`, `assert`, `__FILE__` and `__LINE__`
 
 - `printf` is a compiler builtin because user functions cannot be variadic.
-  The format must be a literal; it is split into one `print` with `{n}`
-  placeholders and one `format` per argument. `%d/%i/%u/%f/%s/%%` are
-  supported; a runtime format or an unsupported conversion is a clean error.
+  The format must be a literal. On v150+ it becomes one `print` with `{n}`
+  placeholders plus one `format` per runtime argument. Below v150 it becomes a
+  sequence of `print` instructions; Mindustry's `print` has no terminator, so
+  the pieces still concatenate. `%d/%i/%u/%f/%s/%%` are supported; a runtime
+  format or an unsupported conversion is a clean error.
+- Flags, width and precision are applied when the argument is a compile-time
+  constant (`%2d`, `%02d`, `%+d`, `%.2f`, `%5s`, `%-5s`, ...). A runtime value
+  with any of them is refused, because mlog has no width/precision operand and
+  the alternative would be silently printing the unformatted value.
 - `assert(expr)` evaluates once, skips the failure block when true, and on
   failure prints a source-line message and stops the processor. `NDEBUG` is
   not applied yet.
@@ -1469,7 +1476,9 @@ called `f` even when `a` was false.
 - Compatibility headers `include/stdio.h` and `include/assert.h` exist for
   portable sources; `assert` itself is the builtin, not a libc function.
 - Cases: t201 (printf), t202 (true assert and predefined macros), t203 (failed
-  assert stops), plus a negative for a runtime printf format.
+  assert stops), t214 (target 148 stdio and multi-print printf), t215 (constant
+  flags/width/precision); negatives for a runtime printf format and a runtime
+  field width.
 
 ### 7.23 Union layout: memory for multi-member unions
 
@@ -1560,3 +1569,31 @@ called `f` even when `a` was false.
 - Case: t213 (tagged, anonymous, inline, variable-declaration, typedef and
   union members; parameter and return value; local struct member). Negative:
   enum member before its definition.
+
+### 7.27 Low-version `printf`, stdio and the no-memory byname error
+
+- Below v150 there is no `format` instruction, so `printf` is lowered to a
+  sequence of `print` instructions: literal chunks and runtime values in
+  source order. Mindustry's `print` has no terminator, so the pieces
+  concatenate on the message board; the simulator reports each `print`
+  separately, which is a harness display choice.
+- `%d/%i/%u/%f/%s/%%` work on every target. Flags, width and precision are
+  applied when the argument is a compile-time constant (`%2d`, `%02d`, `%+d`,
+  `%.2f`, `%5s`, `%-5s`). A runtime value with any of them is refused:
+  mlog has no width/precision operand, and silently printing the bare value
+  would be worse than an error.
+- `include/stdio.h`, `include/assert.h` and `include/stdbool.h` are usable
+  below v150. `include/string.h` provides `strlen`/`strcpy`/`strcat`/`strcmp`
+  over `char*` and `concat_print`; `string_view`, `concat_to_message`,
+  `printchar`, `format`, string indexing and `@size`/`@bufferSize` remain
+  v150+.
+- With no memory block linked, the name-pointer pass used to run for every
+  program and report a `byname` error below v150 even when the program had no
+  pointer at all. It now runs for no-memory programs only when a name pointer
+  was actually requested; the generator still reports a real memory
+  requirement if one exists.
+- `check.mjs` and `nomem.mjs` accept `// VERSION: 148`; `check.mjs` also
+  accepts `EXPECT-LINE:` when the expected output contains meaningful spaces.
+- Cases: t214 (148 stdio, multi-print printf, constant `%02d`, no `format`
+  instruction), t215 (constant flags/width/precision and a runtime `%d`),
+  `nomem/low_version_stdio.c`; negative for a runtime field width.
