@@ -1361,7 +1361,38 @@ export class Parser {
             
             case TokenType.ASM:
                 return this.parseAsmStatement();
-            
+			
+			case TokenType.TYPEDEF:
+				return this.parseTypedefDeclaration();
+
+			case TokenType.STRUCT:
+			case TokenType.UNION: {
+				const start = this.currentTokenIndex;
+				const typeDef = this.parseStructOrUnionDefinition();
+				if (typeDef && typeDef.isDefinition) {
+					if (this.matchToken(TokenType.SEMICOLON)) this.consumeToken();
+					return typeDef;
+				}
+				if (typeDef && typeDef.name && this.matchToken(TokenType.SEMICOLON)) {
+					this.consumeToken();
+					typeDef.isForward = true;
+					return typeDef;
+				}
+				this.currentTokenIndex = start;
+				return this.parseVariableDeclaration() ?? this.parseExpressionStatement();
+			}
+
+			case TokenType.ENUM: {
+				const start = this.currentTokenIndex;
+				const typeNode = this.parseTypeSpecifier();
+				if (typeNode && this.matchToken(TokenType.SEMICOLON)) {
+					this.consumeToken();
+					return typeNode;
+				}
+				this.currentTokenIndex = start;
+				return this.parseVariableDeclaration() ?? this.parseExpressionStatement();
+			}
+			
 			case TokenType.CONST:
 			case TokenType.VOLATILE:
             case TokenType.INT:
@@ -1376,6 +1407,10 @@ export class Parser {
             case TokenType.UNSIGNED: {
                 // 可能是变量声明
                 const startIndex = this.currentTokenIndex;
+				const functionLookahead = this.lookaheadForFunction();
+				if (functionLookahead.isFunction) {
+					return this.parseFunctionDeclaration();
+				}
                 const declaration = this.parseVariableDeclaration();
                 if (declaration) return declaration;
                 

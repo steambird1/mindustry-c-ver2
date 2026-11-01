@@ -1590,6 +1590,13 @@ export class CodeGenerator extends ASTVisitor {
 	 * @returns {Instruction} 
 	 * @remark This function doesn't do registration itself. It simply calls for body information.
 	 */
+	visitstruct(node) { return new Instruction(); }
+	visituinion(node) { return new Instruction(); }
+	visitStruct(node) { return new Instruction(); }
+	visitUnion(node) { return new Instruction(); }
+	visitTypedefDeclaration(node) { return new Instruction(); }
+	visitTypeSpecifier(node) { return new Instruction(); }
+
 	visitFunctionDeclaration(node) {
 		const recursive = this.recursiveInfo.has(node.name);
 		let pushedScope = null;

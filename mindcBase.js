@@ -536,6 +536,7 @@ export class TypedefDeclarationNode extends ASTNode {
         super(ASTNodeType.TYPEDEF_DECLARATION);
         this.type = type; // 基础类型
         this.declarators = declarators || []; // 类型别名列表
+        this.isTypedef = true;
         this.isStruct = false;
         this.isUnion = false;
 		this.isFunction = false;
@@ -766,7 +767,7 @@ export class ASTVisitor extends CompilationPhase {
 		if (typeof extracted != "string") {
 			extracted = extracted.type;
 			if (extracted == "TypeSpecifier") {
-				extracted = "VariableDeclaration";
+				extracted = node.isTypedef === true ? "TypedefDeclaration" : "VariableDeclaration";
 			}
 		}
 			

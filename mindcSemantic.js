@@ -1335,7 +1335,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 					typedefNode.location
 				);
 				
-				this.typeTable.set(aliasName, aliasType);
+				this.addTypeAlias(aliasName, aliasType, declarator.location);
 				this.typedefTable.set(aliasName, {
 					originalType: aliasType,
 					aliasType: aliasType,
@@ -1385,7 +1385,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 				const aliasType = directAlias ? baseType : this.createAliasType(baseType, declarator);
 				
 				// 添加到类型表和typedef表
-				this.typeTable.set(aliasName, aliasType);
+				this.addTypeAlias(aliasName, aliasType, declarator.location);
 				this.typedefTable.set(aliasName, {
 					originalType: baseType,
 					aliasType: aliasType,
@@ -1499,7 +1499,10 @@ export class SemanticAnalyzer extends ASTVisitor {
         const typeName = defNode.name || `anonymous_${defNode.type}_${this.anonymousStructCounter = (this.anonymousStructCounter ?? 0) + 1}`;
         const isUnion = defNode.type === 'union';
         const kind = isUnion ? 'union' : 'struct';
-        const existing = this.structTable.get(typeName) ?? this.typeTable.get(typeName) ?? null;
+        const scopedType = this.currentScope.lookupCurrent?.(typeName)?.type?.type ?? null;
+        const existing = (this.currentScope === this.globalScope)
+            ? (scopedType ?? this.structTable.get(typeName) ?? this.typeTable.get(typeName) ?? null)
+            : scopedType;
 
         if (existing && ['struct', 'union'].includes(existing.kind)) {
             if (existing.incomplete !== true) {
@@ -1519,8 +1522,10 @@ export class SemanticAnalyzer extends ASTVisitor {
             ? existing : new TypeInfo(typeName, kind, 0);
         structType.kind = kind;
         structType.members = structType.members ?? [];
-        this.typeTable.set(typeName, structType);
-        this.structTable.set(typeName, structType);
+        if (this.currentScope === this.globalScope || !defNode.name) {
+            this.typeTable.set(typeName, structType);
+            this.structTable.set(typeName, structType);
+        }
 
         if (defNode.isForward) {
             structType.incomplete = true;
@@ -1693,7 +1698,7 @@ export class SemanticAnalyzer extends ASTVisitor {
         structType.beingDefined = false;
         
         // 如果结构体有名称，添加到当前作用域
-        if (defNode.name) {
+        if (defNode.name && !this.currentScope.lookupCurrent(defNode.name)) {
             const structSymbol = new SymbolEntry(
                 defNode.name,
                 { type: structType },
@@ -1833,6 +1838,38 @@ export class SemanticAnalyzer extends ASTVisitor {
 		 * @param {string} typeNameRaw
 		 * @returns {TypeInfo?}
 		 */
+	/**
+	 * Find a type by tag/typedef name, preferring block-scope declarations.
+	 *
+	 * @param {string} name
+	 * @returns {TypeInfo?}
+	 */
+	lookupTypeInfo(name) {
+		for (let scope = this.currentScope; scope; scope = scope.parent) {
+			const symbol = scope.lookupCurrent?.(name) ?? null;
+			if (symbol?.kind === 'type') {
+				const info = symbol.type?.type ?? symbol.type ?? null;
+				if (info?.isTypeInfo) return info;
+			}
+		}
+		return this.typeTable.get(name) ?? this.structTable.get(name) ?? null;
+	}
+
+	/**
+	 * Register a typedef name in the current scope (or the global type table).
+	 */
+	addTypeAlias(name, type, location = null) {
+		if (this.currentScope === this.globalScope) {
+			this.typeTable.set(name, type);
+			return;
+		}
+		if (this.currentScope.lookupCurrent(name)) {
+			this.addError(`Type '${name}' is already declared in this scope`, location);
+			return;
+		}
+		this.currentScope.addSymbol(new SymbolEntry(name, { type }, this.currentScope, 'type', location));
+	}
+
 	getTypeInfo(typeNameRaw) {
 		if (typeof typeNameRaw !== 'string') {
 			return typeNameRaw;
@@ -1905,19 +1942,16 @@ export class SemanticAnalyzer extends ASTVisitor {
 				levels += stars;
 				continue;
 			}
-			if (this.typeTable.has(bare)) {
-				result = this.typeTable.get(bare).duplicate();
-			} else if (this.structTable.has(bare)) {
-				const live = this.structTable.get(bare);
+			const foundType = this.lookupTypeInfo(bare);
+			if (foundType) {
 				/*
 				A struct that is still being defined (`struct node { struct node
-				*next; }` -- its own name appears while the members are read).
-				Hand back the LIVE entry, not a copy: a copy taken now is empty
-				and stays empty, so `p->next` later found no members and read at
-				the wrong offset. The live entry is filled in as the definition
-				finishes, which is exactly what a pointer to it needs.
+				*next; }`) must hand back the LIVE entry, not a copy: a copy taken
+				now is empty and stays empty. The same holds for an incomplete
+				forward declaration that a later definition fills.
 				*/
-				result = (live.beingDefined === true) ? live : live.duplicate();
+				result = (foundType.beingDefined || foundType.incomplete)
+					? foundType : foundType.duplicate();
 			} else {
 				return null;	// Unable to fetch information
 			}
@@ -2021,6 +2055,26 @@ export class SemanticAnalyzer extends ASTVisitor {
 		node.functions = node.functions.filter(func => !!func.body);
     }
 
+    visitstruct(node) {
+        this.processStructOrUnionDefinition(node);
+    }
+
+    visituinion(node) {
+        this.processStructOrUnionDefinition(node);
+    }
+
+    // Alias for callers that spell the node type capitalized.
+    visitStruct(node) { return this.visitstruct(node); }
+    visitUnion(node) { return this.visituinion(node); }
+
+    visitTypedefDeclaration(node) {
+        this.processTypedefDeclaration(node);
+    }
+
+    visitTypeSpecifier(node) {
+        if (node?.typeName === 'enum') this.processEnumDefinition(node, this.currentScope);
+    }
+
     visitFunctionDeclaration(node) {
         // 检查函数是否已声明
         const existingSymbol = this.currentScope.lookupCurrent(node.name);
@@ -2090,6 +2144,10 @@ export class SemanticAnalyzer extends ASTVisitor {
         scope until a definition exists.
         */
         if (!node.body) return;
+		if (this.currentScope !== this.globalScope) {
+			this.addError(`Function definitions are not allowed inside a block`, node.location);
+			return;
+		}
 		/*
 		Not yet: the scope above may not exist yet (a function built by the
 		compiler, such as an `auto` instantiation, has none until the next
@@ -2210,13 +2268,24 @@ export class SemanticAnalyzer extends ASTVisitor {
      * @returns {void}
      */
     validateFunctionDefinitions() {
-        this.globalScope.symbols.forEach(symbol => {
-            if (symbol.kind !== 'function') return;
-            if (symbol.isPrototype === true && symbol.called === true) {
-                this.addError(`Function '${symbol.name}' is declared but never defined`,
-                    symbol.declarationNode?.location ?? symbol.location);
-            }
-        });
+        const visit = scope => {
+            scope?.symbols?.forEach(symbol => {
+                if (symbol.kind !== 'function') return;
+                if (symbol.isPrototype === true && symbol.called === true) {
+                    const globalDefinition = this.globalScope.lookup?.(symbol.name) ?? null;
+                    if (globalDefinition?.kind === 'function' && globalDefinition.isDefined === true) {
+                        symbol.owningScope = globalDefinition.owningScope;
+                        symbol.type = globalDefinition.type;
+                        symbol.isDefined = true;
+                        return;
+                    }
+                    this.addError(`Function '${symbol.name}' is declared but never defined`,
+                        symbol.declarationNode?.location ?? symbol.location);
+                }
+            });
+            scope?.children?.forEach(visit);
+        };
+        visit(this.globalScope);
     }
 
 	// Modified on 1 Dec, to be verified
@@ -8059,6 +8128,13 @@ export class SemanticAnalyzer extends ASTVisitor {
 
         // 遍历块内的所有语句
         node.statements.forEach(stmt => this.visit(stmt));
+		/*
+		A block-scope prototype has done its job during semantic analysis.
+		Keeping it in the statement list makes the optimizer treat it as a
+		function with no body.
+		*/
+		node.statements = node.statements.filter(
+			stmt => !(stmt?.type === 'FunctionDeclaration' && !stmt.body));
 
         // 退出作用域
         this.currentScope = this.currentScope.parent;
