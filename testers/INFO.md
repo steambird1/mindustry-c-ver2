@@ -13,9 +13,9 @@
 
 | 命令（从 `testers/unit_tests` 执行） | 读哪个目录 | 当前结果 | 判定标准 |
 |---|---|---|---|
-| `node ..\tools\check.mjs` | `check/` | **228 passed, 0 failed**（141 shape assertions, 1010 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
-| `node ..\tools\negative.mjs` | `negative/` | **84 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
-| `node ..\tools\nomem.mjs` | `nomem/` | **8 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
+| `node ..\tools\check.mjs` | `check/` | **230 passed, 0 failed**（141 shape assertions, 1015 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
+| `node ..\tools\negative.mjs` | `negative/` | **86 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
+| `node ..\tools\nomem.mjs` | `nomem/` | **10 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
 | `node ..\tools\loadorder.mjs` | 仓库根的 `mindc*.js` | **12 passed, 0 failed, 2 exempt** | 每个入口单独起一个 `node` 进程导入，不得有循环依赖 |
 | `node ..\tools\runall.mjs` | 14 个目录：`suite/` `mem/` `arr/` `arr2/` `ptr2/` `stack/` `tests/` `uc/` `cases/` `exttests/` `hdr/` `t/` `big/` `u/` | **267/275**（8 个已知坏例以 KNOWN-GAP 如实上报，不算失败） | 能编译、能跑完不崩；带 `EXPECT:` 的还比对输出 |
 
@@ -59,9 +59,9 @@
 | `EXPECT: a b c` | `runall/` | 期望输出，与 `check.mjs` 同样的逐行比对；runall 目录里只有 6 个文件带它 |
 
 `check/` 的 pragma 不变性：每个用例都会被加上各种 `optimize(...)` 变体**重跑一遍**，
-输出必须完全一致。**任何 pragma 都不得改变程序输出。** 目前 228 个用例里只有
-t214 声明 `NO-INVARIANT`：它固定用 148 编译，而 `pointer` / `struct_pointer` 这些
-变体本身要求 v150+。
+输出必须完全一致。**任何 pragma 都不得改变程序输出。** 目前 230 个用例里只有
+t214 和 t216 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `pointer` / `struct_pointer`
+这些变体本身要求 v150+。
 
 重跑时变体是写成**真实文件**（`check/<名字>__INV.c`）再交给 `simulate` 的，不是把
 源码文本喂进去。因为 `simulate` 是按**文件路径**去解析 `// PEER:` 的；只给文本的话
@@ -69,13 +69,13 @@ t214 声明 `NO-INVARIANT`：它固定用 148 编译，而 `pointer` / `struct_p
 
 ## 目录地图
 
-`testers/unit_tests/` 下共 **605 个 `.c`，全部有 runner**（228 + 10 + 84 + 8 + 275 = 605）：
+`testers/unit_tests/` 下共 **611 个 `.c`，全部有 runner**（230 + 10 + 86 + 10 + 275 = 611）：
 
 | 目录 | 文件数 | 谁来跑 |
 |---|---|---|
-| `check/` | 228 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
+| `check/` | 230 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
 | `t/` | 98 | `runall.mjs`（早期按主题分的用例，`2dc683e` 起纳入） |
-| `negative/` | 84 | `negative.mjs` |
+| `negative/` | 86 | `negative.mjs` |
 | `suite/` | 50 | `runall.mjs` |
 | `mem/` | 25 | `runall.mjs` |
 | `tests/` | 25 | `runall.mjs`（另有手工的 `batch.mjs [baseline]`） |
@@ -85,7 +85,7 @@ t214 声明 `NO-INVARIANT`：它固定用 148 编译，而 `pointer` / `struct_p
 | `arr2/` | 11 | `runall.mjs` |
 | `peers/` | 10 | 不是独立用例：由 `check.mjs` 代它们的属主跑 |
 | `big/` | 8 | `runall.mjs` |
-| `nomem/` | 8 | `nomem.mjs` |
+| `nomem/` | 10 | `nomem.mjs` |
 | `u/` | 6 | `runall.mjs` |
 | `exttests/` | 4 | `runall.mjs` |
 | `cases/` | 3 | `runall.mjs` |
@@ -97,7 +97,7 @@ t214 声明 `NO-INVARIANT`：它固定用 148 编译，而 `pointer` / `struct_p
 
 ## check/ 的编号约定
 
-`check/` 用 `tNN_主题.c` 命名，**编号 1–215 已用满，没有空号**，下一个用例是 `t216`。
+`check/` 用 `tNN_主题.c` 命名，**编号 1–217 已用满，没有空号**，下一个用例是 `t218`。
 另有 13 个不带编号的（`m1`–`m3`、`n1`–`n2`、`rw1`–`rw2`、`seq1`、`memsp2`–`memsp3`），
 它们早于编号制，保留原名。
 
@@ -216,6 +216,8 @@ t214 声明 `NO-INVARIANT`：它固定用 148 编译，而 `pointer` / `struct_p
 | `t213` | **§7.26**：enum 作为 struct/union 成员与函数参数——具名/匿名/内联 enum、`enum ... var;`、typedef、参数与返回值、局部 struct；输出 `1 11 21 31 41 1 1 3 2 51` |
 | `t214` | **§7.27**：148 目标下的 stdio——`assert`/`stdbool`/`string.h`/`strlen` 可用；`printf` 逐段生成 `print`，常量 `%02d` 正常；`EMIT-NOT: format`；输出 `5 1 7 hello x= 3 [03]` |
 | `t215` | **§7.27**：`printf` 常量 flags/宽度/精度——`%2d`、`%02d`、`%+d`、`%.2f`、`%5s`、`%-5s`、`%%`；运行时 `%d` 仍走 `format`；输出保留行内空格 |
+| `t216` | **§7.28**：148 目标下 `ulocate`/`ucontrol` 使用 `&x` 输出；无需 byname；输出 `11 22 1 core1 1` |
+| `t217` | **§7.28**：JS 扩展 `nominalPointers`——`nomstore(&x, 42)` 走寄存器名，`volatile` 目标走指针回写；输出 `42 7` |
 
 设计背景见 `docs/PLAN_array_layout.md`。
 
@@ -228,7 +230,7 @@ t214 声明 `NO-INVARIANT`：它固定用 148 编译，而 `pointer` / `struct_p
 在它想守住的那条检查被删掉之后**依然会通过**——这正是删掉的检查不被发现的方式。
 所以每条 `MESSAGE:` 都必须匹配到编译器真实给出的某一条错误。
 
-**负债已清零**（`1584cf3`）。`negative/` 的 84 个用例全部带 `MESSAGE:`，没有
+**负债已清零**（`1584cf3`）。`negative/` 的 86 个用例全部带 `MESSAGE:`，没有
 `KNOWN-GAP`：原先那两个（`ovl_auto.c`、`ovl_pragma.c`）已删除——自动模板 / 重载
 已经实现，`check/t109`、`check/t110` 用正向用例断言同一事实。
 `remote_as_value_refused.c`（§7.3）是第一个真正用上 `NOT-MESSAGE:` 的用例，

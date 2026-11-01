@@ -90,7 +90,7 @@ device tryBindingFor(unsigned requirement) {
 void updateCore() {
     bool coreFound;
     if ((bool)sensor(coreDevice, @dead)) {
-        ulocate("building", "core", false, (volatile int*)coreX, (volatile int*)coreY, (volatile bool*)coreFound, (volatile device*)coreDevice);
+        ulocate("building", "core", false, &coreX, &coreY, &coreFound, &coreDevice);
     }
 }
 
@@ -111,7 +111,7 @@ void deployToVault(int currentId, content_t unitItem) {
     const int unitItemCapacity = (int)sensor(@unit, @itemCapacity);
     reportSystemState(currentId, "Storing", @unit, unitItem);
     ucontrol("pathfind", vaultX, vaultY);
-    ucontrol("within", vaultX, vaultY, 6.5, (volatile bool*)coreWithin);
+    ucontrol("within", vaultX, vaultY, 6.5, &coreWithin);
     if (coreWithin) {
         ucontrol("itemDrop", vaultDevice, unitItemCapacity);
     }
@@ -126,7 +126,7 @@ bool checkStorage(int currentId, content_t mineType) {
         if (unitItemFirst != mineType) {
             reportSystemState(currentId, "Cleaning", @unit, unitItemFirst);
             ucontrol("pathfind", coreX, coreY);
-            ucontrol("within", coreX, coreY, 5.5, (volatile bool*)coreWithin);
+            ucontrol("within", coreX, coreY, 5.5, &coreWithin);
             if (coreWithin) {
                 ucontrol("itemDrop", coreDevice, unitItemCapacity);
             }
@@ -157,11 +157,11 @@ void main() {
                     int oreX, oreY;
                     bool oreFound, oreWithin;
                     char state = "Mining: no ore";
-                    ulocate("ore", mineType, (volatile int*)oreX, (volatile int*)oreY, (volatile bool*)oreFound, null);
+                    ulocate("ore", mineType, &oreX, &oreY, &oreFound, null);
                     if (oreFound) {
                         ucontrol("pathfind", oreX, oreY);
                         state = "Mining: moving";
-                        ucontrol("within", oreX, oreY, 3.5, (volatile bool*)oreWithin);
+                        ucontrol("within", oreX, oreY, 3.5, &oreWithin);
                         if (oreWithin) {
                             ucontrol("mine", oreX, oreY);
                             state = "Mining: started";
@@ -183,7 +183,7 @@ void main() {
                     bool coreWithin;
                     ucontrol("pathfind", coreX, coreY);
                     state = "Fetching: moving";
-                    ucontrol("within", coreX, coreY, 3.5, (volatile bool*)coreWithin);
+                    ucontrol("within", coreX, coreY, 3.5, &coreWithin);
                     if (coreWithin) {
                         ucontrol("itemTake", coreDevice, carryType, unitItemCapacity);
                         state = "Fetching: taking";

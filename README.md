@@ -150,8 +150,9 @@ metadata; small arrays can often use register or encoded layouts instead.
   the pointer depends on where `remote` is written.
 - `int *byname p` / `byname(&x)` stores a variable name in one register; such a
   pointer cannot be used for pointer arithmetic.
-- `(volatile type*)(object)` passes a register raw to built-ins such as
-  `ulocate`.
+- Builtin output parameters (`ulocate`, `ucontrol`, and JS extension functions
+  that declare `nominalPointers`) are written as `&x`. The old
+  `(volatile T*)` output-cast spelling has been removed.
 - Function pointers need a concrete `typedef`; an `auto` function needs a
   concrete version to take its address.
 - `array("...", {...})` requests an array layout; see the language reference

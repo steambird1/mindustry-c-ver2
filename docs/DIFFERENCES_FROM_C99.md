@@ -123,7 +123,7 @@ print(lenof(mem));    // 4
 | 限定符 | 作用 |
 |---|---|
 | `const` | 常量/只读；要求初始化（`auto device` 例外）。const 数组可能被编码成寄存器表/字符串表。 |
-| `volatile` | 强制变量放在内存中，不参与常量传播。`(volatile T)(expr)` 还是“原样传递”的转换语法，常用于 `ulocate` 的输出参数。 |
+| `volatile` | 强制变量放在内存中，不参与常量传播。`(volatile T)(expr)` 是“原样传递”的**值**转换；输出参数不再用 `(volatile T*)`，统一写 `&x`。 |
 | `static` | **本次运行内持久**：跨函数调用共享，但每次程序从头执行时重置；不提供 C 的独立编译/链接模型。 |
 | `persistent` | **跨运行持久**（Mindustry-C 扩展）：处理器/程序加载后只初始化一次，跨多次运行保留。 |
 | `extern` | 文件作用域的处理器变量，其他处理器可以用 `remote` 按名字访问；不是 C 的外部符号链接。 |
@@ -410,6 +410,7 @@ remote int *p = remote(processor1, qq);      // 指针本身在对端
 - enum 成员：enum 类型可以作为 struct/union 成员，也可以作为函数参数和返回值；顶层 enum 与 struct/typedef 按源码顺序处理，成员列表里内联或匿名的 enum 会先注册。enum tag 仍须先声明后使用。
 - C11 匿名成员（如 `union { union { int a; int b }; int c }`）不支持。
 - 低于 v150 时 `printf` 逐段生成 `print`；常量参数的 flags/宽度/精度会生效，运行时参数带这些修饰会报错。无内存块不等于必须用 `byname`：普通 stdio 程序在低版本也能编译，只有真正需要名字指针或内存时才会报错。
+- 输出参数（`ulocate`、`ucontrol`，以及声明了 `nominalPointers` 的 JS 扩展函数）统一写成 `&x`；旧的 `(volatile T*)` 输出写法已移除。扩展 handler 可用 `cg.nominalPointerOperand(arg)` 取得寄存器名或带回写指令。
 
 ---
 

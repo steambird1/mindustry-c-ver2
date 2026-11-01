@@ -38,10 +38,10 @@ void mining(content_t type, int storage, float deadline) {
     bool oreFound;
     device oreDevice;
     ulocate("ore", type, 
-        (volatile int*)oreX, 
-        (volatile int*)oreY, 
-        (volatile bool*)oreFound,
-        (volatile device*)oreDevice);  // Use volatile pointer to let data fed into it
+        &oreX,
+        &oreY,
+        &oreFound,
+        &oreDevice);  // Nominal pointers: ulocate writes the results here
     movingTo(coreX, coreY);
     while ((int)sensor(@unit, @totalItems) > 0) {
         ucontrol("itemDrop", coreDevice, storage);
@@ -72,10 +72,10 @@ void main() {
     ubind(@poly);
     wait(3);
     ulocate("building", "core", false,
-        (volatile int*)coreX,
-        (volatile int*)coreY,
-        (volatile int*)coreFound,
-        (volatile device*)coreDevice);
+        &coreX,
+        &coreY,
+        &coreFound,
+        &coreDevice);
         */
     coreX = (int)sensor(coreDevice, @x);
     coreY = (int)sensor(coreDevice, @y);

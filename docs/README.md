@@ -68,7 +68,7 @@ the current behavior:
 
 There are some additional features:
 
-- `(volatile type)` type cast will present everything as its raw form (mainly used for builtin calls, especially `ulocate`)
+- `(volatile type)` type cast presents a value in its raw form (mainly used for builtin value reads); builtin output parameters use `&x`, not `(volatile type*)`
 - `int a[];` — an array declared with no size and no initializer — is a one-word **cell** that later names an array. Bind it with `a = b;` or `vecalias(&a, b);` before using it. See [Array Handles](TYPES_AND_FUNCTIONS.md#array-handles)
 - `widthof(x)` tells you how many **registers** a value occupies, which is not the same question as `sizeof(x)` (memory cells) for arrays and for `*byname` pointers
 - `vecalias(&a, b)` and `veccpy(a, b)` bind and copy arrays at the intrinsic level

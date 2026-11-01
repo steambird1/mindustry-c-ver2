@@ -34,7 +34,7 @@ bool attemptUnit(content_t unitType) {
     outputState(2, unitType);
     while (true) {
         if ((bool)sensor(@unit, @dead)) return false;
-        ucontrol("within", factoryX, factoryY, 2, (volatile bool*)isApproaching);
+        ucontrol("within", factoryX, factoryY, 2, &isApproaching);
         if (isApproaching) break;
         ucontrol("pathfind", factoryX, factoryY);
         if ((@time - startingTime) > timeoutInterval) return false;

@@ -13,7 +13,7 @@ void moveTowards(int x, int y, int radius) {
 	bool state;
 	while (true) {
 		if ((bool)sensor(@unit, @dead)) end();
-		ucontrol("within", x, y, radius, (volatile bool*)state);
+		ucontrol("within", x, y, radius, &state);
 		if (state) break;
 		ucontrol("move", x, y);
 	}

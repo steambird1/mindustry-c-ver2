@@ -20,9 +20,9 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 228 passed, 0 failed (141 shape assertions, 1010 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 84 passed, 0 failed |
-| `node ../tools/nomem.mjs` | 8 passed, 0 failed |
+| `node ../tools/check.mjs` | 230 passed, 0 failed (141 shape assertions, 1015 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 86 passed, 0 failed |
+| `node ../tools/nomem.mjs` | 10 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
 
@@ -81,6 +81,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | prototypes, forward declarations, block scope (§7.25) | **done**; signature merge, incomplete types completed in place, local types/prototypes, tests t208–t212 | §7.25 |
 | enum types in struct/union members and function parameters (§7.26) | **done**; source-ordered enum collection, inline member enums, test t213 | §7.26 |
 | low-version `printf` / stdio and no-memory byname (§7.27) | **done**; multi-`print` below v150, constant width/precision, no-memory pass fix, tests t214/t215 | §7.27 |
+| nominal pointers / removal of volatile output casts (§7.28) | **done**; `&x` for `ulocate`/`ucontrol`, extension `nominalPointers`, tests t216/t217 | §7.28 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -815,21 +816,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 605 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 611 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 605 under `testers/unit_tests`, every one of
+bring the count to 611 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 228 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 84 | `negative/` |
-| `nomem.mjs` | 8 | `nomem/` |
+| `check.mjs` | 230 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `negative.mjs` | 86 | `negative/` |
+| `nomem.mjs` | 10 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-228 + 10 + 84 + 8 + 275 = 605. The caveat that replaces "no runner" is weaker but real:
+230 + 10 + 86 + 10 + 275 = 611. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -1597,3 +1598,30 @@ called `f` even when `a` was false.
 - Cases: t214 (148 stdio, multi-print printf, constant `%02d`, no `format`
   instruction), t215 (constant flags/width/precision and a runtime `%d`),
   `nomem/low_version_stdio.c`; negative for a runtime field width.
+
+### 7.28 Nominal pointers, extension support and removal of volatile output casts
+
+- `ulocate` and `ucontrol` output parameters are now written only as `&x`.
+  The old `(volatile T*)x` / `(volatile T*)(&x)` output spelling is removed
+  and reports `(volatile T*) output parameters were removed; use '&x' instead`.
+  `(volatile T)` value casts remain unchanged.
+- The `ulocate` handler no longer contains the dead `fromCast` branch. Both
+  `&x` and memory-backed outputs go through `CodeGenerator.nominalPointerOperand`:
+  a name is passed directly when possible, otherwise a temporary receives the
+  instruction's output and `after` writes it back through the real pointer.
+  A `null` output now stays `null` instead of generating a pointer write.
+- JS extensions can declare `nominalPointers: number[]` in their
+  `addinFunctionInfo`. The index may be beyond `parameters.length` for an
+  optional output argument (use `hasVarArgs: true`). Both address-use analyses
+  (`SemanticAnalyzer.collectAddressUses` and
+  `Optimizer.markBuiltinOutputTargets`) consult that metadata, so `&x` reaches
+  the target as a register name when possible instead of forcing memory.
+- Extension handlers use `cg.nominalPointerOperand(arg)` and get
+  `{operand, before, after}`. `include/nomtest.js` is the test extension used
+  by t217; it emits `set <operand> <value>`.
+- In-repo examples and practices were migrated from `(volatile T*)` output
+  casts to `&x`; `archon.js` keeps its original return-value design.
+- Cases: t216 (148 `ulocate`/`ucontrol` with `&x`), t217
+  (`nominalPointers` extension), `nomem/outparam_low_version.c`,
+  `nomem/nominal_pointer_extension.c` (148, no memory). Negatives: ulocate and
+  ucontrol volatile output casts.

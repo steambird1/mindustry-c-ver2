@@ -20,7 +20,7 @@ void moveTowards(int x, int y, int radius) {
 	bool state;
 	while (true) {
 		if ((bool)sensor(@unit, @dead)) end();
-		ucontrol("within", x, y, radius, (volatile bool*)state);
+		ucontrol("within", x, y, radius, &state);
 		if (state) break;
 		ucontrol("move", x, y);
 	}
@@ -68,7 +68,7 @@ device chooseVault(char bindinfo, device check_switch) {
 		device result;
 		int rx, ry;
 		bool rf = false;
-		ulocate("building", "storage", false, (volatile int*)rx, (volatile int*)ry, (volatile bool*)rf, (volatile device*)result);
+		ulocate("building", "storage", false, &rx, &ry, &rf, &result);
 		if (!rf) {
 			info = "Try again!";
 			control("enabled", check_switch, false);

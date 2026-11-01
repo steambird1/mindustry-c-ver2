@@ -153,7 +153,6 @@ The order of these functions are defined as follows:
 | `float adiff(float a, float b)` | Act as "angle diff". |
 | `void* memsp(device cell, int location)` | Return a pointer pointing to a particular memory space. |
 
-* `ulocate`: The last 4 parameters represent the output of resultX, resultY, found and building device handle. They should
-  - either be a pointer (**Note: `device` type does not support pointer**),
-  - or be a `(volatile type*)(object)` ("MindustryC's volatile-cast objects") which will make them compiled as they are.
+* `ulocate`: The last 4 parameters represent the output of resultX, resultY, found and building device handle.
+  Pass them as nominal pointers (`&x`, `&found`, `&building`). The old `(volatile type*)` output-cast form has been removed.
   See examples to learn more.

@@ -90,7 +90,7 @@ coord binding() {
         while (!storageFound) {
             print("Binding stage 3: letting ",ctrlUnit," bind storage...");
             printflush(aus);
-            ulocate("building", "storage", false, (volatile int*)storageBound.x, (volatile int*)storageBound.y, (volatile bool*)storageFound, (volatile device*)targetVault);
+            ulocate("building", "storage", false, &storageBound.x, &storageBound.y, &storageFound, &targetVault);
         }
         targetVault = currentVault;
         print("Binding successful!");

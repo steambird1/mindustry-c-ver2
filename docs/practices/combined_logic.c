@@ -48,10 +48,10 @@ void mining(content_t type, int storage, float deadline) {
     device oreDevice;
     ensureAlive();
     ulocate("ore", type, 
-        (volatile int*)oreX, 
-        (volatile int*)oreY, 
-        (volatile bool*)oreFound,
-        (volatile device*)oreDevice);  // Use volatile pointer to let data fed into it
+        &oreX,
+        &oreY,
+        &oreFound,
+        &oreDevice);  // Nominal pointers: ulocate writes the results here
     if (oreFound) {
         // output("Instructing poly to move...");
         movingTo(oreX, oreY);
@@ -77,10 +77,10 @@ void main() {
     vaultY = (int)sensor(vault, @y);
     ensureAlive();
     ulocate("building", "core", false,
-            (volatile int*)coreX,
-            (volatile int*)coreY,
-            (volatile int*)coreFound,
-            (volatile device*)coreDevice);
+            &coreX,
+            &coreY,
+            &coreFound,
+            &coreDevice);
     const int maxCapacity = 20;
     const float maxTimeout = 12 * 1000;
     while (true) {

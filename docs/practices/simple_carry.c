@@ -63,10 +63,10 @@ void main() {
     vaultY = (int)sensor(vault, @y);
     ensureAlive();
     ulocate("building", "core", false,
-            (volatile int*)coreX,
-            (volatile int*)coreY,
-            (volatile int*)coreFound,
-            (volatile device*)coreDevice);
+            &coreX,
+            &coreY,
+            &coreFound,
+            &coreDevice);
     while (true) {
         doCarry(@graphite);
         doCarry(@silicon);

@@ -30,8 +30,8 @@ void mining(content_t type, int storage, float deadline) {
     int oreX, oreY;
     bool oreFound;
     device oreDevice;
-	// Note: in version 1.5.x or earlier, (volatile int*) is used here. Now please use standard expression of
-	// getting address.
+	// Note: in version 1.5.x or earlier, (volatile int*) was used here.
+	// That output-cast spelling has been removed; use the standard address form.
     ulocate("ore", type, &oreX, &oreY, &oreFound, &oreDevice);
     if (oreFound) {
         output("Instructing poly to move...");

@@ -20,8 +20,7 @@
 Mindustry 的指令风格是“输出参数在左边”。本编译器采用：
 
 - 如果原指令把返回值放在第一个参数，函数就用**返回值**表示它；
-- 其余输出参数用**指针**传入（`ulocate`、`ucontrol` 等）；
-- 如果是 `device` 这类不支持指针的类型，用 `(volatile type*)(object)` 的“原样传递”形式；
+- 其余输出参数用**名义指针**传入，统一写成 `&x`（`ulocate`、`ucontrol`，以及声明了 `nominalPointers` 的 JS 扩展函数）；旧的 `(volatile type*)` 输出写法已移除；
 - `...` 表示变参：按 Mindustry 指令文本中“必要参数”的顺序传入。
 
 字符串型参数（`draw` 的 action、`control`/`ucontrol` 的 action、`radar` 的条件/排序、`lookup`/`ulocate` 的类别等）通常**必须是字符串字面量**，因为它们在编译期要拼进指令。
@@ -57,7 +56,7 @@ Mindustry 的指令风格是“输出参数在左边”。本编译器采用：
 
 ### 2.1 `ulocate` 的输出参数
 
-`ulocate` 的 `x`、`y`、`found`、`building` 四个输出不能用普通返回值表示。它们要么是：
+`ulocate` 的 `x`、`y`、`found`、`building` 四个输出不能用普通返回值表示，统一用 `&x` 传入：
 
 ```c
 int x, y;
@@ -66,12 +65,7 @@ device building;
 ulocate("building", "core", false, &x, &y, &found, &building);
 ```
 
-要么使用“原样传递”的 volatile 转换（`device` 不支持指针）：
-
-```c
-volatile device out;
-ulocate("building", "core", false, &x, &y, &found, (volatile device*)(&out));
-```
+`&` 形式在目标寄存器可以命名的版本/情形下直接传寄存器名；变量必须进内存时则通过地址回写。旧的 `(volatile type*)` 输出形式已移除，编译器会报错并提示改用 `&x`。
 
 具体参数顺序随 action 不同；以 Mindustry 的 `ulocate` 指令和 `include/merui.h` 的示例为准。
 
@@ -383,6 +377,8 @@ ERR_IN_PROGRESS ERR_OK ERR_MINE_NOT_FOUND
 
 这些函数的字符串参数、变参个数和顺序由 `include/archon.js` 的处理器决定；本文只列稳定签名。目标 Mindustry 版本必须支持对应指令。
 
+JS 扩展函数可以在 `addinFunctionInfo` 中用 `nominalPointers: [i]` 声明第 `i` 个参数接受名义指针（`&x`）；handler 通过 `cg.nominalPointerOperand(arg)` 取得寄存器名或带回写指令。`archon.js` 仍保持返回值设计，不改为输出参数。
+
 ### 5.12 `sharelist.js`
 
 ```c
@@ -487,7 +483,7 @@ ERR_IN_PROGRESS ERR_OK ERR_MINE_NOT_FOUND
 ## 7. 已知限制和注意事项
 
 - `draw`/`control`/`ucontrol`/`radar`/`uradar`/`lookup`/`ulocate` 的 action/条件/类别字符串必须是**字面量**，不能是运行时拼接的字符串。
-- `ulocate` 的输出参数必须是指针或 `(volatile type*)(object)`；`device` 不支持普通指针。
+- `ulocate`/`ucontrol` 的输出参数使用 `&x`；旧的 `(volatile type*)` 输出写法已移除。`device` 输出也用 `&building`，不要把它放进内存再取地址。
 - `#pragma id` 会覆盖内容 id，并关闭基于内置 lookup 表的数组选择；跨处理器时两边要使用一致的布局/id。
 - `remote`/`sdlist` 需要真实存在的对端处理器和稳定的 `extern` 变量。
 - `pdcreate`/`sdcreate` 的 size/id 当前要求整数常量。

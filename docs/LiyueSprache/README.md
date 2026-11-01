@@ -76,7 +76,7 @@ Mindustry-C 不需要安装。你只需要下载 `main.html` 和所有 JavaScrip
   `remote(processor, name)` 绑定另一侧的变量/数组/指针。这不是 C 的外部链接。
 - `remote int *p` 和 `int *remote p` 含义不同：`remote` 写在哪一侧，决定哪一侧存储指针。
 - `int *byname p` / `byname(&x)` 用名字表示变量，只占一个寄存器；这种指针不能做指针算术。
-- `(volatile type*)(object)` 把寄存器原样传给内置函数，尤其是 `ulocate`。
+- 内置函数的输出参数（`ulocate`、`ucontrol`，以及声明了 `nominalPointers` 的 JS 扩展函数）统一写成 `&x`；旧的 `(volatile T*)` 输出转换写法已移除。
 - 函数指针需要具体的 `typedef`；指向 `auto` 函数时需要一个具体版本。
 - `array("...", {...})` 请求数组布局；可用布局见语言文档。
 
