@@ -157,6 +157,13 @@ export class Parser {
                         this.addTypeName(typeDef.name);
                     }
                     continue;
+                } else if (typeDef && typeDef.name && this.matchToken(TokenType.SEMICOLON)) {
+                    // `struct P;` -- a forward declaration, not a variable.
+                    this.consumeToken();
+                    typeDef.isForward = true;
+                    typeDefinitions.push(typeDef);
+                    typeDef.parent = program;
+                    continue;
                 } else {
                     this.currentTokenIndex = startIdx;
                 }
@@ -204,6 +211,13 @@ export class Parser {
                 if (typeDef && typeDef.isDefinition) {
                     // 这是一个完整的结构体/联合体定义
 					typeDef.parent = program;
+                    program.typeDefinitions = program.typeDefinitions || [];
+                    program.typeDefinitions.push(typeDef);
+                    continue;
+                } else if (typeDef && typeDef.name && this.matchToken(TokenType.SEMICOLON)) {
+                    this.consumeToken();
+                    typeDef.isForward = true;
+                    typeDef.parent = program;
                     program.typeDefinitions = program.typeDefinitions || [];
                     program.typeDefinitions.push(typeDef);
                     continue;

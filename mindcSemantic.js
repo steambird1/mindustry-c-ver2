@@ -1352,6 +1352,21 @@ export class SemanticAnalyzer extends ASTVisitor {
 			}
 			let baseTypeName = this.getTypeNameFromTypeNode(typedefNode.type);
 			let baseType = this.getTypeInfo(baseTypeName);
+			/*
+			`typedef struct P P;` itself declares the tag P as an incomplete
+			type. Its later definition fills this same object.
+			*/
+			if (!baseType && typedefNode.type?.type === 'TypeSpecifier'
+				&& ['struct', 'union'].includes(typedefNode.type.typeName)
+				&& typedefNode.type.getAttribute('structOrUnionName')) {
+				const kind = typedefNode.type.typeName;
+				baseType = new TypeInfo(baseTypeName, kind, 0);
+				baseType.incomplete = true;
+				baseType.isForward = true;
+				baseType.members = [];
+				this.typeTable.set(baseTypeName, baseType);
+				this.structTable.set(baseTypeName, baseType);
+			}
 			
 			if (!baseType) {
 				this.addError(`Unknown base type '${baseTypeName}' in typedef`, typedefNode.location);
@@ -1360,7 +1375,14 @@ export class SemanticAnalyzer extends ASTVisitor {
 			
 			typedefNode.declarators.forEach(declarator => {
 				const aliasName = declarator.name;
-				const aliasType = this.createAliasType(baseType, declarator);
+				/*
+				A direct alias of an incomplete struct must BE that type object,
+				not a copy: the later definition fills the object.
+				*/
+				const directAlias = baseType.incomplete === true
+					&& (declarator.pointerDepth ?? 0) === 0
+					&& !(declarator.arrayDimensions?.length);
+				const aliasType = directAlias ? baseType : this.createAliasType(baseType, declarator);
 				
 				// 添加到类型表和typedef表
 				this.typeTable.set(aliasName, aliasType);
@@ -1474,23 +1496,44 @@ export class SemanticAnalyzer extends ASTVisitor {
 	}
 
 	processStructOrUnionDefinition(defNode) {
-        const typeName = defNode.name || `anonymous_${defNode.type}_${Date.now()}`;
+        const typeName = defNode.name || `anonymous_${defNode.type}_${this.anonymousStructCounter = (this.anonymousStructCounter ?? 0) + 1}`;
         const isUnion = defNode.type === 'union';
         const kind = isUnion ? 'union' : 'struct';
-        
-        // 创建结构体/联合体类型
-        const structType = new TypeInfo(typeName, kind, 0); // 初始大小为0
-        structType.members = [];
-        
+        const existing = this.structTable.get(typeName) ?? this.typeTable.get(typeName) ?? null;
+
+        if (existing && ['struct', 'union'].includes(existing.kind)) {
+            if (existing.incomplete !== true) {
+                if (defNode.isForward) return;	// a redundant forward declaration
+                this.addError(`'${defNode.type} ${typeName}' is already defined`, defNode.location);
+                return;
+            }
+        }
+
         /*
-        Registered BEFORE the members are read: a member may point at the very
-        struct being defined (`struct node { struct node *next; }`). The entry is
-        incomplete at this point (size 0, no members), which is harmless -- a
-        pointer to it is 2 words whatever it turns out to contain -- and it is
-        filled in below.
+        The SAME TypeInfo object survives a forward declaration. Pointers and
+        aliases made while the type was incomplete must see the completed
+        members later, so a definition fills the existing object instead of
+        creating a second one.
         */
+        const structType = existing && ['struct', 'union'].includes(existing.kind)
+            ? existing : new TypeInfo(typeName, kind, 0);
+        structType.kind = kind;
+        structType.members = structType.members ?? [];
         this.typeTable.set(typeName, structType);
         this.structTable.set(typeName, structType);
+
+        if (defNode.isForward) {
+            structType.incomplete = true;
+            structType.isForward = true;
+            structType.beingDefined = false;
+            if (defNode.name && !this.currentScope.lookupCurrent(defNode.name)) {
+                this.currentScope.addSymbol(new SymbolEntry(defNode.name,
+                    { type: structType }, this.currentScope, 'type', defNode.location));
+            }
+            return;
+        }
+        structType.incomplete = false;
+        structType.isForward = false;
         structType.beingDefined = true;
         /*
         `struct tmpl { auto int *p; }` -- a member asking for whichever
@@ -1530,6 +1573,11 @@ export class SemanticAnalyzer extends ASTVisitor {
                 
                 if (!memberType) {
                     this.addError(`Unknown member type '${memberTypeName}'`, member.location);
+                    return;
+                }
+                if (memberType.incomplete === true) {
+                    this.addError(`Member '${member.name}' has incomplete type '${memberType.toString()}'`,
+                        member.location);
                     return;
                 }
                 const memberByname = this.hasByNameQualifier(member);
@@ -2324,6 +2372,17 @@ export class SemanticAnalyzer extends ASTVisitor {
 			*/
 			const requestedImpl = declarator.getAttribute?.('arrayImplementation') ?? null;
 			const staysInRegisters = !!requestedImpl && requestedImpl !== 'traditional';
+			const incompleteByValue = t => {
+				if (!t || !t.isTypeInfo) return false;
+				if (t.incomplete === true) return true;
+				if (t.kind === 'array') return incompleteByValue(t.pointerTo);
+				return false;
+			};
+			if (incompleteByValue(finalType)) {
+				this.addError(`Variable '${declarator.name}' has incomplete type '${finalType.toString()}'`,
+					declarator.location ?? node.location);
+				return;
+			}
 			if (!staysInRegisters && (finalType.qualifiers.some(q => warningStorages.includes(q)) || warningKinds.includes(finalType.kind)) && warningTypes.includes(extractToBottom(finalType).name)) {
 				this.addWarning(`Variable ${declarator.name} (with type ${varType.toString()}) cannot be stored in memory`, declarator.location);
 			}
@@ -5466,6 +5525,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 	 */
 	sizeOfTypeInfo(type) {
 		if (!type) return null;
+		if (type.incomplete === true) return null;
 		// Types that never reach memory have no meaningful size
 		if (['string_t', 'content_t', 'device', 'null_t'].includes(type.name)) return null;
 		// An inner array is a value of its own size, so this recurses
