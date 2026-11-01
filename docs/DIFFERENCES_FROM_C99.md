@@ -55,7 +55,7 @@ void main() {
 
 `int a[] = {1, 2, 3};` 现在可以从初始化列表推导最后一维；不带初始化列表的 `int a[];` 不是数组，而是“以后绑定到某个数组”的一字句柄，见 §7.3。
 
-`enum`（含匿名/typedef）和 `typedef struct { ... } Name;` 现在受支持；`union` 是多成员内存重叠布局，位域是 52-bit 打包布局，具体限制见上表。
+`enum`（含匿名/typedef，可作为 struct/union 成员和函数参数/返回值）和 `typedef struct { ... } Name;` 现在受支持；`union` 是多成员内存重叠布局，位域是 52-bit 打包布局，具体限制见上表。
 
 ---
 
@@ -407,6 +407,7 @@ remote int *p = remote(processor1, qq);      // 指针本身在对端
 - 前向声明：`struct P;`、`union P;`、`typedef struct P P;` 声明一个不完整类型；后续定义补全同一个类型对象。完成前只能通过指针使用它；按值声明变量/成员或 `sizeof` 会被拒绝。互指结构体和模板结构体（含 `auto` 成员）都可以这样写。
 - 函数原型：`int f(int);` 可以出现在定义之前，调用方不必先看到函数体。原型与定义按参数类型合并，重复原型合法；两个定义、返回类型不一致会报错。未调用的原型可以没有定义，调用了就会报 “declared but never defined”。`auto` 原型只加入模板条目，不自行展开版本。
 - 块作用域：块内允许函数原型、`struct`/`union` 定义或前向声明、typedef 和 enum。局部 tag/typedef 遮蔽外层同名类型，离开块后恢复；块内原型可以指向之后出现的全局定义。**不允许嵌套函数定义**。
+- enum 成员：enum 类型可以作为 struct/union 成员，也可以作为函数参数和返回值；顶层 enum 与 struct/typedef 按源码顺序处理，成员列表里内联或匿名的 enum 会先注册。enum tag 仍须先声明后使用。
 - C11 匿名成员（如 `union { union { int a; int b }; int c }`）不支持。
 
 ---

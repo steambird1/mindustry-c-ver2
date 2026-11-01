@@ -20,8 +20,8 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 225 passed, 0 failed (140 shape assertions, 1000 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 82 passed, 0 failed |
+| `node ../tools/check.mjs` | 226 passed, 0 failed (140 shape assertions, 1005 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 83 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 7 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
@@ -79,6 +79,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | union layout: multi-member unions in memory (§7.23) | **done**; offset 0, max size, nested members, test t204 | §7.23 |
 | unsigned/signed bitfields, register + memory (§7.24) | **done**; 52-bit cells, mask/shift, tests t205–t207 | §7.24 |
 | prototypes, forward declarations, block scope (§7.25) | **done**; signature merge, incomplete types completed in place, local types/prototypes, tests t208–t212 | §7.25 |
+| enum types in struct/union members and function parameters (§7.26) | **done**; source-ordered enum collection, inline member enums, test t213 | §7.26 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -813,21 +814,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 599 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 601 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 599 under `testers/unit_tests`, every one of
+bring the count to 601 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 225 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 82 | `negative/` |
+| `check.mjs` | 226 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `negative.mjs` | 83 | `negative/` |
 | `nomem.mjs` | 7 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-225 + 10 + 82 + 7 + 275 = 599. The caveat that replaces "no runner" is weaker but real:
+226 + 10 + 83 + 7 + 275 = 601. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -1541,3 +1542,21 @@ called `f` even when `a` was false.
   without definition, duplicate definition, return-type mismatch, incomplete
   value, incomplete `sizeof`, block prototype without definition, nested
   function definition.
+
+### 7.26 Enum types in struct/union members and function parameters
+
+- Top-level enum definitions now live in the same source-ordered type list as
+  structs and typedefs. A struct member can therefore use a tag that was
+  declared before it, whether the enum was written as `enum Color { ... };`
+  or as `enum Color { ... } someVariable;`.
+- An enum declared inline in a member list
+  (`struct S { enum Color { ... } c; };`) or anonymously
+  (`struct S { enum { A, B } c; };`) is processed before that member's type is
+  resolved.
+- Enum-typed function parameters and return values already worked; they are
+  covered by the same test. Typedef enum members work as before.
+- Declaration order stays strict: using a tag before its enum is declared is
+  still an error (`Unknown member type 'Color'`).
+- Case: t213 (tagged, anonymous, inline, variable-declaration, typedef and
+  union members; parameter and return value; local struct member). Negative:
+  enum member before its definition.

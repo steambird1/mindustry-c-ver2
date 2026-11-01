@@ -13,8 +13,8 @@
 
 | 命令（从 `testers/unit_tests` 执行） | 读哪个目录 | 当前结果 | 判定标准 |
 |---|---|---|---|
-| `node ..\tools\check.mjs` | `check/` | **225 passed, 0 failed**（140 shape assertions, 1000 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
-| `node ..\tools\negative.mjs` | `negative/` | **82 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
+| `node ..\tools\check.mjs` | `check/` | **226 passed, 0 failed**（140 shape assertions, 1005 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
+| `node ..\tools\negative.mjs` | `negative/` | **83 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
 | `node ..\tools\nomem.mjs` | `nomem/` | **7 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
 | `node ..\tools\loadorder.mjs` | 仓库根的 `mindc*.js` | **12 passed, 0 failed, 2 exempt** | 每个入口单独起一个 `node` 进程导入，不得有循环依赖 |
 | `node ..\tools\runall.mjs` | 14 个目录：`suite/` `mem/` `arr/` `arr2/` `ptr2/` `stack/` `tests/` `uc/` `cases/` `exttests/` `hdr/` `t/` `big/` `u/` | **267/275**（8 个已知坏例以 KNOWN-GAP 如实上报，不算失败） | 能编译、能跑完不崩；带 `EXPECT:` 的还比对输出 |
@@ -58,7 +58,7 @@
 | `EXPECT: a b c` | `runall/` | 期望输出，与 `check.mjs` 同样的逐行比对；runall 目录里只有 6 个文件带它 |
 
 `check/` 的 pragma 不变性：每个用例都会被加上各种 `optimize(...)` 变体**重跑一遍**，
-输出必须完全一致。**任何 pragma 都不得改变程序输出。** 目前 225 个用例里
+输出必须完全一致。**任何 pragma 都不得改变程序输出。** 目前 226 个用例里
 没有任何一个声明 `NO-INVARIANT`。
 
 重跑时变体是写成**真实文件**（`check/<名字>__INV.c`）再交给 `simulate` 的，不是把
@@ -67,13 +67,13 @@
 
 ## 目录地图
 
-`testers/unit_tests/` 下共 **599 个 `.c`，全部有 runner**（225 + 10 + 82 + 7 + 275 = 599）：
+`testers/unit_tests/` 下共 **601 个 `.c`，全部有 runner**（226 + 10 + 83 + 7 + 275 = 601）：
 
 | 目录 | 文件数 | 谁来跑 |
 |---|---|---|
-| `check/` | 225 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
+| `check/` | 226 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
 | `t/` | 98 | `runall.mjs`（早期按主题分的用例，`2dc683e` 起纳入） |
-| `negative/` | 82 | `negative.mjs` |
+| `negative/` | 83 | `negative.mjs` |
 | `suite/` | 50 | `runall.mjs` |
 | `mem/` | 25 | `runall.mjs` |
 | `tests/` | 25 | `runall.mjs`（另有手工的 `batch.mjs [baseline]`） |
@@ -95,7 +95,7 @@
 
 ## check/ 的编号约定
 
-`check/` 用 `tNN_主题.c` 命名，**编号 1–212 已用满，没有空号**，下一个用例是 `t213`。
+`check/` 用 `tNN_主题.c` 命名，**编号 1–213 已用满，没有空号**，下一个用例是 `t214`。
 另有 13 个不带编号的（`m1`–`m3`、`n1`–`n2`、`rw1`–`rw2`、`seq1`、`memsp2`–`memsp3`），
 它们早于编号制，保留原名。
 
@@ -211,6 +211,7 @@
 | `t210` | **§7.25**：结构体/联合体前向声明——互指结构体、`typedef struct P P;`、指针与值类型、`sizeof`；输出 `1 2 1 5 3 1` |
 | `t211` | **§7.25**：模板结构体前向声明——`auto` 成员定义后按值/typedef 使用，指针类型可在完成前声明；输出 `7 3 8 4 2` |
 | `t212` | **§7.25**：块作用域——局部原型指向后面的全局定义、局部 struct/typedef/enum、tag 与 typedef 遮蔽；输出 `4 2.5 2 3 5 7` |
+| `t213` | **§7.26**：enum 作为 struct/union 成员与函数参数——具名/匿名/内联 enum、`enum ... var;`、typedef、参数与返回值、局部 struct；输出 `1 11 21 31 41 1 1 3 2 51` |
 
 设计背景见 `docs/PLAN_array_layout.md`。
 
@@ -223,7 +224,7 @@
 在它想守住的那条检查被删掉之后**依然会通过**——这正是删掉的检查不被发现的方式。
 所以每条 `MESSAGE:` 都必须匹配到编译器真实给出的某一条错误。
 
-**负债已清零**（`1584cf3`）。`negative/` 的 82 个用例全部带 `MESSAGE:`，没有
+**负债已清零**（`1584cf3`）。`negative/` 的 83 个用例全部带 `MESSAGE:`，没有
 `KNOWN-GAP`：原先那两个（`ovl_auto.c`、`ovl_pragma.c`）已删除——自动模板 / 重载
 已经实现，`check/t109`、`check/t110` 用正向用例断言同一事实。
 `remote_as_value_refused.c`（§7.3）是第一个真正用上 `NOT-MESSAGE:` 的用例，
