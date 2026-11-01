@@ -5814,9 +5814,14 @@ export class CodeGenerator extends ASTVisitor {
 			printf: ast => {
 				/*
 				`printf` is a compiler builtin because ordinary user functions
-				cannot be variadic. The format must be a literal: it is parsed
-				here, turned into one `print` with `{n}` placeholders, and each
-				argument is emitted as a `format`.
+				cannot be variadic. The format must be a literal; it is parsed
+				here.
+
+				v150+ keeps the compact form: one `print` with `{n}` placeholders
+				and one `format` per runtime argument. Below v150 there is no
+				`format` instruction, so the same text becomes a sequence of
+				`print`s. Mindustry's `print` has no terminator, so the pieces
+				still concatenate on the message board.
 				*/
 				const result = new Instruction();
 				const fmtNode = ast.arguments?.[0];
@@ -5826,21 +5831,134 @@ export class CodeGenerator extends ASTVisitor {
 					return result;
 				}
 				const format = String(fmtNode.value ?? '');
+				const legacy = (this.targetVersion ?? 0) < 150;
+
+				const applyWidth = (body, sign, width, flags, allowZero) => {
+					const left = flags.includes('-');
+					const zero = allowZero && flags.includes('0') && !left;
+					const length = sign.length + body.length;
+					if (width <= length) return sign + body;
+					if (left) return sign + body + ' '.repeat(width - length);
+					if (zero) return sign + '0'.repeat(width - length) + body;
+					return ' '.repeat(width - length) + sign + body;
+				};
+				const naturalNumber = n => Number.isInteger(n)
+					? String(n) : String(Math.round(n * 1e6) / 1e6);
+				const formatInteger = (value, conversion, flags, width, precision) => {
+					const raw = Math.trunc(Number(value));
+					const negative = raw < 0;
+					let digits = String(Math.abs(raw));
+					if (precision !== null) {
+						const p = Math.max(0, precision);
+						if (p === 0 && raw === 0) digits = '';
+						else if (digits.length < p) digits = '0'.repeat(p - digits.length) + digits;
+					}
+					const sign = negative ? '-'
+						: conversion === 'u' ? ''
+						: flags.includes('+') ? '+'
+						: flags.includes(' ') ? ' ' : '';
+					return applyWidth(digits, sign, width, flags, precision === null);
+				};
+				const formatFloat = (value, flags, width, precision) => {
+					const n = Number(value);
+					const negative = n < 0 || Object.is(n, -0);
+					const abs = Math.abs(n);
+					const body = precision !== null
+						? abs.toFixed(Math.max(0, Math.min(20, precision)))
+						: naturalNumber(abs);
+					const sign = negative ? '-'
+						: flags.includes('+') ? '+'
+						: flags.includes(' ') ? ' ' : '';
+					return applyWidth(body, sign, width, flags, true);
+				};
+				const formatString = (value, flags, width, precision) => {
+					let body = String(value);
+					if (precision !== null) body = body.slice(0, Math.max(0, precision));
+					return applyWidth(body, '', width, flags, false);
+				};
+				const foldConstant = node => {
+					if (!node) return undefined;
+					switch (node.type) {
+						case 'NumericLiteral': {
+							const n = Number(node.value);
+							return Number.isFinite(n) ? n : undefined;
+						}
+						case 'CharacterLiteral':
+							return (node.value ?? '').codePointAt(0);
+						case 'Identifier': {
+							const symbol = this.currentScope?.lookup?.(node.name);
+							return symbol?.isEnumConstant === true && typeof symbol.constantValue === 'number'
+								? Number(symbol.constantValue) : undefined;
+						}
+						case 'UnaryExpression': {
+							const v = foldConstant(node.argument);
+							if (v === undefined) return undefined;
+							switch (node.operator) {
+								case '+': return v;
+								case '-': return -v;
+								case '~': return ~v;
+								case '!': return v ? 0 : 1;
+								default: return undefined;
+							}
+						}
+						case 'BinaryExpression': {
+							const a = foldConstant(node.left);
+							const b = foldConstant(node.right);
+							if (a === undefined || b === undefined) return undefined;
+							switch (node.operator) {
+								case '+': return a + b;
+								case '-': return a - b;
+								case '*': return a * b;
+								case '/': return b === 0 ? undefined : Math.trunc(a / b);
+								case '%': return b === 0 ? undefined : a % b;
+								case '&': return a & b;
+								case '|': return a | b;
+								case '^': return a ^ b;
+								case '<<': return a << b;
+								case '>>': return a >> b;
+								default: return undefined;
+							}
+						}
+						default:
+							return undefined;
+					}
+				};
+				const constantValue = (arg, conversion) => {
+					if (conversion === 's') {
+						return arg?.type === 'StringLiteral' ? String(arg.value ?? '') : undefined;
+					}
+					return foldConstant(arg);
+				};
+
+				/** @type {{text?: string, arg?: any, conversion?: string}[]} */
+				const segments = [];
 				let text = '';
+				const flushText = () => {
+					if (text.length > 0) {
+						segments.push({ text });
+						text = '';
+					}
+				};
 				let valueIndex = 0;
-				const formats = [];
 				for (let i = 0; i < format.length;) {
 					const ch = format[i++];
 					if (ch !== '%') { text += ch; continue; }
 					if (format[i] === '%') { text += '%'; i++; continue; }
-					// Skip optional flags/width/precision; they are accepted but
-					// not applied yet (mlog format has no field width).
+
+					const flagsStart = i;
 					while (i < format.length && /[-+ 0#]/.test(format[i])) i++;
+					const flags = format.slice(flagsStart, i);
+					const widthStart = i;
 					while (i < format.length && /[0-9]/.test(format[i])) i++;
+					const width = widthStart === i ? 0 : Number(format.slice(widthStart, i));
+					let precision = null;
 					if (format[i] === '.') {
 						i++;
+						const precisionStart = i;
 						while (i < format.length && /[0-9]/.test(format[i])) i++;
+						precision = precisionStart === i ? 0 : Number(format.slice(precisionStart, i));
 					}
+
 					const conversion = format[i++] ?? '';
 					if (!['d', 'i', 'u', 'f', 's'].includes(conversion)) {
 						this.addError(`Unsupported printf conversion '%${conversion}'`, ast.location);
@@ -5851,23 +5969,71 @@ export class CodeGenerator extends ASTVisitor {
 						return result;
 					}
 					const arg = values[valueIndex++];
-					const printed = ['d', 'i', 'u'].includes(conversion)
-						? this.implicitToNumeric(arg)
-						: this.visitAndRead(arg);
-					formats.push({ instruction: printed, name: printed.instructionReturn });
-					text += `{${formats.length - 1}}`;
+					const constant = constantValue(arg, conversion);
+					if (constant !== undefined) {
+						text += conversion === 's'
+							? formatString(constant, flags, width, precision)
+							: conversion === 'f'
+								? formatFloat(constant, flags, width, precision)
+								: formatInteger(constant, conversion, flags, width, precision);
+						continue;
+					}
+					/*
+					A runtime value has no printable length until run time, and
+					mlog has no width/precision operand. Applying them would
+					mean silently printing the unformatted value, so refuse.
+					*/
+					if (flags.length > 0 || width > 0 || precision !== null) {
+						this.addError('printf flags/width/precision are only supported for compile-time constant arguments',
+							arg?.location ?? ast.location);
+						return result;
+					}
+					flushText();
+					segments.push({ arg, conversion });
 				}
 				if (valueIndex < values.length) {
 					this.addError('printf has more arguments than its format uses', ast.location);
 					return result;
 				}
-				if (text.length > 0) {
-					result.concat(InstructionBuilder.print(JSON.stringify(text)));
+				flushText();
+
+				const emitValue = segment => {
+					const printed = ['d', 'i', 'u'].includes(segment.conversion)
+						? this.implicitToNumeric(segment.arg)
+						: this.visitAndRead(segment.arg);
+					return printed;
+				};
+
+				if (!legacy) {
+					let data = '';
+					const formats = [];
+					segments.forEach(segment => {
+						if (segment.text !== undefined) {
+							data += segment.text;
+							return;
+						}
+						const printed = emitValue(segment);
+						formats.push({ instruction: printed, name: printed.instructionReturn });
+						data += `{${formats.length - 1}}`;
+					});
+					if (data.length > 0) {
+						result.concat(InstructionBuilder.print(JSON.stringify(data)));
+					}
+					formats.forEach(entry => {
+						result.concat(entry.instruction);
+						result.concat(InstructionBuilder.format(entry.name));
+					});
+				} else {
+					segments.forEach(segment => {
+						if (segment.text !== undefined) {
+							result.concat(InstructionBuilder.print(JSON.stringify(segment.text)));
+							return;
+						}
+						const printed = emitValue(segment);
+						result.concat(printed);
+						result.concat(InstructionBuilder.print(printed.instructionReturn));
+					});
 				}
-				formats.forEach(entry => {
-					result.concat(entry.instruction);
-					result.concat(InstructionBuilder.format(entry.name));
-				});
 				return result;
 			},
 			assert: ast => {

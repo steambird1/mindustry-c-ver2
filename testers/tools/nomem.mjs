@@ -22,8 +22,10 @@ let pass = 0, fail = 0;
 for (const f of files) {
 	const src = fs.readFileSync(path.join(dir, f), 'utf8');
 	const expectedList = annotationWords(src, 'EXPECT');
+	const versionText = annotationWords(src, 'VERSION')[0] ?? null;
+	const extra = versionText !== null ? { targetVersion: Number(versionText) } : {};
 	// The whole point of the suite: nothing is linked.
-	const r = await simulate(path.join(dir, f), []);
+	const r = await simulate(path.join(dir, f), [], extra);
 	if (!r.success) { console.log(`FAIL ${f}: compile error: ${r.errors.join(' | ')}`); fail++; continue; }
 	if (r.trap) { console.log(`FAIL ${f}: runtime trap: ${r.trap}`); fail++; continue; }
 	const got = r.output.trim().split('\n').filter(x => x !== '');

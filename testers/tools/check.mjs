@@ -10,12 +10,14 @@ const files = fs.readdirSync(dir).filter(f => f.endsWith('.c') && !f.includes('_
 Annotations a test file may carry in comments:
 
   /* EXPECT: 1 2 *​/                the printed output, one line per value
+  /* EXPECT-LINE: [ 3] *​/          the printed output, preserving inner spaces
   /* EMIT: <regex> *​/               the generated code MUST contain a line
                                      matching this (repeatable)
   /* EMIT-NOT: <regex> *​/           the generated code MUST NOT contain such
                                      a line (repeatable)
   /* NO-INVARIANT *​/                skip the pragma-invariance run below
   /* NO-INVARIANT: optimize(array) *​/   skip only these pragmas
+  /* VERSION: 148 *​/                compile for an older target version
 
 An annotation is read out of the comments by `annotations.mjs`, and its value
 runs to the END OF ITS LINE -- so it may contain `*`, which a regex usually
@@ -56,12 +58,18 @@ for (const f of files) {
 	const full = path.join(dir, f);
 	const src = fs.readFileSync(full, 'utf8');
 	const expectedList = annotationWords(src, 'EXPECT');
-	const r = await simulate(full);
+	const expectedLines = annotationsOf(src, 'EXPECT-LINE');
+	const versionText = annotationWords(src, 'VERSION')[0] ?? null;
+	const extra = versionText !== null ? { targetVersion: Number(versionText) } : {};
+	const r = await simulate(full, undefined, extra);
 	const problems = [];
 	if (!r.success) { console.log(`FAIL ${f}: compile error: ${r.errors.join(' | ')}`); fail++; continue; }
 	if (r.trap) { console.log(`FAIL ${f}: runtime trap: ${r.trap}`); fail++; continue; }
 	const got = r.output.trim().split('\n').filter(x => x !== '');
-	if (expectedList.length) {
+	if (expectedLines.length) {
+		const ok = got.length === expectedLines.length && got.every((g, i) => g === expectedLines[i]);
+		if (!ok) problems.push(`     expected lines [${expectedLines.join(' | ')}] got [${got.join(' | ')}]`);
+	} else if (expectedList.length) {
 		const ok = got.length === expectedList.length && got.every((g, i) => g === expectedList[i]);
 		if (!ok) problems.push(`     expected [${expectedList.join(' ')}] got [${got.join(' ')}]`);
 	}
@@ -107,7 +115,7 @@ for (const f of files) {
 			const alt = path.join(dir, `${path.basename(f, '.c')}__INV.c`);
 			fs.writeFileSync(alt, `${pragma}\n${src}`);
 			let v;
-			try { v = await simulate(alt, undefined, {}); }
+			try { v = await simulate(alt, undefined, extra); }
 			finally { fs.unlinkSync(alt); }
 			if (!v.success) {
 				problems.push(`     with ${pragma}: compile error: ${v.errors.join(' | ')}`);

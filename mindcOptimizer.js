@@ -684,6 +684,13 @@ export class Optimizer extends ASTVisitor {
 		const noMemory = this.hasNoMemoryBlock();
 		if (!pragmaOn && requests.size === 0 && !bynameUsed && !noMemory) return;
 		/*
+		Having no memory block is not itself a request for a name pointer. Below
+		v150 the name representation does not exist, so this pass has nothing
+		to offer a program that never asked for one; let the generator report a
+		memory requirement only if the program actually needs memory.
+		*/
+		if (version < 150 && !pragmaOn && requests.size === 0 && !bynameUsed) return;
+		/*
 		`read`/`write @this <name>` arrived in v150. Below that a name pointer
 		does not exist, so asking for one cannot be satisfied -- say so instead
 		of emitting a `block`/`pos` pair into a register the program reads as a

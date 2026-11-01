@@ -1,7 +1,8 @@
 /*
-`printf` is a compiler builtin: the format literal is split into a `print` with
-`{n}` placeholders plus one `format` per argument. `%d`, `%i`, `%u`, `%f` and
-`%s` are supported.
+`printf` is a compiler builtin: the format literal is split at compile time.
+Constant arguments are formatted immediately; runtime arguments become `{n}`
+placeholders plus one `format` each on v150+, or separate `print`s below v150.
+`%d`, `%i`, `%u`, `%f` and `%s` are supported.
 */
 /* EXPECT: a=3 s=hi f=2.5 */
 #include <stdio.h>
