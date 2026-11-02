@@ -67,8 +67,9 @@ For grammar introduction (about the features unique to Mindustry-C) and examples
   members and function parameters/returns), `typedef struct { ... }
   Name;` (anonymous, tagged, self-referential), short-circuit `&&`/`||` and
   single-branch `?:`, `printf` (literal format; `%d/%i/%u/%f/%s/%%`;
-  v150+ uses `format`, older targets use several `print`s; constant arguments
-  honour flags/width/precision), `assert`, and
+  v150+ uses `format`, older targets use several `print`s; constants are folded,
+  and runtime integer width, explicit-precision floats and v150+ strings are
+  formatted by inline code or the `__printf_*` helpers), `assert`, and
   `<stdbool.h>`/`<stdio.h>`/`<assert.h>` compatibility headers.
 - Declarations: function prototypes (including `auto` patterns), struct/union
   forward declarations (`struct P;`, `typedef struct P P;`), and block-scope

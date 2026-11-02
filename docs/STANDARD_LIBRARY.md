@@ -434,7 +434,8 @@ JS 扩展函数可以在 `addinFunctionInfo` 中用 `nominalPointers: [i]` 声�
 - 支持 `%d` / `%i` / `%u` / `%f` / `%s` / `%%`；
 - v150+ 编译成一条 `print`（带 `{n}` 占位符）加若干 `format`；
 - v150 以下编译成若干条 `print`；Mindustry 的 `print` 不自带结束符，所以片段仍然连续输出；
-- 常量参数的 flags/宽度/精度会真正生效（`%2d`、`%02d`、`%+d`、`%.2f`、`%5s`、`%-5s` 等）；运行时参数带这些修饰会报错，因为 mlog 没有宽度/精度操作数；
+- 常量参数的 flags/宽度/精度在编译期生效；运行时整数宽度由内联/`__printf_int` 处理，运行时浮点需要显式精度并使用 `__printf_float`，运行时 `%s` 宽度/精度需要 v150+ 并使用 `__printf_string`；
+- `%f` 只有宽度没有精度、以及 v150 以下的运行时 `%s` 宽度/精度，会明确报错；
 - `scanf`、`FILE` 等不提供。
 
 ### 5.16 `assert.h`
@@ -491,7 +492,7 @@ JS 扩展函数可以在 `addinFunctionInfo` 中用 `nominalPointers: [i]` 声�
 - `archon.h`/`archon.js` 生成的指令依赖目标 Mindustry 版本；不同版本支持的动作/参数可能不同。
 - `format`、`unpackcolor` 等较新的指令需要相应版本；`format` 和字符级的字符串操作要求 v150+，默认目标版本是 `154.3`。
 - 没有动态内存分配；数组大小、结构体布局和句柄表示在编译期确定。
-- `printf` 的格式串必须是字面量；`%d/%i/%u/%f/%s/%%` 已支持。常量参数的 flags/宽度/精度会生效；运行时参数带宽度/精度会明确报错。
+- `printf` 的格式串必须是字面量；`%d/%i/%u/%f/%s/%%` 已支持。常量参数在编译期格式化；运行时整数宽度、显式精度浮点和 v150+ 的字符串宽度/精度都有对应处理。`%f` 只有宽度没有精度、v150 以下的运行时 `%s` 宽度/精度会明确报错。
 - 低于 v150 时 `printf` 逐段生成 `print`；`assert`、`stdbool`、`char*` 字符串函数和 `concat_print` 可用，`string_view`/`concat_to_message`/`printchar`/`format`/字符串索引/`@size` 仍要求 v150+。
 - `assert` 失败时会打印并入 `stop()`；`NDEBUG` 暂未接入。
 

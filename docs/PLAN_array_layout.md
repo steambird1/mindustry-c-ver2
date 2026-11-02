@@ -469,8 +469,8 @@ Reproduce from `testers/unit_tests`:
 
 | harness | result |
 |---|---|
-| `node ../tools/check.mjs` | 230 passed, 0 failed (141 shape assertions, 1015 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 86 passed, 0 failed |
+| `node ../tools/check.mjs` | 234 passed, 0 failed (141 shape assertions, 1030 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 87 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 10 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are known gaps, reported on their own line |
@@ -478,16 +478,16 @@ Reproduce from `testers/unit_tests`:
 Invariants that must hold at every boundary:
 
 - No pragma may change program output. Every `check/` case is re-run under each
-  `optimize(...)` variant; t214 and t216 opt out because they are fixed at target
-  148, where the pointer/struct_pointer pragmas are themselves unavailable.
+  `optimize(...)` variant; t214, t216 and t221 opt out because they are fixed at
+  target 148, where the pointer/struct_pointer pragmas are themselves unavailable.
 - Never record the same fact twice, and never let a test assert a fact another test
   already asserts.
 - Every `negative/` case states its refusal with `MESSAGE:`
   (and must stay silent with `NOT-MESSAGE:` where silence is the point) — the
   annotations themselves are the record.
 
-Test numbering: `check/` runs `t1`–`t217` with **no free slot**, so the next case is
-`t218`. (`negative/` is named by behaviour, not by number.)
+Test numbering: `check/` runs `t1`–`t221` with **no free slot**, so the next case is
+`t222`. (`negative/` is named by behaviour, not by number.)
 
 ### The Phase 7 `MESSAGE:` debt — cleared in `1584cf3`
 
