@@ -356,7 +356,7 @@ export const PUNCTUATORS = {
 
 
 export class Lexer {
-    constructor(sourceCode, macros = {}, suppressMacroExpansion = false, macroParams = {}, options = {}) {
+    constructor(sourceCode, macros = {}, suppressMacroExpansion = false, macroParams = {}, options = {}, macroVariadic = {}) {
         this.sourceCode = sourceCode;
         this.position = 0;
         this.line = 1;
@@ -377,6 +377,7 @@ export class Lexer {
         // 预处理器状态
         this.macros = {...macros, '__MINDUSTRY__': '1'}; // 存储宏定义 {name: value}
         this.macroParams = {...macroParams};
+        this.macroVariadic = {...macroVariadic};
         /**
          * @type {{ origin: bool, executed: bool, suppress: bool }}
          */
@@ -924,13 +925,22 @@ export class Lexer {
             if (firstParen === -1) {
                 return {
                     name: text,
-                    parameters: []
+                    parameters: [],
+                    variadic: false
                 };
             } else {
+                let parameters = trimmedArgs.substring(firstParen + 1, endParen).split(',')
+                    .map(content => content.trim())
+                    .filter(content => content.length > 0);
+                const variadic = parameters.includes('...');
+                if (variadic) {
+                    parameters = parameters.filter(content => content !== '...');
+                    parameters.push('__VA_ARGS__');
+                }
                 return {
                     name: text.substring(0, firstParen),
-                    parameters: trimmedArgs.substring(firstParen + 1, endParen).split(',')
-                    .map(content => content.trim())
+                    parameters,
+                    variadic
                 };
             }
         };
@@ -941,6 +951,7 @@ export class Lexer {
             const macroInfo = resolveParameters(macroName);
             this.macros[macroInfo.name] = '';
             this.macroParams[macroInfo.name] = macroInfo.parameters;
+            this.macroVariadic[macroInfo.name] = macroInfo.variadic;
         } else {
             // 有值的宏定义
             const endLocation = firstParen < 0 ? firstSpace : endParen + 1;
@@ -954,6 +965,7 @@ export class Lexer {
                 */
             // Parameter list?
             this.macroParams[macroInfo.name] = macroInfo.parameters;
+            this.macroVariadic[macroInfo.name] = macroInfo.variadic;
             this.macros[macroInfo.name] = macroValue;
         }
         
@@ -1161,7 +1173,7 @@ export class Lexer {
                         return;
                     }
                     const responseText = await responseTextRaw.text();
-                    const includedLexer = new Lexer(responseText, this.macros, false, this.macroParams);
+                    const includedLexer = new Lexer(responseText, this.macros, false, this.macroParams, {}, this.macroVariadic);
                     // 需要合并状态，如宏定义
                     const includedResult = await includedLexer.tokenize();
                     // 合并 tokens, errors, pragmas
@@ -1187,6 +1199,10 @@ export class Lexer {
                     this.macroParams = {
                         ...this.macroParams,
                         ...includedLexer.macroParams
+                    };
+                    this.macroVariadic = {
+                        ...this.macroVariadic,
+                        ...includedLexer.macroVariadic
                     };
                     // 注意：需要调整合并后 token 的位置信息
                 }
@@ -1382,6 +1398,64 @@ export class Lexer {
      * This function has some changes done on my own.
      * @returns {void}
      */
+    /**
+     * Expand #param stringification and ## token pasting in a macro body.
+     * Parameter replacement is token-based, so text inside string literals is
+     * left alone.
+     */
+    expandMacroText(body, rawArgs, expandedArgs = rawArgs, useRaw = false) {
+        const table = useRaw ? rawArgs : expandedArgs;
+        let out = '';
+        let i = 0;
+        while (i < body.length) {
+            const c = body[i];
+            if (c === '"' || c === "'") {
+                const quote = c;
+                let j = i + 1;
+                while (j < body.length) {
+                    if (body[j] === '\\') { j += 2; continue; }
+                    if (body[j] === quote) { j++; break; }
+                    j++;
+                }
+                out += body.slice(i, j);
+                i = j;
+                continue;
+            }
+            if (c === '#' && body[i + 1] === '#') {
+                i += 2;
+                out = out.replace(/\s+$/, '');
+                while (i < body.length && /\s/.test(body[i])) i++;
+                continue;
+            }
+            if (c === '#') {
+                let j = i + 1;
+                while (j < body.length && /\s/.test(body[j])) j++;
+                const start = j;
+                while (j < body.length && /[A-Za-z0-9_]/.test(body[j])) j++;
+                const name = body.slice(start, j);
+                if (Object.prototype.hasOwnProperty.call(rawArgs, name)) {
+                    out += JSON.stringify(String(rawArgs[name]).trim().replace(/\s+/g, ' '));
+                    i = j;
+                    continue;
+                }
+                out += c;
+                i++;
+                continue;
+            }
+            if (/[A-Za-z_]/.test(c)) {
+                let j = i + 1;
+                while (j < body.length && /[A-Za-z0-9_]/.test(body[j])) j++;
+                const name = body.slice(i, j);
+                out += Object.prototype.hasOwnProperty.call(table, name) ? table[name] : name;
+                i = j;
+                continue;
+            }
+            out += c;
+            i++;
+        }
+        return out;
+    }
+
     async readIdentifier() {
         const startLocation = this.getLocation();
         let value = '';
@@ -1407,17 +1481,16 @@ export class Lexer {
             return;
         }
         if (this.macros[value]) {
-            // read braces, etc.
-            let repls = {...this.macros};
-            //repls[value] = undefined;       // No recursive replacement
-            repls[value] = value;
+            const parameters = [];
+            let hasArguments = false;
             if (this.position < this.sourceCode.length && this.sourceCode[this.position] == '(') {
+                hasArguments = true;
                 // read parameters split by comma (must consider braces/parents/...)
                 const PAREN_OPENERS = ['(', '{', '['];
                 const PAREN_CLOSERS = [')', '}', ']'];
                 //this.position++;
                 this.advance();
-                let braceLayer = 1, currentParameter = "", parameters = [];
+                let braceLayer = 1, currentParameter = "";
                 while (this.position < this.sourceCode.length && braceLayer > 0) {
                     if (braceLayer === 1 && this.sourceCode[this.position] === ',') {
                         parameters.push(currentParameter);
@@ -1437,16 +1510,57 @@ export class Lexer {
                     }
                     this.advance();
                 }
-                // Might be irregular if not exited through breaking
-                for (let i = 0; i < this.macroParams[value].length && i < parameters.length; i++) {
-                    repls[this.macroParams[value][i]] = parameters[i];
-                }
             }
-            if (!this.suppressMacroExpansion) {
-                const macroProcessor = new Lexer(this.macros[value], repls, false, this.macroParams, this.lexerOptions);
+            const params = this.macroParams[value] ?? [];
+            const variadic = this.macroVariadic[value] === true;
+            if (!this.suppressMacroExpansion
+                && !((params.length > 0 || variadic) && !hasArguments)) {
+                const args = {};
+                if (variadic) {
+                    const fixed = params.filter(param => param !== '__VA_ARGS__');
+                    fixed.forEach((param, index) => {
+                        args[param] = String(parameters[index] ?? '').trim();
+                    });
+                    args.__VA_ARGS__ = parameters.slice(fixed.length)
+                        .map(parameter => String(parameter ?? '').trim()).join(',');
+                } else {
+                    params.forEach((param, index) => {
+                        args[param] = String(parameters[index] ?? '').trim();
+                    });
+                }
+                const expandedArgs = {};
+                const macros = {...this.macros};
+                delete macros[value];
+                const variadicMap = {...this.macroVariadic};
+                delete variadicMap[value];
+                for (const [name, raw] of Object.entries(args)) {
+                    if (name === '__VA_ARGS__') {
+                        expandedArgs[name] = raw;
+                        continue;
+                    }
+                    try {
+                        const argLexer = new Lexer(String(raw), macros, false,
+                            this.macroParams, this.lexerOptions, variadicMap);
+                        const argResult = await argLexer.tokenize();
+                        expandedArgs[name] = argResult.tokens
+                            .filter(token => token.type !== TokenType.EOF)
+                            .map(token => token.raw ? token.raw : String(token.value ?? ''))
+                            .join(' ');
+                    } catch {
+                        expandedArgs[name] = raw;
+                    }
+                }
+                const body = this.macros[value];
+                const expanded = this.expandMacroText(body, args, expandedArgs, body.includes('##'));
+                const macroProcessor = new Lexer(expanded, macros, false,
+                    this.macroParams, this.lexerOptions, variadicMap);
                 const macroResult = await macroProcessor.tokenize();
                 this.tokens.push(...macroResult.tokens.filter(token => token.type != TokenType.EOF));
                 this.errors.push(...macroResult.errors);
+            } else if (!this.suppressMacroExpansion) {
+                // A function-like macro name without arguments is an ordinary
+                // identifier; do not expand it.
+                this.tokens.push(new Token(TokenType.IDENTIFIER, value, startLocation));
             }
         } else if (this.legacyCharString && value === 'char') {
 			/*
