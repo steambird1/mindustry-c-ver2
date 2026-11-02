@@ -130,9 +130,9 @@ inline int memcmp(const void* a, const void* b, unsigned n) {
 	return i >= n ? 0 : x[i] - y[i];
 }
 
-inline void* memmove(void* dst, const void* src, unsigned n) {
-	char* d = (char*)dst;
-	const char* s = (const char*)src;
+inline char* memmove(char* dst, const char* src, unsigned n) {
+	char* d = dst;
+	const char* s = src;
 	if (d < s) {
 		unsigned i = 0;
 		while (i < n) {
@@ -150,11 +150,11 @@ inline void* memmove(void* dst, const void* src, unsigned n) {
 
 #ifndef _MINDC_MEMSET_DEFINED
 #define _MINDC_MEMSET_DEFINED 1
-inline void* memset(void* dst, int c, unsigned n) {
-	char* d = (char*)dst;
+inline char* memset(char* dst, int c, unsigned n) {
+	char* d = dst;
 	unsigned i = 0;
 	while (i < n) {
-		d[i] = (char)c;
+		d[i] = c;
 		i++;
 	}
 	return dst;
