@@ -1891,7 +1891,7 @@ export class CodeGenerator extends ASTVisitor {
 	 * @param {TypeInfo | null} [sourceType=null] 
 	 * @returns {Instruction}
 	 */
-	copyStruct(target, source, type, sourceType = null) {
+	copyStruct(target, source, type, sourceType = null, sourceByPointer = false) {
 		const finalSourceType = sourceType ? sourceType : type;
 		if (type.isPointerImpl()) {
 			if (finalSourceType.isPointerImpl()) {
@@ -1924,7 +1924,7 @@ export class CodeGenerator extends ASTVisitor {
 					]
 				);
 			}
-		} else if (finalSourceType.isPointerImpl()) {
+		} else if (sourceByPointer || finalSourceType.isPointerImpl()) {
 			// !type.isPointerImpl(), so must read everything for the target
 			let latest = 0;
 			return new Instruction(
@@ -1980,6 +1980,84 @@ export class CodeGenerator extends ASTVisitor {
 			);
 		}
 		
+	}
+
+	/**
+	 * Copy a struct/union value into storage reached through a pointer.
+	 *
+	 * `arr[0]` on a memory array is a `RefPointerRet` whose `type` is the
+	 * element's struct. Assigning to it must write the struct CONTENTS at that
+	 * address -- not assign the address itself.
+	 *
+	 * @param {string} pointerName Address register pair (`_block` / `_pos`).
+	 * @param {VariableRet} source
+	 * @param {any} type
+	 * @param {any} sourceType
+	 * @returns {Instruction}
+	 */
+	copyStructToPointer(pointerName, source, type, sourceType = null) {
+		const glob = this.glob;
+		const sourceValue = source?.get ? source.get() : source;
+		const sourceName = sourceValue?.name ?? sourceValue?.instructionReturn ?? null;
+		const sourceTypeInfo = sourceType ?? sourceValue?.type ?? null;
+		/*
+		A source that already lives in memory is an address pair: memcpy.
+		This covers `arr[0] = arr[1]`, where the right element is delivered as
+		a RefPointerRet, and any memory-implemented struct value.
+		*/
+		const sourceIsPointer = sourceValue instanceof PointerRet
+			|| sourceValue?.getAttribute?.('isPointerAccess') === true
+			|| sourceValue?.getAttribute?.('isPointer') === true
+			|| sourceTypeInfo?.isPointerImpl?.() === true;
+		if (sourceIsPointer && sourceName) {
+			return this.memory.outputMemcpyCall(pointerName, sourceName,
+				Number(type?.size) || 0, this.functionManagement);
+		}
+		const result = new Instruction();
+		this.copyStructMembersToPointer(result, pointerName, sourceValue, type);
+		return result;
+	}
+
+	/**
+	 * Write the members of a register-valued struct at `pointerName`.
+	 *
+	 * Each member gets its own pointer copy stepped to `member.offset`, so a
+	 * nested struct can recurse without disturbing the outer walk. Visible
+	 * bitfield fields are skipped: their `__bitsN` storage member is the leaf.
+	 *
+	 * @param {Instruction} result
+	 * @param {string} pointerName
+	 * @param {VariableRet} source
+	 * @param {any} type
+	 * @returns {void}
+	 */
+	copyStructMembersToPointer(result, pointerName, source, type) {
+		const glob = this.glob;
+		for (const member of type?.members ?? []) {
+			if (member.isBitfield === true) continue;
+			const memberType = member.type ?? member.memberType;
+			const memberPointer = glob.tmp(null, 'pointer');
+			result.concat(InstructionBuilder.set(`${memberPointer}_block`, `${pointerName}_block`));
+			result.concat(InstructionBuilder.set(`${memberPointer}_pos`, `${pointerName}_pos`));
+			const offset = Number(member.offset) || 0;
+			if (offset !== 0) {
+				result.concat(pointerStep(glob, memberPointer, offset, false));
+			}
+			const sourceMember = typeof source?.member === 'function'
+				? source.member(member.name, memberType)
+				: new BasicRet(glob, [],
+					`${source?.name ?? source?.instructionReturn}.${member.name}`,
+					memberType, false);
+			if (memberType?.kind === 'struct' || memberType?.kind === 'union') {
+				this.copyStructMembersToPointer(result, memberPointer,
+					sourceMember, memberType);
+				continue;
+			}
+			if (memberType?.kind === 'array') continue;
+			result.concat(writeThrough(glob, memberPointer,
+				sourceMember.name ?? sourceMember.instructionReturn,
+				widthOfType(memberType), false));
+		}
 	}
 	
 	/**

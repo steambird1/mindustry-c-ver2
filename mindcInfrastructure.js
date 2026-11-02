@@ -1138,10 +1138,37 @@ export class RefPointerRet extends PointerRet {
 	set(other) {
 		const glob = this.glob;
 		const value = other.get();
+		/*
+		A struct/union delivered by reference is a POINTER to storage, not a
+		pointer value. Assigning a struct to it must copy the struct contents
+		into that storage; converting a struct value to a pointer type can
+		never succeed and used to recurse until the stack overflowed.
+		*/
+		if (this.type && ['struct', 'union'].includes(this.type.kind)
+			&& value?.type && ['struct', 'union'].includes(value.type.kind)) {
+			const gen = glob.generator;
+			if (!gen) {
+				throw new InfrastructureNotImplementedExpection(
+					'struct copy without generator');
+			}
+			const copy = gen.copyStructToPointer(this.name, value, this.type, value.type);
+			return new StructRefRet(glob,
+				[this.instructions, value.instructions, copy],
+				this.name, this.type, true);
+		}
 		if (!(value instanceof PointerRet)) {
 			// Storing a plain integer into a pointer: rebuild the pointer from the address.
 			const converted = value.convertTo(this.type ?? glob.semantic.getTypeInfo('void*'));
-			return this.set(converted);
+			/*
+			`convertTo` may return the same non-pointer value (e.g. a struct
+			value for a struct type). Retrying `set` in that case would recurse
+			forever; report the impossible conversion instead.
+			*/
+			if (converted instanceof PointerRet && converted !== value) {
+				return this.set(converted);
+			}
+			throw new InfrastructureNotImplementedExpection(
+				`cannot assign a value of type '${value.type?.toString?.() ?? 'unknown'}' to a pointer`);
 		}
 		if (value.canRename) {
 			return new RefPointerRet(glob, [
@@ -1207,7 +1234,12 @@ export class MemPointerRet extends PointerRet {
 		const glob = this.glob;
 		const value = other.get();
 		if (!(value instanceof PointerRet)) {
-			return this.set(value.convertTo(this.type ?? glob.semantic.getTypeInfo('void*')));
+			const converted = value.convertTo(this.type ?? glob.semantic.getTypeInfo('void*'));
+			if (converted instanceof PointerRet && converted !== value) {
+				return this.set(converted);
+			}
+			throw new InfrastructureNotImplementedExpection(
+				`cannot assign a value of type '${value.type?.toString?.() ?? 'unknown'}' to a pointer`);
 		}
 		return new RefPointerRet(glob,
 			[this.instructions, value.instructions, referenceWrite(glob, this, value.name, 2)],
@@ -1303,12 +1335,29 @@ export class MemoryRefRet extends VariableRet {
 	 */
 	set(other) {
 		const glob = this.glob;
-		const value = other.get().convertTo(this.type ?? other.type);
-		const instructions = [this.instructions, value.instructions,
-			referenceWrite(glob, this, value.name, value.width)];
+		const value = other.get();
+		/*
+		A struct/union target reached through a pointer needs a content copy,
+		not a single-word `referenceWrite` (and definitely not a conversion).
+		*/
+		if (this.type && ['struct', 'union'].includes(this.type.kind)
+			&& value?.type && ['struct', 'union'].includes(value.type.kind)) {
+			const gen = glob.generator;
+			if (!gen) {
+				throw new InfrastructureNotImplementedExpection(
+					'struct copy without generator');
+			}
+			const copy = gen.copyStructToPointer(this.name, value, this.type, value.type);
+			return new StructRefRet(glob,
+				[this.instructions, value.instructions, copy],
+				this.name, this.type, true);
+		}
+		const converted = value.convertTo(this.type ?? other.type);
+		const instructions = [this.instructions, converted.instructions,
+			referenceWrite(glob, this, converted.name, converted.width)];
 		// The value of an assignment expression is the value that has been stored --
 		// NOT our own name, which is the *address* of that value.
-		return valueClassOf(glob, this.type).create(glob, instructions, value.name, this.type, true);
+		return valueClassOf(glob, this.type).create(glob, instructions, converted.name, this.type, true);
 	}
 
 	/**
@@ -1388,8 +1437,16 @@ export class StructRefRet extends VariableRet {
 		const gen = this.glob.generator;
 		if (!gen) throw new InfrastructureNotImplementedExpection('struct copy without generator');
 		const source = other.get();
+		/*
+		A memory-backed struct value is an address pair. Its static type may
+		still be a plain struct, so `copyStruct` cannot infer this from the type
+		alone; pass the representation explicitly.
+		*/
+		const sourceByPointer = source instanceof PointerRet
+			|| source.getAttribute?.('isPointerAccess') === true
+			|| source.getAttribute?.('isPointer') === true;
 		const copy = gen.copyStruct(this.instructionReturn, source.instructionReturn,
-			this.type, source.type);
+			this.type, source.type, sourceByPointer);
 		return new StructRefRet(this.glob, [this.instructions, source.instructions, copy],
 			this.instructionReturn, this.type, this.temporary, this.symbol);
 	}
@@ -1469,7 +1526,11 @@ export class RegistryStructRet extends StructRefRet {
 		const gen = this.glob.generator;
 		if (!gen) throw new InfrastructureNotImplementedExpection('struct copy without generator');
 		const source = other.get();
-		const copy = gen.copyStruct(this.instructionReturn, source.instructionReturn, this.type, source.type);
+		const sourceByPointer = source instanceof PointerRet
+			|| source.getAttribute?.('isPointerAccess') === true
+			|| source.getAttribute?.('isPointer') === true;
+		const copy = gen.copyStruct(this.instructionReturn, source.instructionReturn, this.type, source.type,
+			sourceByPointer);
 		return new RegistryStructRet(this.glob, [this.instructions, source.instructions, copy],
 			this.instructionReturn, this.type, this.temporary, this.symbol);
 	}

@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 257 passed, 0 failed (148 shape assertions, 1142 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 258 passed, 0 failed (148 shape assertions, 1147 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 100 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 14 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
@@ -95,6 +95,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | dynamic multi-register struct subscripts (§7.39) | **done**; per-leaf select reads, selected-name writes, whole-element copy, test t240 | §7.39 |
 | complex struct member initializers (§7.40) | **done**; enum/nested-enum register arrays, memory-layout coverage for array/union/pointer/byname/bitfield members, tests t241/t242 + negative | §7.40 |
 | bitfield and byname struct members in register arrays (§7.41) | **done**; packed `__bitsN` leaves, name-pointer leaves, constant/dynamic access, tests t243/t244/n14 | §7.41 |
+| struct assignment through memory references (§7.42) | **done**; content copy for `arr[i] = value`, reverse reads, dereferenced pointer targets, recursion guard, test t245 | §7.42 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -829,21 +830,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 656 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 657 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 656 under `testers/unit_tests`, every one of
+bring the count to 657 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 257 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `check.mjs` | 258 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
 | `negative.mjs` | 100 | `negative/` |
 | `nomem.mjs` | 14 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-257 + 10 + 100 + 14 + 275 = 656. The caveat that replaces "no runner" is weaker but real:
+258 + 10 + 100 + 14 + 275 = 657. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -1949,3 +1950,23 @@ called `f` even when `a` was false.
   mixed and nested structs), t244 (`byname` members: constant/dynamic
   dereference/assignment, copy, nested), nomem n14 (automatic register layout
   without memory).
+
+### 7.42 Struct assignment through memory references
+
+- `arr[i]` on a memory struct array is delivered as a reference (an address
+  pair), but its static type is the element struct. Assigning a struct value to
+  it must copy the CONTENTS to that address; converting the value to a pointer
+  used to recurse (`RefPointerRet.set` -> `convertTo` -> `set`).
+- `RefPointerRet.set` now detects a struct/union target and delegates to
+  `copyStructToPointer`. A memory source (another element or a
+  memory-implemented struct) is memcpy'd; a register-valued source writes each
+  storage leaf at its offset, including nested structs and bitfield storage.
+- Added a guard to the pointer retry path in `RefPointerRet.set` and
+  `MemPointerRet.set`: if conversion does not produce a `PointerRet`, report
+  the impossible assignment instead of retrying forever.
+- The reverse direction (`reg = arr[i]`) passes the source representation to
+  `copyStruct`, so it reads from the address pair instead of looking for
+  nonexistent member registers. `*p = value` on a struct target uses the same
+  content-copy path.
+- Case: t245 (register value, compound literal, bare initializer list, element
+  to element, element to register, and dereferenced struct pointer).
