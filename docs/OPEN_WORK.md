@@ -20,9 +20,9 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 244 passed, 0 failed (147 shape assertions, 1080 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 246 passed, 0 failed (147 shape assertions, 1090 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 96 passed, 0 failed |
-| `node ../tools/nomem.mjs` | 11 passed, 0 failed |
+| `node ../tools/nomem.mjs` | 12 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
 
@@ -87,6 +87,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | designated initializers + macro #/##/__VA_ARGS__ (§7.31) | **done**; designator normalization, macro operator expansion, tests t225/t226 | §7.31 |
 | standard compound literals (§7.32) | **done**; scalar/aggregate/array forms, hidden objects, postfix access and address-of, test t227 | §7.32 |
 | extern array representation + compound array initializers (§7.33) | **done**; actual-layout exports, alias roots, handle warnings/refusals, array-initializer normalization, tests t228–t231 | §7.33 |
+| multidimensional local arrays + flat handles (§7.34) | **done**; flat row-major layout, nested-subscript lowering, embedded/encoded multidim, 1D span handles, 16-bit handle length, tests t232/t233/n12 | §7.34 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -821,21 +822,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 636 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 639 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 636 under `testers/unit_tests`, every one of
+bring the count to 639 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 244 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `check.mjs` | 246 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
 | `negative.mjs` | 96 | `negative/` |
-| `nomem.mjs` | 11 | `nomem/` |
+| `nomem.mjs` | 12 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-244 + 10 + 96 + 11 + 275 = 636. The caveat that replaces "no runner" is weaker but real:
+246 + 10 + 96 + 12 + 275 = 639. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -1763,13 +1764,43 @@ called `f` even when `a` was false.
 - `extern static` (run-local guard) and `persistent extern` (cross-run guard)
   are supported and tested; an extern initializer still runs at its position
   on every pass, while an extern without an initializer is left alone.
-- Multidimensional register/lookup arrays are rejected when an element is
-  actually read or written; `lenof`/`sizeof` remain available. Memory-backed
-  multidimensional arrays continue to work, and extern memory arrays export
-  their block/pos pair. `remote()` arrays remain one-dimensional.
+- Multidimensional register/lookup arrays are supported when their elements
+  are single-cell; pointer/struct elements still need a memory-backed layout.
+  Memory-backed multidimensional arrays and extern block/pos exports continue
+  to work. `remote()` arrays remain one-dimensional.
 - Cases: t228 (compound array initializers: fixed/open/extern, struct and
   pointer 2-D, designators), t229 (extern memory/register exports and handle
   suppression), t230 (alias remote resolution), t231 (extern lifetime
   combinations); negative tests for a remote handle target, compound length and
   element-type mismatches, and a register multidimensional layout; nomem n11
   (compound array initializer without a memory block).
+
+### 7.34 Multidimensional local arrays and flat handles
+
+- A multidimensional array is stored as one row-major flat sequence. Nested
+  initializers and brace-elided flat initializers are normalized to the same
+  element list for single-cell element types; `a[i][j]` is lowered to
+  `a[i * dim1 + j]`, including 3-D and deeper.
+- `embedded` and `encoded` arrays now accept multidimensional numeric layouts.
+  `array("embedded_divided", {{...},{...}})` and the flat spelling both work;
+  encoded arrays flatten nested numeric lists. Register/lookup arrays require
+  single-cell elements (`pointer`/`struct`/`union` arrays need memory).
+- `arrayLengthOf` now uses the product of all dimensions, and the layout cost
+  uses the innermost element size rather than the whole array size. A flat 1D
+  view type is used for array views, so handles and register layouts address
+  the same row-major sequence.
+- A handle is deliberately a 1D span. A multidimensional array can be passed
+  to `int s[]` / `int s[N]` and indexed with `i * dim1 + j`; a fixed
+  `int s[2][3]` parameter keeps its shape for nested subscripts. `lenof` of a
+  1D flat parameter is the total element count; a fixed multidimensional
+  parameter still answers its outermost dimension.
+- The handle length field grew from 12 to 16 bits by reallocating the 52-bit
+  cell: get/set remain 12 bits each, length is 16 bits (max 65535), element
+  size stays 12 bits (max 4095). `handleTailOf` now refuses field overflow
+  instead of silently corrupting neighbouring fields.
+- Encoded arrays remain constant tables and do not travel as writable handles.
+  `remote()` multidimensional arrays remain a separate, still-disabled feature.
+- Cases: t232 (embedded/encoded/memory nested and flat multidim access),
+  t233 (flat and shaped handles over memory/embedded multidim arrays), nomem
+  n12 (register multidim arrays without a memory block); negative for a
+  multidimensional register array of struct elements.

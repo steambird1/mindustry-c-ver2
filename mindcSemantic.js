@@ -2207,7 +2207,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 			member was read as a block/offset pair that does not exist.
 			*/
 			const gotType = (param.type?.isTypeInfo === true) ? param.type
-				: this.getTypeInfo(this.getTypeNameFromTypeNode(param));
+				: this.typeInfoFromTypeNode(param);
 			const paramSymbol = new SymbolEntry(
                 param.name,
                 { type: gotType },
@@ -2727,6 +2727,15 @@ export class SemanticAnalyzer extends ASTVisitor {
 				}
 			}
 
+            /*
+            A multidimensional array of single-cell elements is one flat
+            row-major sequence. Flatten nested initializer lists before the
+            semantic visit so register, encoded and memory layouts all see the
+            same list -- and so a nested list does not create a temporary
+            object that needs memory.
+            */
+            this.flattenMultiDimArrayInitializer(declarator, declarator.dataType);
+
             // 检查初始化表达式
             if (declarator.initializer) {
                 this.visit(declarator.initializer, {
@@ -2819,12 +2828,24 @@ export class SemanticAnalyzer extends ASTVisitor {
 				*/
 				if (finalType.kind === 'array'
 					&& declarator.initializer?.type === 'InitializerList') {
-					const outer = this.arrayDimensionsOf(finalType)[0];
+					const dimensions = this.arrayDimensionsOf(finalType);
+					const known = dimensions.filter(dimension =>
+						Number.isFinite(Number(dimension)) && Number(dimension) > 0);
+					const total = known.length === dimensions.length
+						? known.reduce((product, dimension) => product * Number(dimension), 1)
+						: null;
 					const count = declarator.initializer.children.length;
-					if (outer && count > outer) {
+					/*
+					A multidim array can be written with brace elision
+					(`int a[2][3] = {1,2,3,4,5,6}`), so the bound is the total
+					number of elements, not the outer dimension. Nested lists
+					are naturally below that bound.
+					*/
+					const limit = total ?? dimensions[0];
+					if (limit && count > limit) {
 						this.addError(
 							`Too many initializers for '${declarator.name}': ` +
-							`${count} value(s) for ${outer} element(s)`,
+							`${count} value(s) for ${limit} element(s)`,
 							declarator.initializer.location);
 					}
 				}
@@ -3029,6 +3050,43 @@ export class SemanticAnalyzer extends ASTVisitor {
 	}
 
 	/**
+	 * Flatten a multidimensional array initializer of single-cell elements
+	 * into one row-major list.
+	 *
+	 * Struct/union/pointer element arrays keep their nested lists: an inner
+	 * list there describes one element (its members), not another array level.
+	 *
+	 * @param {ASTNode} declarator
+	 * @param {TypeInfo?} type
+	 * @returns {void}
+	 */
+	flattenMultiDimArrayInitializer(declarator, type) {
+		const dimensions = this.arrayDimensionsOf(type);
+		if (dimensions.length <= 1) return;
+		const element = this.innermostArrayElementOf(type);
+		if (!element || ['pointer', 'struct', 'union', 'array'].includes(element.kind)) return;
+		const initializer = declarator.initializer;
+		if (!initializer || initializer.type !== 'InitializerList') return;
+		const leaves = this.flattenInitializerLeaves(initializer);
+		if (leaves.length === 0) return;
+		/*
+		`char a[2][3] = {"ab", "cd"}` uses each string as one row; expanding
+		it to flat character leaves would lose that structure.
+		*/
+		if (element.name === 'char' && leaves.some(leaf => leaf?.type === 'StringLiteral')) return;
+		const flat = ASTBuilder.initializerList();
+		flat.location = initializer.location;
+		leaves.forEach(leaf => {
+			flat.addChild(leaf);
+			leaf.parent = flat;
+		});
+		flat.parent = declarator;
+		flat.setAttribute('flatMultiDimInitializer', true);
+		declarator.initializer = flat;
+		declarator.setAttribute('flatMultiDimInitializer', true);
+	}
+
+	/**
 	 * `int a[3] = (int[]){1,2,3};` initialises the declared array's own
 	 * storage. Expand the compound literal into the ordinary initializer list
 	 * before dimensions are deduced, so memory and register layouts both use
@@ -3095,7 +3153,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 				missing length. Count designators too, so
 				`(int[]){[2] = 7}` means length 3.
 				*/
-				const count = this.compoundInitializerCount(level);
+				const count = this.inferArrayLevelCount(level, dims, i);
 				if (count > 0) dims[i] = ASTBuilder.numericLiteral(count);
 			}
 			level = this.descendInitializer(level);
@@ -3168,7 +3226,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 				level = this.descendInitializer(level);
 				continue;
 			}
-			const count = this.initializerCountOf(level);
+			const count = this.inferArrayLevelCount(level, dims, i);
 			/*
 			Even on failure put something in: leaving `null` here makes the
 			loop that builds the type read `.type` of null and throw, which
@@ -3296,15 +3354,18 @@ export class SemanticAnalyzer extends ASTVisitor {
 	 * @returns {number}
 	 */
 	totalArraySizeOf(type) {
-		let sizes = type.arraySize ?? [];
-		if (!Array.isArray(sizes)) sizes = [sizes];
-		let total = 1;
-		for (const dim of sizes) {
-			const value = (typeof dim === 'number') ? dim
-				: (dim && typeof dim === 'object' && typeof dim.value === 'number') ? dim.value : 1;
-			total *= value;
+		const dimensions = this.arrayDimensionsOf(type);
+		if (dimensions.length > 0) {
+			let total = 1;
+			for (const dimension of dimensions) {
+				if (dimension === null || dimension === undefined || !Number.isFinite(Number(dimension))) {
+					return Number(type.size) || 0;
+				}
+				total *= Number(dimension);
+			}
+			return total;
 		}
-		return total;
+		return Number(type.size) || 0;
 	}
 
 	/**
@@ -3885,8 +3946,28 @@ export class SemanticAnalyzer extends ASTVisitor {
 	 * @returns {void}
 	 */
 	recordArrayInitialValues(symbol, list, required, location = null) {
-		const items = list.values ?? list.children ?? [];
-		if (!Array.isArray(items) || items.length === 0) return;
+		const dimensions = this.arrayDimensionsOf(symbol.myType?.() ?? null);
+		const elementType = this.innermostArrayElementOf(symbol.myType?.() ?? null);
+		const singleCellElements = !!elementType
+			&& !['pointer', 'struct', 'union', 'array'].includes(elementType.kind);
+		const leaves = dimensions.length > 1 && singleCellElements
+			? this.flattenInitializerLeaves(list) : (list.values ?? list.children ?? []);
+		const items = Array.isArray(leaves) ? leaves : [];
+		if (items.length === 0) return;
+		if (dimensions.length > 1 && singleCellElements) {
+			const known = dimensions.filter(dimension =>
+				Number.isFinite(Number(dimension)) && Number(dimension) > 0);
+			const total = known.length === dimensions.length
+				? known.reduce((product, dimension) => product * Number(dimension), 1)
+				: null;
+			if (total !== null && items.length > total) {
+				this.addError(
+					`Too many initializers for '${symbol.name}': ${items.length} value(s) `
+					+ `for ${total} element(s)`,
+					location);
+				return;
+			}
+		}
 		const numbers = items.map(item => this.numberOfInitializerItem(item));
 		const bad = numbers.findIndex(v => v === null || !Number.isFinite(v));
 		if (bad >= 0) {
@@ -3900,6 +3981,26 @@ export class SemanticAnalyzer extends ASTVisitor {
 			return;
 		}
 		symbol.arrayInitialValues = numbers;
+	}
+
+	/**
+	 * Flatten nested initializer lists into their leaves, row-major.
+	 * @param {ASTNode?} list
+	 * @returns {ASTNode[]}
+	 */
+	flattenInitializerLeaves(list) {
+		const items = list?.values ?? list?.children ?? null;
+		if (!Array.isArray(items)) return [];
+		const result = [];
+		const walk = node => {
+			if (node?.type === 'InitializerList') {
+				for (const child of node.values ?? node.children ?? []) walk(child);
+			} else if (node) {
+				result.push(node);
+			}
+		};
+		items.forEach(walk);
+		return result;
 	}
 
 	/**
@@ -4322,6 +4423,30 @@ export class SemanticAnalyzer extends ASTVisitor {
 			count = Math.max(count, Math.trunc(value) + 1);
 		});
 		return count;
+	}
+
+	/**
+	 * Number of items at one array level. Nested lists say it directly; a flat
+	 * (brace-elided) list has to be divided by the product of the remaining
+	 * known dimensions.
+	 *
+	 * @param {ASTNode?} level
+	 * @param {Array<ASTNode?>} dimensions
+	 * @param {number} index
+	 * @returns {number}
+	 */
+	inferArrayLevelCount(level, dimensions, index) {
+		const items = level?.children ?? [];
+		if (items.length === 0) return 0;
+		if (items.some(item => item?.type === 'InitializerList')) {
+			return this.compoundInitializerCount(level);
+		}
+		let inner = 1;
+		for (let i = index + 1; i < dimensions.length; i++) {
+			const value = dimensions[i] ? this.constantCaseValue(dimensions[i]) : undefined;
+			if (value !== undefined && value > 0) inner *= Math.trunc(value);
+		}
+		return Math.ceil(this.compoundInitializerCount(level) / Math.max(1, inner));
 	}
 
     visitBinaryExpression(node) {
@@ -5364,6 +5489,19 @@ export class SemanticAnalyzer extends ASTVisitor {
     }
 
     /**
+     * The element type after every array dimension has been peeled off.
+     * @param {TypeInfo?} type
+     * @returns {TypeInfo?}
+     */
+    innermostArrayElementOf(type) {
+        let current = type ?? null;
+        while (current && current.isTypeInfo && current.kind === 'array') {
+            current = current.pointerTo ?? null;
+        }
+        return current;
+    }
+
+    /**
      * `vecalias(handle *dst, int b[])` -- bind a handle cell to an array.
      *
      * The `&` is not decoration. A handle is ONE register, so the address of a
@@ -5718,6 +5856,68 @@ export class SemanticAnalyzer extends ASTVisitor {
     }
 	
 	// 添加成员访问支持
+    /**
+     * Turn a chain of array subscripts into one flat, row-major index.
+     *
+     * `a[i][j]` over `int a[2][3]` becomes `a[i * 3 + j]`. That is exactly
+     * what a register/encoded array (and a handle) can address; memory arrays
+     * benefit too because the generator steps once with the element size.
+     *
+     * A single subscript over an array-of-arrays is left alone: `a[i]` is
+     * itself an array value, not an element.
+     *
+     * @param {ASTNode} node The outermost computed MemberExpression
+     * @param {ASTNode} object Its object expression
+     * @param {TypeInfo} objectType
+     * @returns {void}
+     */
+    flattenArraySubscript(node, object, objectType) {
+        if (!objectType || objectType.kind !== 'array') return;
+        const elementType = objectType.extractSingle?.() ?? null;
+        if (elementType?.kind === 'array') return;
+
+        const indices = [];
+        let current = node;
+        while (current?.type === 'MemberExpression' && current.getAttribute('computed')) {
+            const index = current.getChild(1);
+            if (!index) return;
+            indices.unshift(index);
+            current = current.getChild(0);
+        }
+        if (indices.length < 2) return;
+
+        const root = current;
+        const rootType = this.getExpressionType(root);
+        if (!rootType || rootType.kind !== 'array') return;
+        const dimensions = this.arrayDimensionsOf(rootType);
+        if (dimensions.length !== indices.length) return;
+        // Every dimension used as a stride must be known at compile time.
+        for (let i = 1; i < dimensions.length; i++) {
+            if (!Number.isFinite(Number(dimensions[i])) || Number(dimensions[i]) <= 0) return;
+        }
+
+        const intType = this.getTypeInfo('int');
+        let flat = indices[0];
+        for (let i = 1; i < indices.length; i++) {
+            const stride = ASTBuilder.numericLiteral(Number(dimensions[i]));
+            stride.location = node.location;
+            stride.dataType = intType;
+            const multiplied = ASTBuilder.binaryExpression('*', flat, stride);
+            multiplied.location = node.location;
+            multiplied.dataType = intType;
+            const added = ASTBuilder.binaryExpression('+', multiplied, indices[i]);
+            added.location = node.location;
+            added.dataType = intType;
+            flat = added;
+        }
+
+        node.children[0] = root;
+        node.children[1] = flat;
+        root.parent = node;
+        flat.parent = node;
+        node.setAttribute('flatArraySubscript', true);
+    }
+
     visitMemberExpression(node) {
         const object = node.getChild(0);
         const member = node.getChild(1);
@@ -5801,6 +6001,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 			}
             
             node.dataType = objectType.extractSingle();
+			this.flattenArraySubscript(node, object, objectType);
 			return;
         }
         
@@ -6511,6 +6712,27 @@ export class SemanticAnalyzer extends ASTVisitor {
      * @param {number} index 0-based argument position
      * @returns {void}
      */
+    /**
+     * A 1D array parameter may accept a multidimensional array as a flat
+     * row-major span. Element types still have to match.
+     *
+     * @param {any} expected
+     * @param {any} actual
+     * @returns {boolean}
+     */
+    isFlatArrayCompatible(expected, actual) {
+        const target = (typeof expected === 'string') ? this.getTypeInfo(expected) : expected;
+        const source = (typeof actual === 'string') ? this.getTypeInfo(actual) : actual;
+        if (!target?.isTypeInfo || !source?.isTypeInfo) return false;
+        if (target.kind !== 'array' || source.kind !== 'array') return false;
+        const targetDimensions = this.arrayDimensionsOf(target);
+        const sourceDimensions = this.arrayDimensionsOf(source);
+        if (targetDimensions.length !== 1 || sourceDimensions.length <= 1) return false;
+        return this.isTypeCompatible(
+            this.innermostArrayElementOf(target),
+            this.innermostArrayElementOf(source));
+    }
+
     checkArrayArgumentDimensions(functionName, declared, arg, index) {
         /*
         The function type stores a parameter's type as a name as often as not,
@@ -6522,6 +6744,23 @@ export class SemanticAnalyzer extends ASTVisitor {
         if (!argType || !argType.isTypeInfo || argType.kind !== 'array') return;
         const want = this.arrayDimensionsOf(paramType);
         const got = this.arrayDimensionsOf(argType);
+        /*
+        A one-dimensional parameter is a flat span. A multidimensional array
+        is a contiguous row-major sequence, so it can be passed to `int s[]`
+        or `int s[N]`; the callee linearises its own subscripts.
+        */
+        if (want.length === 1 && got.length > 1) {
+            const total = got.reduce((product, size) =>
+                product * (Number.isFinite(Number(size)) && Number(size) > 0 ? Number(size) : 1), 1);
+            const needed = want[0];
+            if (needed !== null && Number.isFinite(Number(needed)) && total < Number(needed)) {
+                this.addError(
+                    `Argument ${index + 1} of '${functionName}' has ${total} element(s), `
+                    + `but the parameter needs at least ${needed}`,
+                    arg.location);
+            }
+            return;
+        }
         if (want.length !== got.length) {
             this.addError(
                 `Argument ${index + 1} of '${functionName}' is '${this.typeToString(argType)}', `
@@ -8090,7 +8329,8 @@ export class SemanticAnalyzer extends ASTVisitor {
             const compatible = (node.callee.name === 'sensor' && index === 0
                     && ['string_t', 'null_t'].includes(argType?.name))
                 || this.isTypeCompatible(expectedType, argType)
-                || peelVariant(argType, expectedType);
+                || peelVariant(argType, expectedType)
+                || this.isFlatArrayCompatible(expectedType, argType);
             if (argType && expectedType && !compatible) {
                 this.addError(
                     `Argument ${index + 1} of '${node.callee.name}' expects '${expectedType}', but got '${argType}'`,

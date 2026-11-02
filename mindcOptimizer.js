@@ -8011,8 +8011,23 @@ export class Optimizer extends ASTVisitor {
 	 * @returns {number} how many queries were folded
 	 */
 	foldInlinedLenofQueries(clonedBody, funcNode, param, aliasedType) {
-		const outer = (this.semantic?.dimensionListOf?.(aliasedType) ?? [])[0];
-		const length = Number(outer);
+		const dimensions = this.semantic?.arrayDimensionsOf?.(aliasedType) ?? [];
+		const parameterType = param?.type?.isTypeInfo === true
+			? param.type
+			: (this.semantic?.getTypeInfo?.(this.semantic?.getTypeNameFromTypeNode?.(param)) ?? null);
+		const parameterDimensions = parameterType?.kind === 'array'
+			? (this.semantic?.arrayDimensionsOf?.(parameterType) ?? []) : [];
+		/*
+		A 1D parameter is a flat span. When the caller's array has more
+		dimensions, `lenof` asks for the whole flattened sequence, not just the
+		outer dimension.
+		*/
+		const flatView = parameterDimensions.length === 1 && dimensions.length > 1;
+		const length = flatView
+			? dimensions.reduce((product, dimension) =>
+				product * (Number.isFinite(Number(dimension)) && Number(dimension) > 0
+					? Number(dimension) : 1), 1)
+			: Number(dimensions[0]);
 		if (!Number.isFinite(length) || length <= 0) return 0;
 		const queryName = funcNode.scope?.lookup?.(param.name)?.getAssemblySymbol?.() ?? null;
 		if (!queryName) return 0;

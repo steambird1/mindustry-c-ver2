@@ -13,7 +13,7 @@
 
 | 命令（从 `testers/unit_tests` 执行） | 读哪个目录 | 当前结果 | 判定标准 |
 |---|---|---|---|
-| `node ..\tools\check.mjs` | `check/` | **244 passed, 0 failed**（147 shape assertions, 1080 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
+| `node ..\tools\check.mjs` | `check/` | **246 passed, 0 failed**（147 shape assertions, 1090 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
 | `node ..\tools\negative.mjs` | `negative/` | **96 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
 | `node ..\tools\nomem.mjs` | `nomem/` | **10 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
 | `node ..\tools\loadorder.mjs` | 仓库根的 `mindc*.js` | **12 passed, 0 failed, 2 exempt** | 每个入口单独起一个 `node` 进程导入，不得有循环依赖 |
@@ -60,7 +60,7 @@
 | `EXPECT: a b c` | `runall/` | 期望输出，与 `check.mjs` 同样的逐行比对；runall 目录里只有 6 个文件带它 |
 
 `check/` 的 pragma 不变性：每个用例都会被加上各种 `optimize(...)` 变体**重跑一遍**，
-输出必须完全一致。**任何 pragma 都不得改变程序输出。** 目前 244 个用例里只有
+输出必须完全一致。**任何 pragma 都不得改变程序输出。** 目前 246 个用例里只有
 t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `pointer` / `struct_pointer`
 这些变体本身要求 v150+。
 
@@ -70,11 +70,11 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 
 ## 目录地图
 
-`testers/unit_tests/` 下共 **636 个 `.c`，全部有 runner**（244 + 10 + 96 + 11 + 275 = 636）：
+`testers/unit_tests/` 下共 **639 个 `.c`，全部有 runner**（246 + 10 + 96 + 12 + 275 = 639）：
 
 | 目录 | 文件数 | 谁来跑 |
 |---|---|---|
-| `check/` | 244 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
+| `check/` | 246 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
 | `t/` | 98 | `runall.mjs`（早期按主题分的用例，`2dc683e` 起纳入） |
 | `negative/` | 96 | `negative.mjs` |
 | `suite/` | 50 | `runall.mjs` |
@@ -86,7 +86,7 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 | `arr2/` | 11 | `runall.mjs` |
 | `peers/` | 10 | 不是独立用例：由 `check.mjs` 代它们的属主跑 |
 | `big/` | 8 | `runall.mjs` |
-| `nomem/` | 11 | `nomem.mjs` |
+| `nomem/` | 12 | `nomem.mjs` |
 | `u/` | 6 | `runall.mjs` |
 | `exttests/` | 4 | `runall.mjs` |
 | `cases/` | 3 | `runall.mjs` |
@@ -98,7 +98,7 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 
 ## check/ 的编号约定
 
-`check/` 用 `tNN_主题.c` 命名，**编号 1–231 已用满，没有空号**，下一个用例是 `t232`。
+`check/` 用 `tNN_主题.c` 命名，**编号 1–233 已用满，没有空号**，下一个用例是 `t234`。
 另有 13 个不带编号的（`m1`–`m3`、`n1`–`n2`、`rw1`–`rw2`、`seq1`、`memsp2`–`memsp3`），
 它们早于编号制，保留原名。
 
@@ -233,6 +233,8 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 | `t229` | **§7.33**：extern 数组按实际布局导出——memory 导出 `_block/_pos`、寄存器数组导出元素名、handle 不导出；输出 `2 5 8` |
 | `t230` | **§7.33**：别名解析——本地与 extern 别名数组的 `remote()` 绑定使用根数组；输出 `2 2 5 5` |
 | `t231` | **§7.33**：extern 生命周期组合——`extern`、`extern static`、`persistent extern` 两轮运行；输出 `1 0 1 1 1 1 1 2` |
+| `t232` | **§7.34**：本地多维数组——embedded/encoded/memory、嵌套与扁平初始化、嵌套下标；输出 `6 2 12 6 5 2 6` |
+| `t233` | **§7.34**：多维数组作为一维 handle——memory/embedded 的 `int s[]` 平铺视图与固定二维参数；输出 `6 6 6 12 12 2` |
 
 设计背景见 `docs/PLAN_array_layout.md`。
 

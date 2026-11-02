@@ -73,6 +73,11 @@ For grammar introduction (about the features unique to Mindustry-C) and examples
   and runtime integer width, explicit-precision floats and v150+ strings are
   formatted by inline code or the `__printf_*` helpers), `assert`, and
   `<stdbool.h>`/`<stdio.h>`/`<assert.h>` compatibility headers.
+- Multidimensional arrays are row-major and can be held in memory, registers
+  or encoded tables (single-cell elements for the latter two). Nested
+  subscripts flatten to `i * dim1 + j`; a handle is a flat 1D span, so
+  `int s[]` can receive a multidimensional array and `lenof(s)` is its total
+  element count.
 - C99 compatibility headers: `stddef.h`, `stdint.h`, `limits.h`, `float.h`,
   `ctype.h`, `stdlib.h` (atoi/strtol/div/exit subset), `string.h` extensions,
   `inttypes.h`, `iso646.h`, `stdalign.h`, `stdnoreturn.h` and `errno.h`.

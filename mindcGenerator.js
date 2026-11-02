@@ -22,7 +22,7 @@ import { findRecursiveFunctions } from "./mindcBase.js";
 
 import { ensureMemspHelper, remoteDeviceRegOf, remoteNameRegOf, RemotePointerRet, RemoteArrayRet, RemoteStoredPointerRet, LookupArrayRet, NameStructPointerRet, NameStructDerefRet,
 	RemoteStructPointerRet,
-	NameArrayRet, ArrayHandleRet, ensureArrayHandle, arrayLengthOfType, componentCountOf, isFlatComponentType, CATEGORY_ALIASES, Globals, VariableRet, ImmediateRet, BasicRet, IntRet, BitfieldRet, BoolRet, FloatRet, ContentRet, packHandle, HANDLE_MASK, HANDLE_FIELD_BITS,
+	NameArrayRet, ArrayHandleRet, ensureArrayHandle, arrayLengthOfType, componentCountOf, isFlatComponentType, CATEGORY_ALIASES, Globals, VariableRet, ImmediateRet, BasicRet, IntRet, BitfieldRet, BoolRet, FloatRet, ContentRet, packHandle, HANDLE_MASK, HANDLE_FIELD_BITS, HANDLE_LENGTH_MASK, HANDLE_LENGTH_SHIFT,
 	TraditionalArrayRet,
 	PointerRet, RefPointerRet, MemPointerRet, VolatilePointerRet, MemoryRefRet, StructRefRet,
 	symbolRef, ExportRet, valueClassOf, readThrough, writeThrough, pointerStep,
@@ -3018,8 +3018,55 @@ export class CodeGenerator extends ASTVisitor {
 		return result;
 	}
 
+	/**
+	 * Flatten a (possibly nested) array initializer into row-major elements.
+	 *
+	 * `{{1,2,3},{4,5,6}}` and `{1,2,3,4,5,6}` both describe the same flat
+	 * sequence. A nested list at an outer array level is descended; at the
+	 * innermost array level every child is one element.
+	 *
+	 * @param {ASTNode?} initializer
+	 * @param {number} dimensionCount
+	 * @returns {ASTNode[]}
+	 */
+	flatInitializerItems(initializer, dimensionCount) {
+		const items = initializer?.values ?? initializer?.children ?? null;
+		if (!Array.isArray(items)) return [];
+		if (dimensionCount <= 1) return items;
+		const result = [];
+		const walk = (list, level) => {
+			const children = list?.values ?? list?.children ?? null;
+			if (!Array.isArray(children)) return;
+			if (level >= dimensionCount - 1) {
+				result.push(...children);
+				return;
+			}
+			for (const child of children) {
+				if (child?.type === 'InitializerList') walk(child, level + 1);
+				else result.push(child);
+			}
+		};
+		walk(initializer, 0);
+		return result;
+	}
+
 	initializeEmbeddedArray(symbol, style, initializer) {
-		const items = initializer.values ?? initializer.children ?? null;
+		const dimensions = this.semantic?.arrayDimensionsOf
+			? this.semantic.arrayDimensionsOf(symbol.myType?.() ?? null)
+			: [];
+		const isMultiDimensional = dimensions.length > 1;
+		const elementType = this.semantic?.innermostArrayElementOf
+			? this.semantic.innermostArrayElementOf(symbol.myType?.() ?? null)
+			: null;
+		if (isMultiDimensional && elementType
+			&& ['pointer', 'struct', 'union', 'array'].includes(elementType.kind)) {
+			this.addError(
+				`A multidimensional register/lookup array needs single-cell elements: `
+				+ `'${symbol.name}' has element type '${this.semantic.typeToString(elementType)}'`,
+				symbol.location ?? null);
+			return new Instruction();
+		}
+		const items = this.flatInitializerItems(initializer, dimensions.length || 1);
 		if (!Array.isArray(items) || items.length === 0) return new Instruction();
 		const length = this.arrayLengthOf(symbol);
 		const names = style.type === 'embedded' && style.implement === 'lookup'
@@ -3067,7 +3114,7 @@ export class CodeGenerator extends ASTVisitor {
 				const symbol = this.currentScope?.lookup?.(declarator.name);
 				if (!symbol || symbol.arrayInitialValues) continue;
 				if (!this.arraySymbolOfIdentifier(symbol)) continue;
-				const literals = this.numericElementsOf(declarator.initializer);
+				const literals = this.numericElementsOf(declarator.initializer, symbol.myType());
 				if (literals) symbol.arrayInitialValues = literals;
 			}
 		}
@@ -3080,9 +3127,13 @@ export class CodeGenerator extends ASTVisitor {
 	 * @param {ASTNode?} initializer
 	 * @returns {number[]?} null when it is missing or not purely numeric
 	 */
-	numericElementsOf(initializer) {
+	numericElementsOf(initializer, type = null) {
 		if (!initializer) return null;
-		const items = initializer.values ?? initializer.children ?? null;
+		const dimensions = type && this.semantic?.arrayDimensionsOf
+			? this.semantic.arrayDimensionsOf(type) : [];
+		const items = dimensions.length > 1
+			? this.flatInitializerItems(initializer, dimensions.length)
+			: (initializer.values ?? initializer.children ?? null);
 		if (!Array.isArray(items) || items.length === 0) return null;
 		const numbers = [];
 		for (const item of items) {
@@ -3177,7 +3228,7 @@ export class CodeGenerator extends ASTVisitor {
 		`const int a[4] = {...}` used to arrive with every element taken as 0.
 		*/
 		if (this.arraySymbolOfIdentifier(symbol) && !symbol.arrayInitialValues) {
-			const literals = this.numericElementsOf(node.initializer);
+			const literals = this.numericElementsOf(node.initializer, symbol.myType());
 			if (literals) symbol.arrayInitialValues = literals;
 		}
 		const arrayStyle = this.arraySymbolOfIdentifier(symbol)
@@ -3415,6 +3466,15 @@ export class CodeGenerator extends ASTVisitor {
 			}
 		}
 		knownType = knownType ?? node.dataType;
+		/*
+		A flat multidimensional initializer describes a row-major sequence.
+		Its stride is the innermost element size, not the size of one inner
+		row; use the flat 1D view when walking it.
+		*/
+		if (knownType?.kind === 'array'
+			&& node.getAttribute?.('flatMultiDimInitializer') === true) {
+			knownType = this.flatArrayViewTypeOf(knownType) ?? knownType;
+		}
 		let tmpVar = this.getTempSymbol(knownType ?? node.dataType);
 		result.setAttribute('isTemporary', true);
 		if (knownType && knownType.isRegStruct()) {
@@ -4592,8 +4652,8 @@ export class CodeGenerator extends ASTVisitor {
 			down and masked -- the same two instructions `lenof(handle)` emits.
 			*/
 			result.concat(InstructionBuilder.op('shr', limitName, source.name,
-				String(HANDLE_FIELD_BITS * 2)));
-			result.concat(InstructionBuilder.op('and', limitName, limitName, String(HANDLE_MASK)));
+				String(HANDLE_LENGTH_SHIFT)));
+			result.concat(InstructionBuilder.op('and', limitName, limitName, String(HANDLE_LENGTH_MASK)));
 			result.concat(InstructionBuilder.op('min', limitName, limitName,
 				String(destinationLength)));
 			bound = limitName;
@@ -4929,7 +4989,29 @@ export class CodeGenerator extends ASTVisitor {
 	 */
 	arrayLengthOf(symbol) {
 		const type = symbol.myType();
-		let sizes = (type && type.arraySize) ? type.arraySize : null;
+		if (!type || type.kind !== 'array') return 0;
+		/*
+		A multidimensional array is one flat sequence when it travels as a
+		handle or is laid out in registers. Use the product of all dimensions,
+		not just the outermost `arraySize`.
+		*/
+		if (this.semantic?.arrayDimensionsOf) {
+			const dimensions = this.semantic.arrayDimensionsOf(type);
+			if (dimensions.length > 0) {
+				let total = 1;
+				let complete = true;
+				for (const dimension of dimensions) {
+					const value = Number(dimension);
+					if (dimension === null || dimension === undefined
+						|| !Number.isFinite(value) || value <= 0) {
+						complete = false;
+						break;
+					}
+					total *= value;
+				}
+				if (complete) return total;
+			}
+		}
 		// `arraySize` may be a list of numbers, a single number, or the AST
 		// literal node that the parser stored there.
 		const asNumber = item => {
@@ -4938,11 +5020,54 @@ export class CodeGenerator extends ASTVisitor {
 			if (typeof item.value === 'number') return item.value;
 			return null;
 		};
+		let sizes = (type && type.arraySize) ? type.arraySize : null;
 		if (!Array.isArray(sizes)) sizes = [sizes];
 		const numbers = sizes.map(asNumber).filter(n => n !== null && n > 0);
 		if (numbers.length > 0) return numbers.reduce((a, b) => a * b, 1);
 		if (type && type.size) return type.size;
 		return symbol.size ?? 0;
+	}
+
+	/**
+	 * Cells occupied by one element of an array, after any number of array
+	 * dimensions have been peeled off.
+	 *
+	 * @param {TypeInfo?} type
+	 * @returns {number}
+	 */
+	arrayElementSizeOf(type) {
+		let current = type;
+		while (current && current.isTypeInfo && current.kind === 'array') {
+			current = current.pointerTo ?? null;
+		}
+		return Number(current?.size) || 1;
+	}
+
+	/**
+	 * The 1D view of a multidimensional array.
+	 *
+	 * The storage is row-major and contiguous, so an `int[2][3]` view is an
+	 * `int[6]` whose element type is the innermost `int`. Handles, register
+	 * layouts and nested-subscript lowering all use this view.
+	 *
+	 * @param {TypeInfo?} type
+	 * @returns {TypeInfo?}
+	 */
+	flatArrayViewTypeOf(type) {
+		if (!type || type.kind !== 'array') return type;
+		const dimensions = this.semantic?.arrayDimensionsOf?.(type) ?? [];
+		if (dimensions.length <= 1) return type;
+		const total = dimensions.reduce((product, dimension) => {
+			const value = Number(dimension);
+			return product * (Number.isFinite(value) && value > 0 ? value : 1);
+		}, 1);
+		const element = this.semantic?.innermostArrayElementOf?.(type) ?? null;
+		if (!element) return type;
+		const flat = new TypeInfo('', 'array', total);
+		flat.arraySize = [total];
+		flat.pointerTo = element;
+		flat.qualifiers = [...(type.qualifiers ?? [])];
+		return flat;
 	}
 
 	/**
@@ -5115,7 +5240,7 @@ export class CodeGenerator extends ASTVisitor {
 		}
 		const type = symbol.myType();
 		const length = this.arrayLengthOf(symbol);
-		const size = (type && type.size) ? type.size : 1;
+		const size = this.arrayElementSizeOf(type);
 		/*
 		Hand-declared ids mean the processor's own `lookup` tables may disagree
 		with them, so an array is not allowed to use names as its storage.
@@ -5163,6 +5288,7 @@ export class CodeGenerator extends ASTVisitor {
 		representation of its own (a handle, or a fresh register layout).
 		*/
 		if (symbol?.arrayAliasOf) return this.arrayViewOf(symbol.arrayAliasOf);
+		const flatType = this.flatArrayViewTypeOf(symbol?.myType?.() ?? null);
 		/*
 		A parameter holding NAMES instead of an address. Every access goes
 		through `read` / `write <device> <the name>`, which is the only way to
@@ -5177,10 +5303,10 @@ export class CodeGenerator extends ASTVisitor {
 			knows which processor to talk to.
 			*/
 			const length = this.arrayLengthOf(symbol) || 0;
-			return new ArrayHandleRet(glob, symbol.getAssemblySymbol(), symbol.myType(), length);
+			return new ArrayHandleRet(glob, symbol.getAssemblySymbol(), flatType, length);
 		}
 		const style = this.arrayStyleFor(symbol);
-		const type = symbol.myType();
+		const type = flatType;
 		const length = this.arrayLengthOf(symbol);
 		/*
 		A remote array is not stored here: its elements are registers of the
@@ -5410,19 +5536,6 @@ export class CodeGenerator extends ASTVisitor {
 			*/
 			const arraySymbol = this.arraySymbolOf(objectRoot);
 			if (arraySymbol) {
-				const arrayType = arraySymbol.myType?.() ?? null;
-				const dimensions = this.semantic?.arrayDimensionsOf
-					? this.semantic.arrayDimensionsOf(arrayType).length : 1;
-				const arrayStyle = this.arrayStyleFor(arraySymbol);
-				if (dimensions > 1 && arrayStyle && arrayStyle.type !== 'traditional'
-					&& arraySymbol.multiDimLayoutError !== true) {
-					arraySymbol.multiDimLayoutError = true;
-					this.addError(
-						`Multidimensional register/lookup arrays are not supported yet: `
-						+ `'${arraySymbol.name}' needs a memory-backed layout`,
-						node.location ?? arraySymbol.location ?? null);
-					return new MemoryRefRet(glob, [], 'null', node.dataType ?? null, true);
-				}
 				/*
 				A compound literal array that is held in registers still has to
 				be filled before an element is read. Evaluating the literal here
@@ -5942,7 +6055,7 @@ export class CodeGenerator extends ASTVisitor {
 		`paramSymbol` is null and the slot's own type is all there is to go on.
 		*/
 		const slotHasOpenDimension = slotType?.kind === 'array'
-			&& !Number.isFinite(Number(arrayLengthOfType(slotType)));
+			&& !(arrayLengthOfType(slotType) > 0);
 		const wantsHandle = argIsArray && !!slotType && slotType.kind === 'array'
 			&& (representation === 'handle' || representation === 'remote'
 				|| representation === 'names' || slotWantsHandle || slotHasOpenDimension);
@@ -6138,8 +6251,8 @@ export class CodeGenerator extends ASTVisitor {
 			const tmp = glob.tmp(this.semantic.getTypeInfo('int'), 'handle');
 			const tn = tmp?.getAssemblySymbol?.() ?? String(tmp);
 			const instrs = [
-				InstructionBuilder.op('shr', tn, handleLen, String(HANDLE_FIELD_BITS * 2)),
-				InstructionBuilder.op('and', tn, tn, String(HANDLE_MASK))
+				InstructionBuilder.op('shr', tn, handleLen, String(HANDLE_LENGTH_SHIFT)),
+				InstructionBuilder.op('and', tn, tn, String(HANDLE_LENGTH_MASK))
 			];
 			return new IntRet(glob, instrs, tn, this.semantic.getTypeInfo('int'), true);
 		}
@@ -6339,8 +6452,8 @@ export class CodeGenerator extends ASTVisitor {
 			const tmp = glob.tmp(null, 'handle');
 			const tn = tmp?.getAssemblySymbol?.() ?? String(tmp);
 			return new IntRet(glob, [
-				InstructionBuilder.op('shr', tn, handleLen, String(HANDLE_FIELD_BITS * 2)),
-				InstructionBuilder.op('and', tn, tn, String(HANDLE_MASK))
+				InstructionBuilder.op('shr', tn, handleLen, String(HANDLE_LENGTH_SHIFT)),
+				InstructionBuilder.op('and', tn, tn, String(HANDLE_LENGTH_MASK))
 			], tn, this.semantic.getTypeInfo('int') ?? null, true);
 		}
 

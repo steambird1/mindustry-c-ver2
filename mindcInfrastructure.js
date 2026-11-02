@@ -1863,7 +1863,17 @@ export class ArrayRet extends VariableRet {
 	}
 
 	get elementSize() {
-		return widthOfType(this.elementTypeInfo);
+		const element = this.elementTypeInfo;
+		if (!element) return 1;
+		/*
+		A memory element's size is its cell count. `widthOfType` answers how
+		many REGISTERS a VALUE takes (a memory struct is one pointer, a
+		register struct may be one word), which is not the stride of an array.
+		*/
+		if (['struct', 'union', 'array'].includes(element.kind)) {
+			return Number(element.size) || 1;
+		}
+		return widthOfType(element);
 	}
 
 	/**
@@ -3127,15 +3137,24 @@ export class RemoteStoredPointerRet extends PointerRet {
  */
 export function arrayLengthOfType(type) {
 	if (!type || type.kind !== 'array') return 0;
-	let sizes = type.arraySize ?? [];
-	if (!Array.isArray(sizes)) sizes = [sizes];
 	let total = 1;
-	for (const dim of sizes) {
-		const value = (typeof dim === 'number') ? dim
-			: (dim && typeof dim === 'object' && typeof dim.value === 'number') ? dim.value : 1;
-		total *= value;
+	let current = type;
+	let sawDimension = false;
+	while (current && current.isTypeInfo && current.kind === 'array') {
+		let sizes = current.arraySize ?? [];
+		if (!Array.isArray(sizes)) sizes = [sizes];
+		for (const dim of sizes) {
+			const value = (typeof dim === 'number') ? dim
+				: (dim && typeof dim === 'object' && typeof dim.value === 'number') ? dim.value : NaN;
+			if (!Number.isFinite(value) || value <= 0) {
+				return 0;
+			}
+			total *= value;
+			sawDimension = true;
+		}
+		current = current.pointerTo ?? null;
 	}
-	return total;
+	return sawDimension ? total : 0;
 }
 
 export const CATEGORY_ALIASES = {
@@ -3596,20 +3615,45 @@ export function ensureArrayHandle(glob, array) {
 
 /**
  * The bit layout of a packed handle.
+ *
+ * Four fields share the 52 bits a machine cell can hold without losing
+ * integer precision:
+ *
+ *     bits  0..11  get helper line number   (12 bits)
+ *     bits 12..23  set helper line number   (12 bits)
+ *     bits 24..39  length, element count    (16 bits)
+ *     bits 40..51  size, cells per element  (12 bits)
+ *
+ * The length field used to be 12 bits, which capped every handle at 4095
+ * elements -- exactly the limit a flattened multidimensional array can hit.
  * @see ArrayHandleRet
  */
 export const HANDLE_FIELD_BITS = 12;
 export const HANDLE_MASK = (1 << HANDLE_FIELD_BITS) - 1;	// 4095
+export const HANDLE_LENGTH_BITS = 16;
+export const HANDLE_LENGTH_MASK = (1 << HANDLE_LENGTH_BITS) - 1;	// 65535
+export const HANDLE_LENGTH_SHIFT = HANDLE_FIELD_BITS * 2;	// 24
+export const HANDLE_SIZE_SHIFT = HANDLE_LENGTH_SHIFT + HANDLE_LENGTH_BITS;	// 40
 
-/** The constant `len << 24 | size << 36`, folded at compile time. */
+/** The constant `len << 24 | size << 40`, folded at compile time. */
 export function handleTailOf(length = 0, size = 1) {
+	const elementCount = Math.trunc(Number(length) || 0);
+	const elementSize = Math.trunc(Number(size) || 0);
+	if (elementCount < 0 || elementCount > HANDLE_LENGTH_MASK) {
+		throw new Error(
+			`array handle length ${elementCount} exceeds the ${HANDLE_LENGTH_MASK}-element field`);
+	}
+	if (elementSize < 0 || elementSize > HANDLE_MASK) {
+		throw new Error(
+			`array handle element size ${elementSize} exceeds the ${HANDLE_MASK}-cell field`);
+	}
 	/*
-	NOT `<<`: JavaScript's shift truncates to 32 bits, so `1 << 36` came out
-	as 16 -- the size field silently landed on top of the length one. BigInt
+	NOT `<<`: JavaScript's shift truncates to 32 bits, so `1 << 40` came out
+	as ... -- the size field silently landed on top of other fields. BigInt
 	keeps the full width, which is what the machine's own 64-bit numbers do.
 	*/
-	return Number((BigInt(Math.trunc(Number(length) || 0)) << BigInt(HANDLE_FIELD_BITS * 2))
-		| (BigInt(Math.trunc(Number(size) || 0)) << BigInt(HANDLE_FIELD_BITS * 3)));
+	return Number((BigInt(elementCount) << BigInt(HANDLE_LENGTH_SHIFT))
+		| (BigInt(elementSize) << BigInt(HANDLE_SIZE_SHIFT)));
 }
 
 /**
@@ -3665,8 +3709,8 @@ export class ArrayHandleRet extends ArrayRet {
 
 	    bits  0..11  the get helper's line number
 	    bits 12..23  the set helper's line number
-	    bits 24..35  lenof, i.e. the element count
-	    bits 36..47  sizeof, i.e. the size of one element
+	    bits 24..39  lenof, i.e. the element count
+	    bits 40..51  sizeof, i.e. the size of one element
 
 	Two registers would be simpler, but a function pointer carries its
 	arguments in fixed `__param_N` slots and cannot know anything about the
