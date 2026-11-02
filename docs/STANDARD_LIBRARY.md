@@ -454,6 +454,29 @@ JS 扩展函数可以在 `addinFunctionInfo` 中用 `nominalPointers: [i]` 声�
 
 兼容头；`bool` / `true` / `false` 本身是编译器关键字。
 
+### 5.18 C99 兼容头
+
+以下头文件用于移植普通 C 源码。注意所有标量仍是一个 Mindustry cell；`stdint.h`/`limits.h`/`float.h` 里的宽度和范围是 C 名称的兼容值，不是真实硬件宽度。
+
+| 头文件 | 提供 |
+|---|---|
+| `stddef.h` | `size_t`、`ptrdiff_t`、`NULL` |
+| `stdint.h` | `int8_t`…`uint64_t`、`intptr_t`、`intmax_t` 及对应 `*_MAX`/`*_C` |
+| `limits.h` | `CHAR_BIT`、`INT_MAX`、`LONG_MAX` 等兼容常量 |
+| `float.h` | `FLT_RADIX`、`DBL_DIG`、`DBL_MAX` 等 double 范围 |
+| `ctype.h` | `isdigit`、`isalpha`、`isspace`、`toupper`、`tolower` 等 |
+| `stdlib.h` | `atoi`/`atol`/`strtol`/`strtoul`、`div`/`ldiv`、`exit`/`abort`、`srand`；`qsort`/`bsearch`/`malloc` 仍不提供 |
+| `string.h` | 原有 `strlen`/`strcpy`/`strcat`/`strcmp`，以及 `strncpy`/`strncat`/`strncmp`/`strchr`/`strrchr`/`strstr`/`memcmp`/`memmove`/`memset` |
+| `inttypes.h` | `PRId32` 等格式宏、`imaxabs`/`imaxdiv`/`strtoimax`/`strtoumax` |
+| `math.h` | `M_PI` 等常量，以及 `fabs`/`fmin`/`fmax`/`round`/`trunc`/`fmod`/`log`/`exp`/`log10`/`isnan`/`isinf`/`isfinite` |
+| `iso646.h` | `and`/`or`/`not` 等宏 |
+| `stdalign.h` | `alignas` 忽略、`alignof` 为 1 |
+| `stdnoreturn.h` | `noreturn` 为空宏 |
+| `stdio.h` | `printf`、v150+ 的 `putchar`/`puts`、`EOF` |
+| `assert.h` | `assert` 内建；`NDEBUG` 会移除调用；`static_assert` 是关键字别名 |
+
+`strtol`/`strtoul` 目前接受 `endptr` 形参但不回写它；需要解析结束位置的代码应自行扫描。
+
 ---
 
 ## 6. 与 C 标准库的关系
@@ -462,19 +485,20 @@ JS 扩展函数可以在 `addinFunctionInfo` 中用 `nominalPointers: [i]` 声�
 
 - `memcpy`（内建）；
 - `sin`、`cos`、`tan`、`asin`、`acos`、`atan`、`ceil`、`floor`、`sqrt`、`pow`、`abs`（内建）；
-- `memset`、`memset_near`（`memory.h`，自定义实现）；
-- `strlen`、`strcpy`、`strcat`、`strcmp`（`string.h`，按 `char*` 实现，不是 `string_t`）；
+- `memset`、`memset_near`（`memory.h`/`string.h`）；
+- `strlen`、`strcpy`、`strcat`、`strcmp`、`strncpy`、`strncat`、`strncmp`、`strchr`、`strrchr`、`strstr`、`memcmp`、`memmove`（`string.h`，按 `char*` 实现，不是 `string_t`）；
+- `atoi`、`atol`、`strtol`、`strtoul`、`div`、`ldiv`、`exit`、`abort`、`srand`（`stdlib.h`）；
 - `printf`（内建；格式串必须是字面量，支持 `%d/%i/%u/%f/%s/%%`）；
 - `assert`（内建；失败时打印并 `stop()`）；
 - `time()`（`time.h`，基于 `@time`）；
-- `errno`（`error.h`，实际是 `_errId` 宏）。
+- `errno`（`error.h`/`errno.h`，实际是 `_errId` 宏）。
 
 **不提供：**
 
-- `scanf`、`puts`、`getchar`；
+- `scanf`、`getchar`；
 - `malloc`、`calloc`、`realloc`、`free`；
 - `FILE`、`fopen`、文件/目录/网络 API；
-- `qsort`、`bsearch`、`atexit`、`exit`；
+- `qsort`、`bsearch`、`atexit`；
 - `setjmp`/`longjmp`、信号、线程。
 
 字符串值直接交给 `print()`/`printchar()`/`format()` 或内置函数；`string_t` 不是 `char*`。需要 C 字符缓冲区时使用 `char[]`/`char*`，需要只读字符串视图时使用 `include/string.h` 的 `string_view`。
@@ -494,6 +518,6 @@ JS 扩展函数可以在 `addinFunctionInfo` 中用 `nominalPointers: [i]` 声�
 - 没有动态内存分配；数组大小、结构体布局和句柄表示在编译期确定。
 - `printf` 的格式串必须是字面量；`%d/%i/%u/%f/%s/%%` 已支持。常量参数在编译期格式化；运行时整数宽度、显式精度浮点和 v150+ 的字符串宽度/精度都有对应处理。`%f` 只有宽度没有精度、v150 以下的运行时 `%s` 宽度/精度会明确报错。
 - 低于 v150 时 `printf` 逐段生成 `print`；`assert`、`stdbool`、`char*` 字符串函数和 `concat_print` 可用，`string_view`/`concat_to_message`/`printchar`/`format`/字符串索引/`@size` 仍要求 v150+。
-- `assert` 失败时会打印并入 `stop()`；`NDEBUG` 暂未接入。
+- `assert` 失败时会打印并入 `stop()`；定义 `NDEBUG` 后 `assert` 调用会在预处理阶段消失。
 
 语言层的差异（`goto`、VLA、`char`/`string_t` 的拆分、`remote`、`byname`、`auto`、数组布局、`#pragma` 等）见 [DIFFERENCES_FROM_C99.md](DIFFERENCES_FROM_C99.md)。

@@ -20,8 +20,8 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 234 passed, 0 failed (141 shape assertions, 1030 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 87 passed, 0 failed |
+| `node ../tools/check.mjs` | 237 passed, 0 failed (141 shape assertions, 1045 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 88 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 10 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
@@ -83,6 +83,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | low-version `printf` / stdio and no-memory byname (§7.27) | **done**; multi-`print` below v150, no-memory pass fix, tests t214/t215 | §7.27 |
 | nominal pointers / removal of volatile output casts (§7.28) | **done**; `&x` for `ulocate`/`ucontrol`, extension `nominalPointers`, tests t216/t217 | §7.28 |
 | runtime `printf` width/precision (§7.29) | **done**; inline int width, `__printf_int/float/string`, tests t218–t221 | §7.29 |
+| C99 headers + static assert/__func__/restrict (§7.30) | **done**; compatibility headers, NDEBUG, declaration touches, tests t222–t224 | §7.30 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -817,21 +818,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 616 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 620 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 616 under `testers/unit_tests`, every one of
+bring the count to 620 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 234 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 87 | `negative/` |
+| `check.mjs` | 237 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `negative.mjs` | 88 | `negative/` |
 | `nomem.mjs` | 10 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-234 + 10 + 87 + 10 + 275 = 616. The caveat that replaces "no runner" is weaker but real:
+237 + 10 + 88 + 10 + 275 = 620. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -1658,3 +1659,26 @@ called `f` even when `a` was false.
 - Cases: t218 (runtime integer fields), t219 (runtime float fields), t220
   (runtime string fields at v154), t221 (integer/float at 148). Negatives:
   `%f` width without precision and `%s` fields below v150.
+
+### 7.30 C99 compatibility headers and declaration touches
+
+- Added `stddef.h`, `stdint.h`, `limits.h`, `float.h`, `ctype.h`, `stdlib.h`,
+  `inttypes.h`, `iso646.h`, `stdalign.h`, `stdnoreturn.h` and `errno.h`.
+  `stdlib.h` covers atoi/atol/strtol/strtoul, div/ldiv, exit/abort and srand;
+  `strtol` accepts but does not write `endptr` yet. `qsort`/`bsearch`/`malloc`
+  remain out of scope.
+- `string.h` gained strncpy/strncat/strncmp/strchr/strrchr/strstr/memcmp/
+  memmove/memset; `memory.h` and `string.h` share a memset guard.
+- `math.h` gained constants and fabs/fmin/fmax/round/trunc/fmod/log/exp/log10/
+  isnan/isinf/isfinite. `assert.h` honours `NDEBUG`; `stdio.h` gains EOF and
+  v150+ putchar/puts.
+- `_Static_assert`/`static_assert` work at file and block scope and fold
+  `sizeof`, comparison and logical operators. `__func__` resolves lazily to the
+  current function name. `restrict` is accepted and ignored.
+- `cloneAST` now copies an `AsmStatement`'s `code`; inlining a function that
+  contains `asm` no longer loses the instruction.
+- Cases: t222 (headers and helper functions), t223 (NDEBUG), t224
+  (`_Static_assert`, `__func__`, `restrict`); negative for a failed static
+  assertion.
+- Not done in this batch: designated initializers, standard compound literals,
+  `#`/`##` and variadic macros, printf `%c/%x/%o`, `goto`, qsort/bsearch/malloc.

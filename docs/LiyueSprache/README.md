@@ -25,6 +25,7 @@ Mindustry-C 不需要安装。你只需要下载 `main.html` 和所有 JavaScrip
 - C99 便利：`//` 注释、`bool`/`true`/`false`、`inline`、`for` 初始化声明。
 - C 表面：真正的 `enum`（含 `typedef enum`，可作为 struct/union 成员和函数参数/返回值）、`typedef struct { ... } Name;`（匿名/具名/自引用）、`&&`/`||` 短路与 `?:` 单分支求值、`printf`（格式串需字面量；`%d/%i/%u/%f/%s/%%`；v150+ 用 `format`，低版本逐段用 `print`；常量编译期折叠，运行时整数宽度、显式精度浮点和 v150+ 字符串宽度/精度由内联或 `__printf_*` helper 处理）、`assert`，以及 `<stdbool.h>`/`<stdio.h>`/`<assert.h>` 兼容头。
 - 声明：函数原型（含 `auto` 模式）、结构体/联合体前向声明（`struct P;`、`typedef struct P P;`），以及块作用域内的 typedef、结构体定义、enum 和函数原型（支持遮蔽）。不支持嵌套函数定义和 C11 匿名成员。
+- C99 兼容头：`stddef.h`、`stdint.h`、`limits.h`、`float.h`、`ctype.h`、`stdlib.h`（atoi/strtol/div/exit 子集）、`string.h` 扩展、`inttypes.h`、`iso646.h`、`stdalign.h`、`stdnoreturn.h` 和 `errno.h`。`assert` 支持 `NDEBUG`；`_Static_assert`/`static_assert`、`__func__` 和 `restrict` 可用。
 - 数据布局：多成员 `union` 在内存中重叠；unsigned/signed 位域按 LSB-first 打包进 52-bit cell，寄存器和内存结构体都支持。跨类型 union 读取是数值别名，不是字节级 bitcast。
 - `char` 与原生字符串分离：`char` 是 1-cell 字符/数值，`char*` 是普通指针、`char[]` 是 NUL 结尾的 C 数组；`string_t` 是 1-cell 的 Mindustry 字符串。`#include <string.h>` 提供只读 `string_view` 和 message 拼接（字符级操作要求 v150+）。
 - 存储期：自动局部变量按调用；`static` 在本次运行内；`persistent` 跨处理器重启；普通文件作用域变量每次运行重置。

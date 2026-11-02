@@ -13,8 +13,8 @@
 
 | 命令（从 `testers/unit_tests` 执行） | 读哪个目录 | 当前结果 | 判定标准 |
 |---|---|---|---|
-| `node ..\tools\check.mjs` | `check/` | **234 passed, 0 failed**（141 shape assertions, 1030 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
-| `node ..\tools\negative.mjs` | `negative/` | **87 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
+| `node ..\tools\check.mjs` | `check/` | **237 passed, 0 failed**（141 shape assertions, 1045 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
+| `node ..\tools\negative.mjs` | `negative/` | **88 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
 | `node ..\tools\nomem.mjs` | `nomem/` | **10 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
 | `node ..\tools\loadorder.mjs` | 仓库根的 `mindc*.js` | **12 passed, 0 failed, 2 exempt** | 每个入口单独起一个 `node` 进程导入，不得有循环依赖 |
 | `node ..\tools\runall.mjs` | 14 个目录：`suite/` `mem/` `arr/` `arr2/` `ptr2/` `stack/` `tests/` `uc/` `cases/` `exttests/` `hdr/` `t/` `big/` `u/` | **267/275**（8 个已知坏例以 KNOWN-GAP 如实上报，不算失败） | 能编译、能跑完不崩；带 `EXPECT:` 的还比对输出 |
@@ -60,7 +60,7 @@
 | `EXPECT: a b c` | `runall/` | 期望输出，与 `check.mjs` 同样的逐行比对；runall 目录里只有 6 个文件带它 |
 
 `check/` 的 pragma 不变性：每个用例都会被加上各种 `optimize(...)` 变体**重跑一遍**，
-输出必须完全一致。**任何 pragma 都不得改变程序输出。** 目前 234 个用例里只有
+输出必须完全一致。**任何 pragma 都不得改变程序输出。** 目前 237 个用例里只有
 t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `pointer` / `struct_pointer`
 这些变体本身要求 v150+。
 
@@ -70,13 +70,13 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 
 ## 目录地图
 
-`testers/unit_tests/` 下共 **616 个 `.c`，全部有 runner**（234 + 10 + 87 + 10 + 275 = 616）：
+`testers/unit_tests/` 下共 **620 个 `.c`，全部有 runner**（237 + 10 + 88 + 10 + 275 = 620）：
 
 | 目录 | 文件数 | 谁来跑 |
 |---|---|---|
-| `check/` | 234 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
+| `check/` | 237 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
 | `t/` | 98 | `runall.mjs`（早期按主题分的用例，`2dc683e` 起纳入） |
-| `negative/` | 87 | `negative.mjs` |
+| `negative/` | 88 | `negative.mjs` |
 | `suite/` | 50 | `runall.mjs` |
 | `mem/` | 25 | `runall.mjs` |
 | `tests/` | 25 | `runall.mjs`（另有手工的 `batch.mjs [baseline]`） |
@@ -98,7 +98,7 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 
 ## check/ 的编号约定
 
-`check/` 用 `tNN_主题.c` 命名，**编号 1–221 已用满，没有空号**，下一个用例是 `t222`。
+`check/` 用 `tNN_主题.c` 命名，**编号 1–224 已用满，没有空号**，下一个用例是 `t225`。
 另有 13 个不带编号的（`m1`–`m3`、`n1`–`n2`、`rw1`–`rw2`、`seq1`、`memsp2`–`memsp3`），
 它们早于编号制，保留原名。
 
@@ -223,6 +223,9 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 | `t219` | **§7.29**：运行时浮点宽度/精度——`%.2f`、`%8.2f`、`%08.2f`、`%+8.2f`、`%-8.2f`、负数、进位；输出保留空格 |
 | `t220` | **§7.29**：v154 运行时字符串宽度/精度——`%5s`、`%-5s`、`%.2s`、`%6.2s`；输出保留空格 |
 | `t221` | **§7.29**：148 目标下运行时整数/浮点字段；`NO-INVARIANT`；输出保留空格 |
+| `t222` | **§7.30**：C99 兼容头——stddef/stdint/limits/float/ctype/stdlib/string/inttypes/assert/math；输出 `3 42 … d` |
+| `t223` | **§7.30**：`NDEBUG` 移除 `assert(0)`；输出 `7` |
+| `t224` | **§7.30**：`_Static_assert`/`static_assert`、`__func__`、`restrict`；输出 `main f 3 3` |
 
 设计背景见 `docs/PLAN_array_layout.md`。
 
@@ -235,7 +238,7 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 在它想守住的那条检查被删掉之后**依然会通过**——这正是删掉的检查不被发现的方式。
 所以每条 `MESSAGE:` 都必须匹配到编译器真实给出的某一条错误。
 
-**负债已清零**（`1584cf3`）。`negative/` 的 87 个用例全部带 `MESSAGE:`，没有
+**负债已清零**（`1584cf3`）。`negative/` 的 88 个用例全部带 `MESSAGE:`，没有
 `KNOWN-GAP`：原先那两个（`ovl_auto.c`、`ovl_pragma.c`）已删除——自动模板 / 重载
 已经实现，`check/t109`、`check/t110` 用正向用例断言同一事实。
 `remote_as_value_refused.c`（§7.3）是第一个真正用上 `NOT-MESSAGE:` 的用例，

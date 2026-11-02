@@ -71,6 +71,11 @@ For grammar introduction (about the features unique to Mindustry-C) and examples
   and runtime integer width, explicit-precision floats and v150+ strings are
   formatted by inline code or the `__printf_*` helpers), `assert`, and
   `<stdbool.h>`/`<stdio.h>`/`<assert.h>` compatibility headers.
+- C99 compatibility headers: `stddef.h`, `stdint.h`, `limits.h`, `float.h`,
+  `ctype.h`, `stdlib.h` (atoi/strtol/div/exit subset), `string.h` extensions,
+  `inttypes.h`, `iso646.h`, `stdalign.h`, `stdnoreturn.h` and `errno.h`.
+  `assert` honours `NDEBUG`; `_Static_assert`/`static_assert`, `__func__` and
+  `restrict` are supported.
 - Declarations: function prototypes (including `auto` patterns), struct/union
   forward declarations (`struct P;`, `typedef struct P P;`), and block-scope
   typedefs, struct definitions, enums and prototypes with shadowing. Nested

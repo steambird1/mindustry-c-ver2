@@ -408,6 +408,8 @@ remote int *p = remote(processor1, qq);      // 指针本身在对端
 - 函数原型：`int f(int);` 可以出现在定义之前，调用方不必先看到函数体。原型与定义按参数类型合并，重复原型合法；两个定义、返回类型不一致会报错。未调用的原型可以没有定义，调用了就会报 “declared but never defined”。`auto` 原型只加入模板条目，不自行展开版本。
 - 块作用域：块内允许函数原型、`struct`/`union` 定义或前向声明、typedef 和 enum。局部 tag/typedef 遮蔽外层同名类型，离开块后恢复；块内原型可以指向之后出现的全局定义。**不允许嵌套函数定义**。
 - enum 成员：enum 类型可以作为 struct/union 成员，也可以作为函数参数和返回值；顶层 enum 与 struct/typedef 按源码顺序处理，成员列表里内联或匿名的 enum 会先注册。enum tag 仍须先声明后使用。
+- `_Static_assert` / `static_assert` 支持常量和 `sizeof` 条件；`__func__` 是当前函数名；`restrict` 被接受并忽略。
+- C99 兼容头已覆盖 `stddef.h`、`stdint.h`、`limits.h`、`float.h`、`ctype.h`、`stdlib.h` 子集、`string.h` 扩展、`inttypes.h`、`iso646.h`、`stdalign.h`、`stdnoreturn.h` 和 `errno.h`。
 - C11 匿名成员（如 `union { union { int a; int b }; int c }`）不支持。
 - 低于 v150 时 `printf` 逐段生成 `print`；常量参数在编译期格式化，运行时整数宽度、显式精度浮点和 v150+ 的字符串宽度/精度可用。`%f` 只有宽度没有精度、v150 以下的运行时 `%s` 宽度/精度会报错。无内存块不等于必须用 `byname`：普通 stdio 程序在低版本也能编译，只有真正需要名字指针或内存时才会报错。
 - 输出参数（`ulocate`、`ucontrol`，以及声明了 `nominalPointers` 的 JS 扩展函数）统一写成 `&x`；旧的 `(volatile T*)` 输出写法已移除。扩展 handler 可用 `cg.nominalPointerOperand(arg)` 取得寄存器名或带回写指令。
@@ -425,7 +427,7 @@ remote int *p = remote(processor1, qq);      // 指针本身在对端
 
 `__MINDUSTRY__` 在编译器模式下预定义为 `1`，`mindc_min.h` 用它区分“真正的 Mindustry-C 编译”和“给 linter 看的普通 C 声明”。`__LINE__` 是当前行号，`__FILE__` 当前展开为 `<source>`。
 
-兼容头：`include/stdbool.h`（`bool`/`true`/`false` 本身是关键字）、`include/stdio.h`（`printf` 是内建）、`include/assert.h`（`assert` 是内建；`NDEBUG` 暂未生效）。
+兼容头：`include/stdbool.h`（`bool`/`true`/`false` 本身是关键字）、`include/stdio.h`（`printf` 是内建，v150+ 还有 `puts`/`putchar`）、`include/assert.h`（`assert` 是内建，支持 `NDEBUG` 和 `static_assert`）、`include/stddef.h`、`stdint.h`、`limits.h`、`float.h`、`ctype.h`、`stdlib.h`、`string.h`、`inttypes.h`、`iso646.h`、`stdalign.h`、`stdnoreturn.h`、`errno.h`。
 
 ### 11.1 `#include "*.js"` 是编译器扩展
 
