@@ -2350,12 +2350,28 @@ export class Parser {
 					typeNode.pointerDepth++;
 				}
 				
+				// 解析数组维度（复合字面量中的 `(int[])` / `(int[3])`）
+				typeNode.arrayDimensions = [];
+				while (this.matchToken(TokenType.LEFT_BRACKET)) {
+					this.consumeToken();
+					let dimension = null;
+					if (!this.matchToken(TokenType.RIGHT_BRACKET)) {
+						dimension = this.parseExpression();
+					}
+					this.expectToken(TokenType.RIGHT_BRACKET);
+					typeNode.arrayDimensions.push(dimension);
+				}
+
 				// 检查是否有右括号
 				if (this.matchToken(TokenType.RIGHT_PAREN)) {
 					this.consumeToken(); // 跳过 ')'
 					
+					// 复合字面量：`(type){ ... }`
+					const isCompoundLiteral = this.matchToken(TokenType.LEFT_BRACE);
 					// 解析被转换的表达式
-					const expression = this.parseCastExpression(); // 递归解析，允许嵌套类型转换
+					const expression = isCompoundLiteral
+						? this.parseInitializerList()
+						: this.parseCastExpression(); // 递归解析，允许嵌套类型转换
 					if (expression) {
 						// 创建类型转换节点
 						const castExpr = new CastExpression(typeNode, expression);
@@ -2363,9 +2379,23 @@ export class Parser {
 						castExpr.setAttribute('pointerDepth', typeNode.pointerDepth);
 						castExpr.setAttribute('qualifiers', typeNode.pointerQualifiers);	// Because they are pointer qualifiers
 						//castExpr.addChild(expression);
+						if (isCompoundLiteral) {
+							castExpr.setAttribute('isCompoundLiteral', true);
+						} else if (expression.type === 'InitializerList') {
+							// 旧写法 `(type)({...})` 也按复合字面量处理
+							castExpr.setAttribute('isCompoundLiteral', true);
+						}
 						castExpr.location = typeNode.location;
 						typeNode.parent = castExpr;
 						expression.parent = castExpr;
+						/*
+						A compound literal is itself a postfix expression:
+						`(struct P){1,2}.y` and `(int[]){1,2,3}[1]` belong to
+						the literal, not to an ordinary cast.
+						*/
+						if (castExpr.getAttribute('isCompoundLiteral') === true) {
+							return this.parsePostfixTail(castExpr);
+						}
 						return castExpr;
 					} else {
 						this.addError('Expected expression after cast type');
@@ -2409,8 +2439,8 @@ export class Parser {
 				// 特殊处理：*和&可能是解引用和取地址操作符
 				let operatorValue = operatorToken.value;
 				
-				// 解析参数
-				const argument = this.parseUnaryExpression();
+				// 解析参数（C 语法：unary-operator cast-expression）
+				const argument = this.parseCastExpression();
 				
 				if (!argument) {
 					this.addError('Expected expression after unary operator');
@@ -2436,6 +2466,16 @@ export class Parser {
 
     parsePostfixExpression() {
         let expression = this.parsePrimaryExpression();
+        return this.parsePostfixTail(expression);
+    }
+
+    /**
+     * Apply `(...)`, `[...]`, `.`, `->` and postfix `++`/`--` to an existing
+     * postfix-capable expression. Compound literals `(type){...}` are postfix
+     * expressions of their own, so the caller can hand the parsed literal to
+     * this helper (`(int[]){1,2,3}[1]`).
+     */
+    parsePostfixTail(expression) {
         if (!expression) return null;
 
         while (true) {

@@ -9084,6 +9084,18 @@ export class Optimizer extends ASTVisitor {
 			case 'MemberExpression':
 				clone.setAttribute('computed', node.getAttribute('computed') || false);
 				break;
+
+			case 'CastExpression':
+				/*
+				A cast carries its type node and operand as FIELDS, not children
+				of the generic walker. Losing them turned an inlined compound
+				literal `(struct P){...}` into its first value.
+				*/
+				clone.typeNode = this.cloneAST(node.typeNode);
+				clone.expression = this.cloneAST(node.expression);
+				clone.dataType = node.dataType;
+				clone.compoundSymbol = node.compoundSymbol;
+				break;
 				
 			default:
 				// 默认处理：复制子节点

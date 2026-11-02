@@ -3455,7 +3455,6 @@ export class CodeGenerator extends ASTVisitor {
 			result.instructionReturn = tmpVar.getAssemblySymbol();
 			result.setAttribute('isPointer', true);
 			const initializerProcessor = (obj, typeLayer) => {
-				
 				const warnedTypes = ['device', 'null_t'];
 				typeLayer = typeLayer ?? obj.dataType;
 				
@@ -4024,6 +4023,9 @@ export class CodeGenerator extends ASTVisitor {
 	 *         everything else is a no-op that just changes the static type.
 	 */
 	visitCastExpression(node) {
+		if (node.getAttribute?.('isCompoundLiteral') === true) {
+			return this.visitCompoundLiteral(node);
+		}
 		const glob = this.glob;
 		if (node.getAttribute('disposeReturn')) {
 			return this.visit(node.expression);
@@ -4054,6 +4056,19 @@ export class CodeGenerator extends ASTVisitor {
 		}
 
 		let value = ExportRet(glob, this.visit(source), sourceType);
+		return this.convertCastValue(value, sourceType, target);
+	}
+
+	/**
+	 * Conversions the Mindustry VM cannot do implicitly. Shared by ordinary
+	 * casts and scalar compound literals.
+	 *
+	 * @param {import('./mindcInfrastructure.js').VariableRet} value
+	 * @param {import('./mindcSemantic.js').TypeInfo?} sourceType
+	 * @param {import('./mindcSemantic.js').TypeInfo?} target
+	 * @returns {import('./mindcInfrastructure.js').VariableRet}
+	 */
+	convertCastValue(value, sourceType, target) {
 		if (!target || !sourceType || this.semantic.isSameType(target, sourceType)) {
 			return value.get();
 		}
@@ -4085,6 +4100,114 @@ export class CodeGenerator extends ASTVisitor {
 			return value.convertTo(target, contentTypeOf(sourceType.name));
 		}
 		return value.get();
+	}
+
+	/**
+	 * Standard compound literal `(type){...}`.
+	 *
+	 * Scalar literals are converted like any cast and need no object unless their
+	 * address is taken. Aggregates have a hidden `__compound_N` symbol; this
+	 * method emits its initialization and returns a reference to that symbol, so
+	 * member access, subscripting, assignment and calls all see a real object.
+	 *
+	 * @param {CastExpression} node
+	 * @returns {import('./mindcInfrastructure.js').VariableRet}
+	 */
+	visitCompoundLiteral(node) {
+		const glob = this.glob;
+		const target = node.dataType;
+		const list = node.expression;
+		const symbol = node.compoundSymbol ?? null;
+
+		if (!symbol) {
+			const child = list?.children?.[0] ?? null;
+			if (!child) return new ImmediateRet(glob, '0', target);
+			const sourceType = child.dataType ?? this.semantic.getExpressionType(child);
+			const value = ExportRet(glob, this.visit(child), sourceType);
+			return this.convertCastValue(value, sourceType, target);
+		}
+
+		const initialization = new Instruction();
+		const kind = target?.kind ?? null;
+		/*
+		A file-scope compound literal object has no function prologue to give
+		it an address. Emit the block/offset setup the way a global declarator
+		does, before anything reads the object.
+		*/
+		if (symbol.isGlobal && symbol.memoryLocation) {
+			const pointerSlot = symbol.accessThroughPointer && kind !== 'array';
+			const addressTarget = pointerSlot
+				? `${symbol.getAssemblySymbol()}.__pointer`
+				: symbol.getAssemblySymbol();
+			initialization.concat(symbol.memoryLocation.getAssignmentInstruction(addressTarget));
+		}
+		/*
+		A local object is given a stack slot by the function prologue, but an
+		initializer list assembles its value in a scratch space because that is
+		how declaration initializers work. Copy the finished value into the
+		object's own slot. A file-scope object already wrote directly into its
+		allocation (`memoryLocation`), so there is nothing to copy.
+		*/
+		const ownsStorage = list?.symbol?.memoryLocation != null;
+		if (kind === 'struct' || kind === 'union') {
+			const initialized = this.visitInitializerList(list);
+			initialization.concat(initialized);
+			if (target.isRegStruct()) {
+				// Registry structs keep one register per member; copy them over.
+				initialization.concat(this.copyStruct(symbol.getAssemblySymbol(),
+					initialized.instructionReturn ?? 'null', target, target));
+			} else if (!ownsStorage && initialized.instructionReturn) {
+				const copyTarget = symbol.accessThroughPointer
+					? `${symbol.getAssemblySymbol()}.__pointer`
+					: symbol.getAssemblySymbol();
+				initialization.concat(this.copyStruct(copyTarget,
+					initialized.instructionReturn, target, target));
+			}
+		} else if (kind === 'array') {
+			const style = this.arrayStyleFor(symbol);
+			if (style && style.type !== 'traditional' && !symbol.memoryLocation) {
+				list.setAttribute('embeddedInRepresentation', true);
+				if (style.type !== 'encoded') {
+					initialization.concat(this.initializeEmbeddedArray(symbol, style, list));
+				}
+			} else {
+				const initialized = this.visitInitializerList(list);
+				initialization.concat(initialized);
+				if (!ownsStorage && initialized.instructionReturn && target.size > 0) {
+					initialization.concat(this.memory.outputMemcpyCall(
+						symbol.getAssemblySymbol(), initialized.instructionReturn,
+						target.size, this.functionManagement));
+				}
+			}
+		} else {
+			const child = list?.children?.[0] ?? null;
+			const sourceType = child?.dataType ?? null;
+			let value = child
+				? ExportRet(glob, this.visit(child), sourceType)
+				: new ImmediateRet(glob, '0', target);
+			value = this.convertCastValue(value, sourceType, target);
+			initialization.concat(this.writeSymbol(symbol, value));
+		}
+
+		const reference = symbolRef(glob, symbol);
+		/*
+		The initialization belongs to the OBJECT, not to whatever temporary
+		the surrounding expression puts it in. Without this, a declarator's
+		`replace_variable` optimisation renames the copy target to the new
+		variable and leaves the object uninitialised.
+		*/
+		reference.setAttribute('disallowReplacement', true);
+		reference.setAttribute('isSymbolic', true);
+		reference.setAttribute('compoundLiteralReference', true);
+		reference.setAttribute('relevantSymbol', symbol);
+		reference.setAttribute('relevantSymbolRead', symbol);
+		if (initialization.instructions.length > 0) {
+			reference.instructions = [
+				...(reference.instructions ?? []),
+				...initialization.instructions
+			];
+		}
+		return reference;
 	}
 
 	/**
@@ -5095,8 +5218,10 @@ export class CodeGenerator extends ASTVisitor {
 	 * @returns {SymbolEntry?}
 	 */
 	arraySymbolOf(node) {
-		if (node.type !== 'Identifier') return null;
-		const symbol = this.currentScope.lookup(node.name);
+		if (node.type !== 'Identifier' && node.getAttribute?.('isCompoundLiteral') !== true) return null;
+		const symbol = (node.type === 'Identifier')
+			? this.currentScope.lookup(node.name)
+			: (node.compoundSymbol ?? null);
 		if (!symbol) return null;
 		const type = symbol.myType();
 		if (!type || type.kind !== 'array') return null;
@@ -5238,6 +5363,13 @@ export class CodeGenerator extends ASTVisitor {
 			const arraySymbol = this.arraySymbolOf(objectRoot);
 			if (arraySymbol) {
 				/*
+				A compound literal array that is held in registers still has to
+				be filled before an element is read. Evaluating the literal here
+				emits exactly those writes and returns a (discarded) reference.
+				*/
+				const compoundSetup = objectRoot.getAttribute?.('isCompoundLiteral') === true
+					? this.visit(objectRoot) : null;
+				/*
 				Hand over the WHOLE subscript value, not just its name: the name
 				alone loses the instructions that computed it, so `b[i + 4]`
 				would read from an uninitialised register.
@@ -5246,6 +5378,12 @@ export class CodeGenerator extends ASTVisitor {
 				const subscriptValue = ExportRet(glob, subscript,
 					node.children[1].dataType ?? null);
 				const element = this.arrayRetFor(arraySymbol, null).element(subscriptValue);
+				if (compoundSetup && compoundSetup.instructions?.length) {
+					element.instructions = [
+						...compoundSetup.instructions,
+						...(element.instructions ?? [])
+					];
+				}
 				element.setAttribute('isNearPointer', isNearPointerHere);
 				element.setAttribute('isFromRegStruct', false);
 				return element;
@@ -5267,7 +5405,12 @@ export class CodeGenerator extends ASTVisitor {
 		}
 		const objectValue = (objectRoot === node.children[0]) ? object.get()
 			: this.getLValue(objectRoot).get();
-		setup.concat(objectValue);	// Deferred evaluation
+		/*
+		A PointerRet already carries its own setup instructions, and `offset()`
+		below reuses them. Concatenating it here as well emitted every compound
+		literal initializer twice.
+		*/
+		if (!(objectValue instanceof PointerRet)) setup.concat(objectValue);	// Deferred evaluation
 
 		/**
 		 * The address of the object itself: `get()` already made sure that a pointer
@@ -5365,6 +5508,14 @@ export class CodeGenerator extends ASTVisitor {
 
 	getLValue(left) {
 		const glob = this.glob;
+		/*
+		`(struct P){...}.x = 1` / `*(&(int){3})`: a compound literal is an
+		lvalue in C. Its generator path already produced the initialization
+		instructions together with a reference to the hidden object.
+		*/
+		if (left.getAttribute?.('isCompoundLiteral') === true) {
+			return this.visit(left);
+		}
 		switch (left.type) {
 			case 'Identifier': {
 				const identity = this.currentScope.lookup(left.name);
@@ -5442,7 +5593,24 @@ export class CodeGenerator extends ASTVisitor {
 		const lval = this.getLValue(left);
 		if (returnOnlyPointer) {
 			try {
-				return traditional ? lval : lval.address();
+				const address = traditional ? lval : lval.address();
+				/*
+				`address()` builds a fresh ret; the initialization that belongs
+				to a compound literal must not be separated from it (a declarator
+				would otherwise rename the object to the new variable). Only a
+				compound literal needs this: propagating it for every variable
+				made `&x` materialise a pointer temporary and changed existing
+				name-pointer output.
+				*/
+				if (lval.getAttribute?.('compoundLiteralReference') === true) {
+					['disallowReplacement', 'isSymbolic', 'compoundLiteralReference',
+						'relevantSymbol', 'relevantSymbolRead'].forEach(key => {
+						if (lval.getAttribute?.(key) !== undefined) {
+							address.setAttribute(key, lval.getAttribute(key));
+						}
+					});
+				}
+				return address;
 			} catch (e) {
 				if (e instanceof InfrastructureNotImplementedExpection) {
 					this.addError(String(e.message).replace(/^Feature not implemented in infrastructure:\s*/, ''), left);
@@ -5788,7 +5956,7 @@ export class CodeGenerator extends ASTVisitor {
 		*/
 		if (!!slotType && ['struct', 'union'].includes(slotType.kind)
 			&& !(slotType.qualifiers ?? []).includes('remote')) {
-			const srcType = argSymbol?.myType?.() ?? null;
+			const srcType = argSymbol?.myType?.() ?? value.type ?? argNode?.dataType ?? null;
 			const srcName = argSymbol?.getAssemblySymbol?.()
 				?? value.instructionReturn ?? null;
 			if (srcName && srcType && ['struct', 'union'].includes(srcType.kind)) {

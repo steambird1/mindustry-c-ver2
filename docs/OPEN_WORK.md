@@ -20,8 +20,8 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 239 passed, 0 failed (141 shape assertions, 1055 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 89 passed, 0 failed |
+| `node ../tools/check.mjs` | 240 passed, 0 failed (141 shape assertions, 1060 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 92 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 10 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
@@ -85,6 +85,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | runtime `printf` width/precision (§7.29) | **done**; inline int width, `__printf_int/float/string`, tests t218–t221 | §7.29 |
 | C99 headers + static assert/__func__/restrict (§7.30) | **done**; compatibility headers, NDEBUG, declaration touches, tests t222–t224 | §7.30 |
 | designated initializers + macro #/##/__VA_ARGS__ (§7.31) | **done**; designator normalization, macro operator expansion, tests t225/t226 | §7.31 |
+| standard compound literals (§7.32) | **done**; scalar/aggregate/array forms, hidden objects, postfix access and address-of, test t227 | §7.32 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -819,21 +820,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 623 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 627 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 623 under `testers/unit_tests`, every one of
+bring the count to 627 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 239 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 89 | `negative/` |
+| `check.mjs` | 240 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `negative.mjs` | 92 | `negative/` |
 | `nomem.mjs` | 10 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-239 + 10 + 89 + 10 + 275 = 623. The caveat that replaces "no runner" is weaker but real:
+240 + 10 + 92 + 10 + 275 = 627. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -1703,3 +1704,33 @@ called `f` even when `a` was false.
   member.
 - Compound literals remain the next item; their expression/storage semantics
   are not changed by this batch.
+
+### 7.32 Standard compound literals
+
+- `(type){...}` is parsed as a cast whose source is an initializer list, marked
+  `isCompoundLiteral`; the old `(type)({...})` spelling is marked the same way.
+  A bare `{...}` keeps its old `null_t` meaning.
+- Scalar literals (`(int){3}`, `(float){...}`, pointer types) produce a value,
+  converted exactly like an ordinary cast. `&(int){3}` first allocates a hidden
+  object so the address is stable.
+- Struct, union and array literals use a hidden `__compound_N` symbol in the
+  current scope. Local objects get a function stack slot; file-scope objects get
+  the same block/offset setup as a global declarator. The initializer is built
+  with the existing initializer machinery and copied into the object when
+  needed. `&(T){...}` forces a real memory object (`memoryVariantOf` for structs).
+- Compound literals are postfix expressions: `(struct P){1,2}.y` and
+  `(int[]){1,2,3}[1]` parse without extra parentheses. `sizeof` sees the target
+  type, and an open array dimension is inferred from the initializer, including
+  `[index]` designators.
+- Designated initializers and compound literals share normalization:
+  `(struct P){.y = 2}` and `(int[5]){[2] = 7}` zero-fill omitted slots.
+- Inlining copies a cast's `typeNode`, `dataType` and compound-literal symbol, so
+  an argument such as `f((struct P){1,2})` keeps the whole literal instead of
+  collapsing to its first value.
+- Cases: t227 (scalar/old spelling, register and memory structs, designated
+  structs, arrays, direct postfix access, function arguments, address-of,
+  `sizeof`, file-scope literals); negatives for multiple scalar values, an
+  over-long array and an unknown designated member.
+- Current limits: nested designators and union designators (also rejected for
+  declarations), and multidimensional array *pointers* (`int (*p)[3]`) are not
+  supported.

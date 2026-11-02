@@ -3911,7 +3911,12 @@ export class SemanticAnalyzer extends ASTVisitor {
 			An unspecified dimension (`int p[]`) has no node to read a value
 			from -- it is exactly the "any size" the caller is allowed to pass.
 			*/
-			ptrSuffix += ' ' + typeNode.arrayDimensions.map(dim => `[${dim?.value ?? ''}]`).join('');
+			ptrSuffix += ' ' + typeNode.arrayDimensions.map(dim => {
+				if (!dim) return '[]';
+				const folded = this.constantCaseValue(dim);
+				const value = folded !== undefined ? Math.trunc(folded) : (dim.value ?? '');
+				return `[${value}]`;
+			}).join('');
 		}
 		
         // 如果是TypeSpecifier节点
@@ -4011,10 +4016,150 @@ export class SemanticAnalyzer extends ASTVisitor {
 	 * @param {CastExpression} node 
 	 */
 	visitCastExpression(node) {
+		if (node.getAttribute?.('isCompoundLiteral') === true) {
+			this.visitCompoundLiteral(node);
+			return;
+		}
 		node.dataType = this.getExpressionType(node);
 		this.visit(node.expression, {
 			givenType: node.dataType
 		});
+	}
+
+	/**
+	 * A standard compound literal `(type){...}`.
+	 *
+	 * A scalar literal is just its value, converted to the target type. A
+	 * struct, union or array literal needs an object with automatic storage
+	 * duration: the hidden `__compound_N` symbol is declared in the current
+	 * scope, so the generator gives it a stack slot and the initializer writes
+	 * into it. `&(T){...}` marks that symbol addressed, which forces a real
+	 * memory object.
+	 *
+	 * @param {CastExpression} node
+	 */
+	visitCompoundLiteral(node) {
+		const target = this.getExpressionType(node);
+		node.dataType = target;
+		if (!target) {
+			this.visit(node.expression);
+			return;
+		}
+		const list = node.expression;
+		const children = Array.isArray(list?.children) ? list.children : [];
+		const isAggregate = target.kind === 'array'
+			|| target.kind === 'struct' || target.kind === 'union';
+
+		if (!isAggregate) {
+			if (children.length !== 1) {
+				this.addError(
+					`A compound literal for '${this.typeToString(target)}' needs exactly one value`,
+					node.location);
+			}
+			if (children.some(child => child.getAttribute?.('initializerDesignators')?.length)) {
+				this.addError('A scalar compound literal cannot use a designator', node.location);
+			}
+			children.forEach(child => this.visit(child));
+			list.dataType = target;
+			/*
+			`&(int){3}` still needs an object to point at, even though an
+			ordinary `(int){3}` is only a value. The parser marks the cast
+			before it is visited (see `visitUnaryExpression`).
+			*/
+			if (node.getAttribute('compoundNeedsStorage') === true) {
+				node.compoundSymbol = this.createCompoundLiteralSymbol(node, target);
+				list.symbol = node.compoundSymbol;
+			}
+			return;
+		}
+
+		// `(int[]){...}`: the initializer supplies the missing dimensions.
+		if (target.kind === 'array') this.resolveCompoundArrayType(node, target, list);
+
+		const symbol = this.createCompoundLiteralSymbol(node, target);
+		list.symbol = symbol;
+		this.visit(list, {
+			givenType: target,
+			givenSymbol: symbol,
+			compoundLiteral: true
+		});
+	}
+
+	/**
+	 * Create the hidden object behind an aggregate compound literal.
+	 *
+	 * @param {CastExpression} node
+	 * @param {TypeInfo} type
+	 * @returns {SymbolEntry}
+	 */
+	createCompoundLiteralSymbol(node, type) {
+		this.compoundLiteralCounter = (this.compoundLiteralCounter ?? 0) + 1;
+		const name = `__compound_${this.compoundLiteralCounter}`;
+		const symbol = new SymbolEntry(name, {
+			type,
+			isConst: type.isConst?.() === true,
+			isVolatile: type.isVolatile?.() === true,
+			isExtern: false
+		}, this.currentScope, 'variable', node.location, type.size);
+		symbol.isCompoundLiteral = true;
+		symbol.used = true;
+		symbol.isGlobal = this.currentScope === this.globalScope;
+		this.currentScope.addSymbol(symbol);
+		node.compoundSymbol = symbol;
+		return symbol;
+	}
+
+	/**
+	 * Fill in the open dimensions of `(int[]){...}` (or nested variants) from
+	 * the initializer list. Designators such as `(int[]){[2] = 7}` also extend
+	 * the inferred length.
+	 *
+	 * @param {CastExpression} node
+	 * @param {TypeInfo} target
+	 * @param {ASTNode} list
+	 */
+	resolveCompoundArrayType(node, target, list) {
+		const sizes = target.arraySize ?? [];
+		if (!sizes.some(size => Number.isNaN(size) || size === null || size === undefined)) return;
+		let level = list;
+		for (let i = 0; i < sizes.length; i++) {
+			if (sizes[i] === null || sizes[i] === undefined || Number.isNaN(sizes[i])) {
+				const count = this.compoundInitializerCount(level);
+				if (count <= 0) {
+					this.addError('Cannot deduce the size of a compound literal array', node.location);
+					sizes[i] = 1;
+				} else {
+					sizes[i] = count;
+				}
+			}
+			level = this.descendInitializer(level);
+		}
+		target.arraySize = sizes;
+		const elements = sizes.reduce((total, size) => total * size, 1);
+		const elementSize = target.pointerTo?.size ?? 1;
+		target.size = elements * elementSize;
+	}
+
+	/**
+	 * Number of initializer items at one level, counting `.field` designators
+	 * (which do not change the count) and `[index]` designators (which can make
+	 * the array longer than the number of written items).
+	 *
+	 * @param {ASTNode?} list
+	 * @returns {number}
+	 */
+	compoundInitializerCount(list) {
+		const items = list?.children ?? [];
+		let count = items.length;
+		items.forEach(item => {
+			const designators = item.getAttribute?.('initializerDesignators') ?? [];
+			const index = designators.find(designator => designator.kind === 'index');
+			if (!index) return;
+			const value = this.constantCaseValue(index.expression);
+			if (value === undefined) return;
+			count = Math.max(count, Math.trunc(value) + 1);
+		});
+		return count;
 	}
 
     visitBinaryExpression(node) {
@@ -4055,6 +4200,14 @@ export class SemanticAnalyzer extends ASTVisitor {
     }
 
     visitUnaryExpression(node) {
+        /*
+        `&(int){3}`: the scalar form normally produces no object at all, so
+        tell the cast to allocate one before it is visited.
+        */
+        if (node.operator === '&'
+            && node.argument?.getAttribute?.('isCompoundLiteral') === true) {
+            node.argument.setAttribute('compoundNeedsStorage', true);
+        }
         this.visit(node.argument);
 		const argType = this.getExpressionType(node.argument);
 		
@@ -4832,6 +4985,33 @@ export class SemanticAnalyzer extends ASTVisitor {
 			memory here would therefore be pure waste.
 			*/
 			this.markVariableAsAddressed(object);
+		} else if (node.type === 'CastExpression'
+			&& node.getAttribute?.('isCompoundLiteral') === true) {
+			/*
+			`&(struct P){...}` needs a REAL object: the aggregate cannot stay a
+			group of registers when its address escapes. A hidden compound
+			literal symbol is already attached by `visitCompoundLiteral`; the
+			only thing left is to force it into memory (for a struct, the
+			memory copy of its type).
+			*/
+			const symbol = node.compoundSymbol ?? null;
+			if (symbol) {
+				symbol.isAddressed = true;
+				const symbolType = symbol.myType?.() ?? null;
+				if (symbolType && ['struct', 'union'].includes(symbolType.kind)) {
+					const variant = this.memoryVariantOf(symbolType);
+					if (variant !== symbolType) {
+						if (symbol.type && typeof symbol.type === 'object' && symbol.type.type) {
+							symbol.type.type = variant;
+						} else {
+							symbol.type = variant;
+						}
+						node.dataType = variant;
+						if (node.expression?.dataType) node.expression.dataType = variant;
+					}
+				}
+				symbol.accessThroughPointer = true;
+			}
 		} else if (node.type === 'CastExpression') {
 			/*
 			`(T*)x` was the old output-parameter spelling. That use is removed:
@@ -8219,14 +8399,22 @@ export class SemanticAnalyzer extends ASTVisitor {
 	 * Fill positional slots from C99 designators (`.field =`, `[index] =`).
 	 * Existing positional lists are untouched.
 	 */
-	applyInitializerDesignators(node, givenType) {
-		if (!node?.children?.some(child => child?.getAttribute?.('initializerDesignators')?.length)) return;
+	applyInitializerDesignators(node, givenType, forcePad = false) {
+		if (!givenType || !['struct', 'union', 'array'].includes(givenType.kind)) return;
+		const hasDesignators = node?.children?.some(child => child?.getAttribute?.('initializerDesignators')?.length);
+		if (!forcePad && !hasDesignators) return;
 		if (!givenType) {
 			this.addError('A designated initializer needs a target type', node.location);
 			return;
 		}
 		if (givenType.kind === 'union') {
-			this.addError('Designated initializers for unions are not supported yet', node.location);
+			if (hasDesignators) {
+				this.addError('Designated initializers for unions are not supported yet', node.location);
+			}
+			/*
+			A union initializes its FIRST member. Adding zero initializers for
+			the other members would overwrite it, because they all share offset 0.
+			*/
 			return;
 		}
 		const visibleMembers = (givenType.members ?? []).filter(m => m.isBitfieldStorage !== true);
@@ -8318,7 +8506,9 @@ export class SemanticAnalyzer extends ASTVisitor {
 	}
 
 	visitInitializerList(node, param) {
-		if (param?.givenType) this.applyInitializerDesignators(node, param.givenType);
+		if (param?.givenType) {
+			this.applyInitializerDesignators(node, param.givenType, param.compoundLiteral === true);
+		}
 		const declaratorTypes = ['VariableDeclarator', 'Declarator'];
 		node.dataType = this.typeTable.get('null_t').duplicate();	// size might be modified
 		node.dataType.size = 0;
@@ -8327,7 +8517,8 @@ export class SemanticAnalyzer extends ASTVisitor {
 			let further = undefined;
 			if (param && param.givenType) {
 				further = {
-					givenType: param.givenType.extractKth(index)
+					givenType: param.givenType.extractKth(index),
+					compoundLiteral: param.compoundLiteral === true
 				};
 			}
 			this.visit(child, further);
@@ -8845,6 +9036,11 @@ export class SemanticAnalyzer extends ASTVisitor {
 
         // 数组下标是左值
         if (node.type === 'MemberExpression' && node.getAttribute('computed')) {
+            return true;
+        }
+
+        // 复合字面量本身是左值（C99 6.5.2.5）
+        if (node.type === 'CastExpression' && node.getAttribute?.('isCompoundLiteral') === true) {
             return true;
         }
 

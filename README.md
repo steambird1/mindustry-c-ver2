@@ -63,7 +63,8 @@ For grammar introduction (about the features unique to Mindustry-C) and examples
   `for`/`while`/`do-while`/`switch`, `break`/`continue`/`return`.
 - C99 conveniences: `//` comments, `bool`/`true`/`false`, `inline`,
   declarations in `for` initializers, designated initializers (`.field =`,
-  `[index] =`), and function-like macros with `#`, `##` and `__VA_ARGS__`.
+  `[index] =`), standard compound literals `(type){...}`, and function-like
+  macros with `#`, `##` and `__VA_ARGS__`.
 - C surface: real `enum` (including `typedef enum`, and enum-typed struct/union
   members and function parameters/returns), `typedef struct { ... }
   Name;` (anonymous, tagged, self-referential), short-circuit `&&`/`||` and
