@@ -199,6 +199,37 @@ export function widthOfType(type) {
 	return 1;
 }
 
+/**
+ * Whether a pointer stores the NAME of its target instead of a block/position.
+ * @param {any} type
+ * @returns {boolean}
+ */
+export function isNamePointerType(type) {
+	return !!type && type.isTypeInfo === true && type.kind === 'pointer'
+		&& ((type.qualifiers ?? []).includes('byname')
+			|| (type.qualifiers ?? []).includes('byvaluename'));
+}
+
+/**
+ * How many registers one array element occupies when it stays out of memory.
+ *
+ * Only single-cell elements and `byname` pointers are register-compatible for
+ * now. Ordinary pointers (block/pos) and aggregates return null and have to
+ * use the memory layout.
+ *
+ * @param {any} type
+ * @returns {{kind: 'cell'|'name-pointer', components: number}?}
+ */
+export function registerElementLayoutOf(type) {
+	if (!type || type.isTypeInfo !== true) return null;
+	if (type.kind === 'pointer') {
+		return isNamePointerType(type)
+			? { kind: 'name-pointer', components: 1 } : null;
+	}
+	if (['struct', 'union', 'array'].includes(type.kind)) return null;
+	return { kind: 'cell', components: 1 };
+}
+
 /* ------------------------------------------------------------------ *
  * Exceptions
  * ------------------------------------------------------------------ */
@@ -1975,6 +2006,10 @@ class DividedSlotRet extends VariableRet {
 			if (index < 0 || index >= this.array.length) {
 				throw new InfrastructureNotImplementedExpection('subscript out of range');
 			}
+			if (isNamePointerType(this.type)) {
+				return new NamePointerRet(glob, this.instructions,
+					this.array.elementName(index), this.type, false);
+			}
 			return valueClassOf(glob, this.type).create(glob, this.instructions,
 				this.array.elementName(index), this.type, false);
 		}
@@ -1990,9 +2025,14 @@ class DividedSlotRet extends VariableRet {
 			nothing at all.
 			*/
 			const target = glob.tmp(this.type);
+			const instructions = [
+				this.instructions, call, InstructionBuilder.set(target, '__arrret')
+			];
+			if (isNamePointerType(this.type)) {
+				return new NamePointerRet(glob, instructions, nameOf(target), this.type, true);
+			}
 			return valueClassOf(glob, this.type).create(glob,
-				[this.instructions, call, InstructionBuilder.set(target, '__arrret')],
-				target, this.type, true);
+				instructions, target, this.type, true);
 		}
 		const target = glob.tmp(this.type);
 		const parts = [this.instructions,
@@ -2000,6 +2040,9 @@ class DividedSlotRet extends VariableRet {
 		for (let i = 1; i < this.array.length; i++) {
 			parts.push(InstructionBuilder.selectx(target, `equal ${this.operand.name} ${i}`,
 				this.array.elementName(i), target));
+		}
+		if (isNamePointerType(this.type)) {
+			return new NamePointerRet(glob, parts, nameOf(target), this.type, true);
 		}
 		return valueClassOf(glob, this.type).create(glob, parts, target, this.type, true);
 	}
@@ -2011,24 +2054,34 @@ class DividedSlotRet extends VariableRet {
 	 */
 	set(other) {
 		const glob = this.glob;
-		const value = other.get().convertTo(this.type ?? other.type);
+		const rawValue = other.get();
+		const value = isNamePointerType(this.type)
+			? rawValue : rawValue.convertTo(this.type ?? other.type);
 		if (this.operand.constant) {
 			const index = this.operand.value;
 			if (index < 0 || index >= this.array.length) {
 				throw new InfrastructureNotImplementedExpection('subscript out of range');
 			}
+			const targetName = this.array.elementName(index);
+			const instructions = [this.instructions, value.instructions,
+				InstructionBuilder.set(targetName, value.name)];
+			if (isNamePointerType(this.type)) {
+				return new NamePointerRet(glob, instructions, value.name, this.type, false);
+			}
 			return valueClassOf(glob, this.type).create(glob,
-				[this.instructions, value.instructions,
-					InstructionBuilder.set(this.array.elementName(index), value.name)],
-				value.name, this.type, false);
+				instructions, value.name, this.type, false);
 		}
 		const helper = this.array.useAccessHelper
 			? ensureArrayAccessHelper(glob, this.array, 'set') : null;
 		if (helper) {
 			const call = glob.funcReg.getFunctionCall(helper,
 				new Map([['__arridx', this.operand.name], ['__arrval', value.name]]), null);
+			const instructions = [this.instructions, value.instructions, call];
+			if (isNamePointerType(this.type)) {
+				return new NamePointerRet(glob, instructions, value.name, this.type, false);
+			}
 			return valueClassOf(glob, this.type).create(glob,
-				[this.instructions, value.instructions, call], value.name, this.type, false);
+				instructions, value.name, this.type, false);
 		}
 		const chosen = glob.tmp(null);
 		const parts = [this.instructions, value.instructions,
@@ -2038,6 +2091,9 @@ class DividedSlotRet extends VariableRet {
 				`"${this.array.elementName(i)}"`, chosen));
 		}
 		parts.push(InstructionBuilder.write(value.name, '@this', chosen));
+		if (isNamePointerType(this.type)) {
+			return new NamePointerRet(glob, parts, value.name, this.type, false);
+		}
 		return valueClassOf(glob, this.type).create(glob, parts, value.name, this.type, false);
 	}
 }
@@ -3802,20 +3858,30 @@ class ArrayHandleSlotRet extends VariableRet {
 		const got = this.extractGet();
 		const call = glob.funcReg.getRawFunctionCall(got.name,
 			new Map([['__arridx', this.operand.name]]), false, null);
+		const instructions = [
+			this.instructions, got.instruction, call, InstructionBuilder.set(tn, '__arrret')
+		];
+		if (isNamePointerType(this.type)) {
+			return new NamePointerRet(glob, instructions, tn, this.type, true);
+		}
 		return valueClassOf(glob, this.type).create(glob,
-			[this.instructions, got.instruction, call, InstructionBuilder.set(tn, '__arrret')],
-			tn, this.type, true);
+			instructions, tn, this.type, true);
 	}
 
 	set(other) {
 		const glob = this.glob;
-		const value = other.get().convertTo(this.type ?? other.type);
+		const rawValue = other.get();
+		const value = isNamePointerType(this.type)
+			? rawValue : rawValue.convertTo(this.type ?? other.type);
 		const got = this.extractSet();
 		const call = glob.funcReg.getRawFunctionCall(got.name,
 			new Map([['__arridx', this.operand.name], ['__arrval', value.name]]), false, null);
+		const instructions = [this.instructions, got.instructions, value.instructions, call];
+		if (isNamePointerType(this.type)) {
+			return new NamePointerRet(glob, instructions, value.name, this.type, false);
+		}
 		return valueClassOf(glob, this.type).create(glob,
-			[this.instructions, got.instructions, value.instructions, call],
-			value.name, this.type, false);
+			instructions, value.name, this.type, false);
 	}
 }
 

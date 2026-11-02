@@ -23,6 +23,7 @@ import { findRecursiveFunctions } from "./mindcBase.js";
 import { ensureMemspHelper, remoteDeviceRegOf, remoteNameRegOf, RemotePointerRet, RemoteArrayRet, RemoteStoredPointerRet, LookupArrayRet, NameStructPointerRet, NameStructDerefRet,
 	RemoteStructPointerRet,
 	NameArrayRet, ArrayHandleRet, ensureArrayHandle, arrayLengthOfType, componentCountOf, isFlatComponentType, CATEGORY_ALIASES, Globals, VariableRet, ImmediateRet, BasicRet, IntRet, BitfieldRet, BoolRet, FloatRet, ContentRet, packHandle, HANDLE_MASK, HANDLE_FIELD_BITS, HANDLE_LENGTH_MASK, HANDLE_LENGTH_SHIFT,
+	isNamePointerType, registerElementLayoutOf,
 	TraditionalArrayRet,
 	PointerRet, RefPointerRet, MemPointerRet, VolatilePointerRet, MemoryRefRet, StructRefRet,
 	symbolRef, ExportRet, valueClassOf, readThrough, writeThrough, pointerStep,
@@ -3050,8 +3051,7 @@ export class CodeGenerator extends ASTVisitor {
 		const elementType = this.semantic?.innermostArrayElementOf
 			? this.semantic.innermostArrayElementOf(symbol.myType?.() ?? null)
 			: null;
-		if (elementType
-			&& ['pointer', 'struct', 'union', 'array'].includes(elementType.kind)) {
+		if (elementType && !registerElementLayoutOf(elementType)) {
 			this.addError(
 				`A register/lookup array needs single-cell elements: `
 				+ `'${symbol.name}' has element type '${this.semantic.typeToString(elementType)}'`,
@@ -5032,6 +5032,7 @@ export class CodeGenerator extends ASTVisitor {
 		while (current && current.isTypeInfo && current.kind === 'array') {
 			current = current.pointerTo ?? null;
 		}
+		if (isNamePointerType(current)) return 1;
 		return Number(current?.size) || 1;
 	}
 
@@ -5168,8 +5169,7 @@ export class CodeGenerator extends ASTVisitor {
 		if (symbol.isVolatile) return 'a volatile array must be kept in memory';
 		if (symbol.myType()?.isVolatile?.()) return 'a volatile array must be kept in memory';
 		const elementType = this.semantic?.innermostArrayElementOf?.(symbol.myType?.() ?? null) ?? null;
-		if (elementType
-			&& ['pointer', 'struct', 'union', 'array'].includes(elementType.kind)) {
+		if (elementType && !registerElementLayoutOf(elementType)) {
 			return 'a complex element array must be kept in memory';
 		}
 		if (this.isInRecursiveFunction(symbol)) {
@@ -5183,6 +5183,19 @@ export class CodeGenerator extends ASTVisitor {
 		An inlined parameter has no style of its own: it borrows the caller's.
 		*/
 		if (symbol?.arrayAliasOf) return this.arrayStyleFor(symbol.arrayAliasOf);
+		/*
+		A `byname` pointer element is one register holding a target name. Keep
+		these arrays in the register layout by default; the memory layout would
+		need a separate name-pointer-in-memory representation.
+		*/
+		const elementType = this.semantic?.innermostArrayElementOf?.(symbol?.myType?.() ?? null) ?? null;
+		const elementLayout = elementType ? registerElementLayoutOf(elementType) : null;
+		if (elementLayout?.kind === 'name-pointer'
+			&& !symbol?.requestedArrayImplementation) {
+			symbol.chosenArrayStyle = { type: 'embedded', implement: 'divided',
+				reason: 'byname pointer elements' };
+			return symbol.chosenArrayStyle;
+		}
 		if (symbol?.chosenArrayStyle) {
 			/*
 			Semantic analysis chose this layout from the facts it can see, and
