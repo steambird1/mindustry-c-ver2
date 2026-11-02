@@ -20,10 +20,10 @@ import { Instruction, InstructionBuilder, InstructionReferrer, MemoryBlock, Memo
  } from "./mindcGeneratorBase.js";
 import { findRecursiveFunctions } from "./mindcBase.js";
 
-import { ensureMemspHelper, remoteDeviceRegOf, remoteNameRegOf, RemotePointerRet, RemoteArrayRet, RemoteStoredPointerRet, LookupArrayRet, NameStructPointerRet, NameStructDerefRet,
+import { ensureMemspHelper, remoteDeviceRegOf, remoteNameRegOf, RemotePointerRet, RemoteArrayRet, RemoteStoredPointerRet, RemoteStructRet, RemoteNamePointerRet, LookupArrayRet, NameStructPointerRet, NameStructDerefRet,
 	RemoteStructPointerRet,
 	NameArrayRet, ArrayHandleRet, ensureArrayHandle, arrayLengthOfType, componentCountOf, isFlatComponentType, CATEGORY_ALIASES, Globals, VariableRet, ImmediateRet, BasicRet, IntRet, BitfieldRet, BoolRet, FloatRet, ContentRet, packHandle, HANDLE_MASK, HANDLE_FIELD_BITS, HANDLE_LENGTH_MASK, HANDLE_LENGTH_SHIFT,
-	isNamePointerType, registerElementLayoutOf,
+	isNamePointerType, registerElementLayoutOf, structStorageLeafPathsOf,
 	TraditionalArrayRet,
 	PointerRet, RefPointerRet, MemPointerRet, VolatilePointerRet, MemoryRefRet, StructRefRet,
 	symbolRef, ExportRet, valueClassOf, readThrough, writeThrough, pointerStep,
@@ -1581,7 +1581,15 @@ export class CodeGenerator extends ASTVisitor {
 	 * @remarks This should be used for most of the scenes (hardly is it necessary to write as well)
 	 */
 	visitAndRead(node, param = null) {
-		return this.convertInstructionForReading(this.visit(node, param), node.dataType && node.dataType.isPointerImpl());
+		const value = this.visit(node, param);
+		/*
+		A remote struct is a group of remote registers, not a local value.
+		Reading it means materializing every storage leaf into a temporary
+		struct (never using the device register as the struct base).
+		*/
+		return this.convertInstructionForReading(
+			value?.getAttribute?.('isRemoteStruct') ? value.get() : value,
+			node.dataType && node.dataType.isPointerImpl());
 		// Note: then it reads a ORIGINAL VALUE
 		// And besides: This won't dereference a pointer if it should appear to be one to the user (i.e. implementAsPointer)
 		// but will dereference those accessed through pointer!
@@ -2060,6 +2068,47 @@ export class CodeGenerator extends ASTVisitor {
 		}
 	}
 	
+	/**
+	 * Emit the runtime device check for storing a `byname` pointer into a
+	 * remote struct member.
+	 *
+	 * A local `byname` pointer implicitly belongs to `@this`; a remote pointer
+	 * carries its own device register. The target member belongs to the
+	 * remote element's owner. Writing a name from another processor would make
+	 * the stored name meaningless there.
+	 *
+	 * `#pragma checkRemote()` disables the check; `#pragma
+	 * checkRemote(handler)` calls `handler` and stops on mismatch. Without the
+	 * pragma a fixed `__error` message is written and the program stops.
+	 *
+	 * @param {string?} sourceDevice
+	 * @param {string?} targetDevice
+	 * @returns {Instruction}
+	 */
+	remoteDeviceCheck(sourceDevice, targetDevice) {
+		const option = this.compiler?.extraConfig?.getAttribute('optimizeOption') ?? {};
+		const mode = option.checkRemote;
+		if (mode === false || !sourceDevice || !targetDevice
+			|| sourceDevice === targetDevice) {
+			return new Instruction();
+		}
+		const ok = this.glob.tmp(null, 'bool');
+		const jump = InstructionBuilder.jump('{remote_ok}', 'equal', ok, 'true');
+		const result = new Instruction([
+			InstructionBuilder.op('strictEqual', ok, sourceDevice, targetDevice),
+			jump
+		]);
+		if (typeof mode === 'string' && mode.length > 0) {
+			result.concat(this.functionManagement.getFunctionCall(mode, new Map(), null));
+			result.concat(InstructionBuilder.end());
+		} else {
+			result.concat(InstructionBuilder.set('__error', '"remote device mismatch"'));
+			result.concat(InstructionBuilder.end());
+		}
+		result.concat(new InstructionReferrer(jump, 'remote_ok', 0));
+		return result;
+	}
+
 	/**
 	 * Store a registry-struct initializer value straight into a GLOBAL struct's
 	 * data cells.
@@ -2834,9 +2883,23 @@ export class CodeGenerator extends ASTVisitor {
 			const elementType = this.semantic?.innermostArrayElementOf
 				? this.semantic.innermostArrayElementOf(rootType)
 				: (rootType?.pointerTo ?? null);
-			const flatElement = !!elementType
-				&& !['pointer', 'struct', 'union', 'array'].includes(elementType.kind);
-			if (!flatElement) continue;
+			const elementLayout = elementType ? registerElementLayoutOf(elementType) : null;
+			if (!elementLayout) continue;
+			/*
+			A struct element has one register per storage leaf. Export every
+			leaf name; visible bitfields are represented by their `__bitsN`
+			storage cell, and nested structs recurse.
+			*/
+			if (elementLayout.kind === 'struct') {
+				const paths = structStorageLeafPathsOf(elementType);
+				for (let i = 0; i < length; i++) {
+					for (const path of paths) {
+						push(`${assembly}_${i}${path.map(part => `.${part}`).join('')}`);
+					}
+				}
+				continue;
+			}
+			if (elementLayout.kind !== 'cell') continue;
 			for (let i = 0; i < length; i++) push(`${assembly}_${i}`);
 		}
 		return names;
@@ -5793,6 +5856,14 @@ export class CodeGenerator extends ASTVisitor {
 				return object.element(Number(indexNode.value));
 			}
 			return object.element(this.visitAndRead(indexNode));
+		}
+		/*
+		A struct element of a remote array: every member is a remote register.
+		Bitfields, nested structs and `byname` members are resolved by the
+		remote struct reference itself.
+		*/
+		if (object instanceof RemoteStructRet) {
+			return object.member(node.children[1].name, node.dataType);
 		}
 
 		// Registry struct: every member is a variable of its own, named `X.member`

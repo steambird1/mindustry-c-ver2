@@ -518,6 +518,15 @@ export class Compiler {
 						*/
 						const handler = info.substring(info.indexOf('(') + 1, info.lastIndexOf(')')).trim();
 						optimizerConfig.stackCheck = handler === '' ? false : handler;
+					} else if (info.startsWith("checkRemote(")) {
+						/*
+						#pragma checkRemote(fn) -- call `fn` when a byname pointer is
+						                           stored into a different processor
+						#pragma checkRemote()   -- do not check the device at all
+						Without the pragma: write a fixed message to __error and stop.
+						*/
+						const handler = info.substring(info.indexOf('(') + 1, info.lastIndexOf(')')).trim();
+						optimizerConfig.checkRemote = handler === '' ? false : handler;
 					} else if (info.startsWith("id(")) {
 						/*
 						#pragma id(item, @myitem:300)   -- give `@myitem` the id 300

@@ -1,8 +1,8 @@
-/* MESSAGE: A multidimensional remote array needs single-cell elements */
+/* MESSAGE: A remote array must keep its elements in registers */
 /*
-A multidimensional remote array is flattened, but every element still has to
-be ONE register on the other processor. A pointer element needs a block/pos
-pair, so it cannot use the element-name protocol.
+A remote array is flattened, but every element still has to fit the register
+layout on the other processor. A pointer element needs a block/pos pair, so it
+cannot use the element-name protocol.
 */
 auto device message1;
 

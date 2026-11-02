@@ -3614,20 +3614,21 @@ export class SemanticAnalyzer extends ASTVisitor {
 			return;
 		}
 		/*
-		A remote array is a flat row of registers on the other side, one name
-		per element. Multidimensional arrays are flattened, but every element
-		must still fit in ONE register: pointers need a block/pos pair and
-		structs need several member registers.
+		A remote array is a flat row of registers on the other side. Every
+		element (including every dimension) must fit in the register layout:
+		pointers need a block/pos pair, arrays need many cells, and a struct
+		needs the memory layout if it contains those. Structs made of
+		single-register leaves are allowed, including bitfield storage and
+		`byname` members.
 		*/
-		const dimCount = (declarator.arrayDimensions ?? []).length
-			|| (symbol.arrayDimensions ?? symbol.dimensions ?? []).length || 1;
-		if (finalType.kind === 'array' && dimCount > 1) {
+		if (finalType.kind === 'array') {
 			const elementType = this.innermostArrayElementOf(finalType);
-			if (elementType
-				&& ['pointer', 'struct', 'union', 'array'].includes(elementType.kind)) {
+			const layout = elementType ? registerElementLayoutOf(elementType) : null;
+			if (!layout) {
 				this.addError(
-					`A multidimensional remote array needs single-cell elements: `
-					+ `'${declarator.name}' has element type '${this.typeToString(elementType)}'`,
+					`A remote array must keep its elements in registers: `
+					+ `'${declarator.name}' has element type '${this.typeToString(elementType)}' `
+					+ `(ordinary pointers, arrays, unions and memory-requiring structs cannot be remote)`,
 					location);
 				declarator.initializer = null;
 				return;

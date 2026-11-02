@@ -20,8 +20,8 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 258 passed, 0 failed (148 shape assertions, 1147 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 100 passed, 0 failed |
+| `node ../tools/check.mjs` | 263 passed, 0 failed (148 shape assertions, 1172 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 101 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 14 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
@@ -96,6 +96,8 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | complex struct member initializers (§7.40) | **done**; enum/nested-enum register arrays, memory-layout coverage for array/union/pointer/byname/bitfield members, tests t241/t242 + negative | §7.40 |
 | bitfield and byname struct members in register arrays (§7.41) | **done**; packed `__bitsN` leaves, name-pointer leaves, constant/dynamic access, tests t243/t244/n14 | §7.41 |
 | struct assignment through memory references (§7.42) | **done**; content copy for `arr[i] = value`, reverse reads, dereferenced pointer targets, recursion guard, test t245 | §7.42 |
+| remote register struct arrays (§7.43) | **done**; per-leaf remote names, dynamic selection, nested/bitfield/byname members, whole-element copy, export recursion, tests t246/t247 + negative | §7.43 |
+| `#pragma checkRemote` / byname device checks (§7.44) | **done**; default `strictEqual` device check, handler/disable pragma, tests t248–t250 | §7.44 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -830,21 +832,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 657 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 664 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 657 under `testers/unit_tests`, every one of
+bring the count to 664 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 258 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 100 | `negative/` |
+| `check.mjs` | 263 + 11 peers | `check/`, plus the 11 `check/peers/*.c` it drives on their owners' behalf |
+| `negative.mjs` | 101 | `negative/` |
 | `nomem.mjs` | 14 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-258 + 10 + 100 + 14 + 275 = 657. The caveat that replaces "no runner" is weaker but real:
+263 + 11 + 101 + 14 + 275 = 664. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -1970,3 +1972,44 @@ called `f` even when `a` was false.
   content-copy path.
 - Case: t245 (register value, compound literal, bare initializer list, element
   to element, element to register, and dereferenced struct pointer).
+
+### 7.43 Remote register struct arrays
+
+- A remote array element is now a set of leaf names, not one register.
+  `RemoteStructRet` resolves each storage leaf to `<target>_<flatIndex>.<path>`;
+  scalar members are `RemoteSlotRet`, visible bitfields are `BitfieldRet` over
+  their `__bitsN` cell, nested structs recurse, and `byname` members become
+  `RemoteNamePointerRet`.
+- Constant subscripts use a compile-time leaf name. Dynamic subscripts select
+  the COMPLETE leaf name per member (a suffix cannot be appended to a runtime
+  string), so every leaf gets its own `select` chain.
+- Whole-element reads materialize a local temporary struct; whole-element writes
+  copy every storage leaf. Bitfield storage cells are copied once, not per
+  visible field.
+- Remote array element validation now uses `registerElementLayoutOf`: structs
+  made of register leaves are accepted; ordinary pointers, arrays, unions and
+  memory-requiring structs are rejected. This also applies to multidimensional
+  remote arrays.
+- Owner exports recurse over `structStorageLeafPathsOf(type)`, so a struct array
+  publishes `<array>_<i>.x`, `.__bitsN`, `.p`, nested paths, and so on.
+- Cases: t246 (real peer: scalar + bitfield + byname members), t247
+  (multidimensional shaped view, dynamic index, whole-element copy); negative
+  for a memory-requiring struct element.
+
+### 7.44 Remote byname device checks
+
+- A `byname` member of a remote struct is owner-relative by default: reading it
+  returns a device-aware name pointer, and dereferencing uses
+  `read/write <ownerDevice> <name>`. No `auto` marker or struct variant is
+  needed: the container provides the device.
+- Storing a name pointer into a remote `byname` member now compares the source
+  device with the target element's device using `strictEqual`. This catches the
+  common mistake of writing a local `byname(&x)` into another processor's
+  struct.
+- Default mismatch behavior writes `"remote device mismatch"` to `__error` and
+  stops. `#pragma checkRemote(handler)` calls `handler` and then stops;
+  `#pragma checkRemote()` disables the check.
+- The check is emitted only for byname stores; reads/dereferences need no
+  comparison because the device comes from the container.
+- Cases: t248 (self-remote, check passes), t249 (real peer mismatch with
+  handler), t250 (check disabled).

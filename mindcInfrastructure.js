@@ -254,6 +254,32 @@ export function registerElementLayoutOf(type) {
 	return { kind: 'cell', components: 1 };
 }
 
+/**
+ * Paths to the storage leaves of a register-layout struct.
+ *
+ * A leaf is one register: a scalar member, a `byname` pointer, a bitfield
+ * storage cell (`__bitsN`), or the recursion into a nested struct. Visible
+ * bitfield fields are skipped because they live inside their storage cell.
+ *
+ * @param {any} type
+ * @param {string[]} [prefix]
+ * @returns {string[][]}
+ */
+export function structStorageLeafPathsOf(type, prefix = []) {
+	const result = [];
+	for (const member of type?.members ?? []) {
+		if (member.isBitfield === true) continue;
+		const path = [...prefix, member.name];
+		const memberType = member.type ?? member.memberType;
+		if (memberType?.kind === 'struct' || memberType?.kind === 'union') {
+			result.push(...structStorageLeafPathsOf(memberType, path));
+		} else {
+			result.push(path);
+		}
+	}
+	return result;
+}
+
 /* ------------------------------------------------------------------ *
  * Exceptions
  * ------------------------------------------------------------------ */
@@ -3197,7 +3223,30 @@ export class RemoteArrayRet extends VariableRet {
 	 */
 	subscript(index) {
 		const glob = this.glob;
-		const inner = (this.type && this.type.pointerTo) ? this.type.pointerTo : null;
+		/*
+		The declaration may still carry a shaped array type even though the
+		remote side names its elements by a flat index; walk down to the
+		innermost element type.
+		*/
+		let inner = (this.type && this.type.pointerTo) ? this.type.pointerTo : null;
+		while (inner && inner.kind === 'array') inner = inner.pointerTo ?? null;
+		/*
+		A struct element is not one register: every storage leaf has its own
+		remote name. The remote struct reference computes those names, and
+		selects the complete leaf name (never a base name plus a suffix) for a
+		dynamic subscript.
+		*/
+		if (registerElementLayoutOf(inner)?.kind === 'struct') {
+			if (typeof index === 'number') {
+				return new RemoteStructRet(glob, [...this.instructions], this.deviceReg,
+					inner, this, [], `${this.targetAssembly}_${index}`, null);
+			}
+			const idx = index.get ? index.get() : index;
+			const instructions = [...this.instructions];
+			if (idx?.instructions) instructions.push(idx.instructions);
+			return new RemoteStructRet(glob, instructions, this.deviceReg,
+				inner, this, [], null, idx);
+		}
 		const holder = glob.tmp(null, 'rname');
 		const nm = nameOf(holder);
 		const instructions = [...this.instructions];
@@ -3346,6 +3395,220 @@ export class RemoteStructPointerRet extends PointerRet {
 	offset(step, backward = false) {
 		throw new InfrastructureNotImplementedExpection(
 			'pointer arithmetic on a remote struct pointer');
+	}
+}
+
+/**
+ * A struct value reached remotely by a set of leaf names.
+ *
+ * An array element names its leaves `<array>_<i>.<path>`; a dynamic subscript
+ * selects the COMPLETE leaf name for each member (a suffix cannot be appended
+ * to a runtime string). Member access returns RemoteSlotRet for scalars,
+ * BitfieldRet for visible bitfields, RemoteNamePointerRet for `byname`
+ * members, and another RemoteStructRet for nested structs.
+ */
+export class RemoteStructRet extends VariableRet {
+
+	constructor(glob, instructions, deviceReg, type, array = null, path = [],
+		baseName = null, operand = null) {
+		super(glob, instructions, deviceReg, type, false);
+		this.deviceReg = deviceReg;
+		this.structType = type;
+		this.array = array;
+		this.path = path;
+		this.baseName = baseName;
+		this.operand = operand;
+		this.setAttribute('isRemoteStruct', true);
+		this.setAttribute('disallowReplacement', true);
+	}
+
+	/** Not a one-register handle. */
+	get width() {
+		return 1;
+	}
+
+	/** The local register holding the remote name of one leaf. */
+	leafName(path) {
+		const glob = this.glob;
+		const suffix = path.map(part => `.${part}`).join('');
+		const holder = glob.tmp(null, 'rname');
+		const nm = nameOf(holder);
+		if (this.baseName !== null && this.baseName !== undefined) {
+			return { nameReg: nm, instructions: [
+				InstructionBuilder.set(nm, `"${this.baseName}${suffix}"`)
+			] };
+		}
+		const array = this.array;
+		const instructions = [
+			InstructionBuilder.set(nm, `"${array.targetAssembly}_0${suffix}"`)
+		];
+		const idx = this.operand?.name ?? this.operand;
+		for (let i = 1; i < array.length; i++) {
+			instructions.push(InstructionBuilder.select(nm, 'equal',
+				idx, String(i), `"${array.targetAssembly}_${i}${suffix}"`, nm));
+		}
+		return { nameReg: nm, instructions };
+	}
+
+	/**
+	 * Resolve one member: bitfields go to their storage cell, nested structs
+	 * recurse, `byname` members become device-aware name pointers.
+	 * @param {string} memberName
+	 * @param {any} memberType
+	 * @returns {VariableRet}
+	 */
+	member(memberName, memberType = null) {
+		const glob = this.glob;
+		const info = (this.structType?.members ?? []).find(m => m.name === memberName) ?? null;
+		const type = memberType ?? memberTypeOf(glob, this.structType, memberName);
+		if (info?.isBitfield === true) {
+			const storage = this.member(info.storageName,
+				glob.semantic.getTypeInfo('int'));
+			return new BitfieldRet(glob, storage, type,
+				info.bitOffset, info.bitWidth, info.isSigned);
+		}
+		if (type?.kind === 'struct' || type?.kind === 'union') {
+			return new RemoteStructRet(glob, this.instructions, this.deviceReg,
+				type, this.array, [...this.path, memberName],
+				this.baseName, this.operand);
+		}
+		const leaf = this.leafName([...this.path, memberName]);
+		const instructions = [...this.instructions, ...leaf.instructions];
+		if (isNamePointerType(type) || info?.namePointer === true) {
+			return new RemoteNamePointerRet(glob, this.deviceReg,
+				leaf.nameReg, type, instructions);
+		}
+		return new RemoteSlotRet(glob, this.deviceReg, leaf.nameReg, type, instructions);
+	}
+
+	/** The member LValue at a leaf path (`['inner', 'x']`). */
+	memberAtPath(path) {
+		let current = this;
+		for (const part of path) current = current.member(part);
+		return current;
+	}
+
+	/**
+	 * Materialize the remote struct into a local temporary struct. `byname`
+	 * leaves are read as raw names; the caller decides whether that value is
+	 * meaningful locally.
+	 * @returns {RegistryStructRet}
+	 */
+	get() {
+		const glob = this.glob;
+		const temp = glob.generator?.getTempSymbol?.(this.structType) ?? glob.tmp(this.structType);
+		const base = temp.getAssemblySymbol();
+		const result = new Instruction(this.instructions);
+		for (const path of structStorageLeafPathsOf(this.structType)) {
+			const leaf = this.memberAtPath(path);
+			const value = leaf instanceof RemoteNamePointerRet ? leaf.readRaw() : leaf.get();
+			result.concat(value);
+			result.concat(InstructionBuilder.set(`${base}${path.map(p => `.${p}`).join('')}`,
+				value.instructionReturn ?? '0'));
+		}
+		return new RegistryStructRet(glob, result.instructions, base,
+			this.structType, true, temp);
+	}
+
+	/**
+	 * Copy a struct value into this remote element, leaf by leaf.
+	 * @param {VariableRet} other
+	 * @returns {RemoteStructRet}
+	 */
+	set(other) {
+		const glob = this.glob;
+		const value = other.get();
+		const result = new Instruction(this.instructions);
+		for (const path of structStorageLeafPathsOf(this.structType)) {
+			const target = this.memberAtPath(path);
+			const source = typeof value?.member === 'function'
+				? (() => { let cur = value; for (const part of path) cur = cur.member(part); return cur; })()
+				: null;
+			if (!source) continue;
+			result.concat(target.set(source));
+		}
+		return new RemoteStructRet(glob, result.instructions, this.deviceReg,
+			this.structType, this.array, this.path, this.baseName, this.operand);
+	}
+}
+
+/**
+ * A `byname` member of a remote struct.
+ *
+ * `memberNameReg` is a local register holding the remote member's name
+ * (`arr_0.p`). The register's VALUE, read from the owner processor, is the
+ * name of the variable the pointer points at.
+ */
+export class RemoteNamePointerRet extends VariableRet {
+
+	constructor(glob, deviceReg, memberNameReg, type, instructions = []) {
+		super(glob, instructions, deviceReg, type, false);
+		this.deviceReg = deviceReg;
+		this.memberNameReg = memberNameReg;
+		this.pointee = (type && type.pointerTo) ? type.pointerTo : null;
+		this.setAttribute('isRemoteNamePointer', true);
+		this.setAttribute('disallowReplacement', true);
+	}
+
+	get width() {
+		return 1;
+	}
+
+	/** Read the stored name itself, without dereferencing it. */
+	readRaw() {
+		const glob = this.glob;
+		const target = glob.tmp(this.pointee ?? this.type, 'rnameval');
+		const name = nameOf(target);
+		return new BasicRet(glob,
+			[this.instructions,
+				InstructionBuilder.read(name, this.deviceReg, this.memberNameReg)],
+			name, this.type, true);
+	}
+
+	get() {
+		const raw = this.readRaw();
+		return new RemotePointerRet(this.glob, this.deviceReg, raw.instructionReturn,
+			this.type, raw.instructions);
+	}
+
+	slot() {
+		const raw = this.readRaw();
+		return new RemoteSlotRet(this.glob, this.deviceReg, raw.instructionReturn,
+			this.pointee, raw.instructions);
+	}
+
+	deref() {
+		return this.slot().get();
+	}
+
+	set(other) {
+		const glob = this.glob;
+		const raw = other;
+		const value = other.get();
+		let name = null;
+		let sourceDevice = null;
+		if (value instanceof NamePointerRet) {
+			name = value.name;
+			sourceDevice = (raw instanceof RemoteNamePointerRet
+				|| raw instanceof RemotePointerRet
+				|| raw instanceof RemoteStoredPointerRet) ? raw.deviceReg : '@this';
+		} else if (raw instanceof RemoteNamePointerRet
+			|| raw instanceof RemotePointerRet
+			|| raw instanceof RemoteStoredPointerRet) {
+			name = (value instanceof RemotePointerRet) ? value.nameReg : value.name;
+			sourceDevice = raw.deviceReg;
+		} else if (value instanceof RemotePointerRet) {
+			name = value.nameReg;
+			sourceDevice = value.deviceReg;
+		} else {
+			name = value.name ?? value.instructionReturn ?? null;
+		}
+		if (!name) throw new InvalidCastException(other, this);
+		const check = glob.generator?.remoteDeviceCheck?.(sourceDevice, this.deviceReg)
+			?? new Instruction();
+		return new RemoteNamePointerRet(glob, this.deviceReg, this.memberNameReg,
+			this.type, [this.instructions, value.instructions, check,
+				InstructionBuilder.write(name, this.deviceReg, this.memberNameReg)]);
 	}
 }
 
@@ -4557,6 +4820,7 @@ function buildRet(glob, inst, type, width, throughPointer, temporary, relevant) 
 
 export function ExportRet(glob, inst, type = null) {
 	if (!inst) return new ImmediateRet(glob, 'null', type);
+	if (inst instanceof RemoteStructRet) return inst.get();
 	if (inst instanceof VariableRet) return inst;
 
 	const attrs = name => inst.getAttribute(name);

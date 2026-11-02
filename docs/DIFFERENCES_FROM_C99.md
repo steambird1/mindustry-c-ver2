@@ -143,9 +143,9 @@ print(lenof(mem));    // 4
 - 如果 `extern` 声明带有显式初始化器，初始化仍然在本侧执行，并且在每次程序运行到该位置时重新赋值；不带初始化器的 `extern` 由它的所有者维护，不在本侧重置。
 - 存储期可以与 `extern` 组合：`extern static` 是“本次运行内只初始化一次 + 可外部访问”，`persistent extern` 是“跨运行只初始化一次 + 可外部访问”。`extern` 本身不强制变量放在内存或寄存器，布局仍由类型、`volatile`、取地址和数组布局决定。
 - `extern` 变量会被保留下来，不因为“本程序没读”而被删除；它对跨处理器通信很重要。
-- `extern` 数组按**实际表示**对外导出：memory 布局导出 `<name>_block` / `<name>_pos`，寄存器布局导出 `<name>_i`（lookup 布局导出内容名）。编译期别名 `int w[] = s;` 在导出和 `remote()` 中解析到根数组 `s`；运行期句柄没有稳定的外部元素名。
+- `extern` 数组按**实际表示**对外导出：memory 布局导出 `<name>_block` / `<name>_pos`，寄存器布局导出 `<name>_i`；register struct 数组导出每个存储叶子 `<name>_<i>.<leaf>`（lookup 布局导出内容名）。编译期别名 `int w[] = s;` 在导出和 `remote()` 中解析到根数组 `s`；运行期句柄没有稳定的外部元素名。
 - 对 `extern` 数组句柄只发出警告：它仍然可以作为本地句柄使用、仍然受“类似 volatile”的优化限制，但不会导出元素名，`remote()` 也不能以它为绑定目标。
-- 多维寄存器/lookup 数组支持单 cell 元素（数字、content/device 等）；指针/struct/union 元素需要 memory 布局。多维数组按行优先展平，`a[i][j]` 会编译成 `a[i * dim1 + j]`；`lenof(a)` 仍返回最外层维度。`remote()` 数组也支持 shaped/扁平多维视图。
+- 多维寄存器/lookup 数组支持单 cell 元素和单寄存器叶子的 register struct；普通指针/数组/union/需要 memory 的 struct 元素使用 memory 布局。多维数组按行优先展平，`a[i][j]` 会编译成 `a[i * dim1 + j]`；`lenof(a)` 仍返回最外层维度。`remote()` 数组也支持 shaped/扁平多维视图和 register struct 元素。
 - `static` 是**本次运行内持久**：同一运行里的多次函数调用共享一个对象；程序从头开始下一次运行时，初始化 tag 重置，带初始化器的 static 会重新初始化，未初始化的 static 会被显式置零（指针除外）。
 - `persistent` 是**跨运行持久**：处理器/程序加载后初始化一次，后续运行继续使用同一个对象；它和 `static` 一样不能被内联复制。
 - 文件作用域的**普通变量默认按运行重置**：有初始化器时每次运行执行初始化，没有初始化器时显式置零（指针除外）。需要跨运行状态时写 `persistent`，不要依赖未初始化全局变量的“碰巧保留”。
@@ -396,11 +396,14 @@ remote int *p = remote(processor1, qq);      // 指针本身在对端
 
 - `remote int ru[]` 是一个 1 字句柄，元素访问走 `read`/`write`。
 - `remote int ru[2][3]` 或 `remote int rf[]` 支持多维/扁平视图：底层仍是扁平元素名 `<target>_<flatIndex>`，`ru[i][j]` 编译成 `ru[i * dim1 + j]`。`lenof(ru[2][3])` 返回外层维度，扁平 `ru[]` 返回总元素数。
+- remote 数组的元素也可以是 register-layout struct：每个存储叶子一个名字（`<target>_<i>.x`、`.__bits0`、`.p`、嵌套路径）。位域按 storage cell 读写，`byname` 成员按 owner-relative 名字指针解释；动态下标为每个叶子单独选择完整名字。整体读写逐叶子复制。
+- `byname` 成员写入远程元素时会做运行时 device 检查：默认不匹配写 `__error` 并停止；`#pragma checkRemote(handler)` 调用 handler 后停止；`#pragma checkRemote()` 关闭检查。
+- `struct S local = remoteArr[i]` 会把 `byname` 成员按原始名字复制到本地；这种值只应在同一处理器上解释，跨处理器复制后解引用属于未定义语义。
 - `remote int *p` 声明“指针本身存储在别的处理器”；`remote int *p` 与 `int *remote p` 的含义不同：前者指针本地、指向远程 int；后者指针本身在远程。
 - `&remoteVar` 得到 1 字名字指针（处理器 + 名字），不是普通 block/offset。
 - 远程数组的布局要与对端一致；跨处理器时用显式 `array("embedded_divided")` 等布局名最稳。
 - `remote()` 的元素访问需要元素名，也就是 embedded/lookup 表示；memory 数组可以导出 `_block` / `_pos` 供共享内存协议使用，但不能直接套用 `remote int r[]` 的元素名模型。远程 memory 数组未实现（栈地址随调用变化，全局内存编号也不是稳定的跨处理器 ABI）。
-- 多维 remote 数组的元素必须是单 cell 类型；指针/struct/union 元素需要 memory 或每元素多寄存器协议，暂不支持。
+- 多维 remote 数组的元素必须能落在 register 布局：单 cell 元素，或由单寄存器叶子组成的 struct（含位域 storage、`byname` 成员、嵌套 register struct）。普通指针、数组、union 和需要 memory 的 struct 不能作为 remote 元素，仍需要单独的远程 memory ABI。
 
 ### 9.3 限制
 
