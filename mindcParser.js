@@ -1979,7 +1979,30 @@ export class Parser {
 			this.consumeToken();
             if (!this.matchToken(TokenType.RIGHT_BRACE)) {
                 while (true) {
+                    const designators = [];
+                    while (this.matchToken(TokenType.DOT) || this.matchToken(TokenType.LEFT_BRACKET)) {
+                        if (this.matchToken(TokenType.DOT)) {
+                            this.consumeToken();
+                            const name = this.expectToken(TokenType.IDENTIFIER);
+                            designators.push({ kind: 'member', name: name ? name.value : '', location: name ? name.location : null });
+                        } else {
+                            this.consumeToken();
+                            const index = this.parseExpression();
+                            this.expectToken(TokenType.RIGHT_BRACKET);
+                            designators.push({ kind: 'index', expression: index, location: index ? index.location : null });
+                        }
+                    }
+                    if (designators.length > 0) {
+                        if (!this.matchToken(TokenType.ASSIGN)) {
+                            this.addError('Expected = after initializer designator');
+                        } else {
+                            this.consumeToken();
+                        }
+                    }
                     const expr = this.parseInitializerList();
+                    if (expr && designators.length > 0) {
+                        expr.setAttribute('initializerDesignators', designators);
+                    }
                     initList.addChild(expr);
                     if (this.matchToken(TokenType.RIGHT_BRACE)) {
                         break;	// End of the list

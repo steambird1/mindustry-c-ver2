@@ -8215,7 +8215,110 @@ export class SemanticAnalyzer extends ASTVisitor {
 	 * @param {InitializerListNode} node 
 	 * @param {{ givenSymbol: SymbolEntry?, givenType: TypeInfo }?} param 
 	 */
+	/**
+	 * Fill positional slots from C99 designators (`.field =`, `[index] =`).
+	 * Existing positional lists are untouched.
+	 */
+	applyInitializerDesignators(node, givenType) {
+		if (!node?.children?.some(child => child?.getAttribute?.('initializerDesignators')?.length)) return;
+		if (!givenType) {
+			this.addError('A designated initializer needs a target type', node.location);
+			return;
+		}
+		if (givenType.kind === 'union') {
+			this.addError('Designated initializers for unions are not supported yet', node.location);
+			return;
+		}
+		const visibleMembers = (givenType.members ?? []).filter(m => m.isBitfieldStorage !== true);
+		const isArray = givenType.kind === 'array';
+		const total = isArray
+			? (givenType.arraySize?.[0] ?? Math.trunc(givenType.size / Math.max(1, givenType.extractKth(0)?.size ?? 1)))
+			: visibleMembers.length;
+		const slots = new Array(Math.max(0, total)).fill(null);
+		let nextIndex = 0;
+		for (const child of node.children) {
+			const designators = child.getAttribute?.('initializerDesignators') ?? [];
+			if (designators.length === 0) {
+				while (nextIndex < total && slots[nextIndex] !== null) nextIndex++;
+				if (nextIndex < total) slots[nextIndex++] = child;
+				else this.addError('Too many initializers', child.location ?? node.location);
+				continue;
+			}
+			if (designators.length > 1) {
+				this.addError('Nested initializer designators are not supported yet',
+					designators[1].location ?? child.location ?? node.location);
+				continue;
+			}
+			const designator = designators[0];
+			let index = -1;
+			if (designator.kind === 'member') {
+				if (isArray) {
+					this.addError('A member designator is not valid for an array initializer', designator.location);
+					continue;
+				}
+				index = visibleMembers.findIndex(member => member.name === designator.name);
+				if (index < 0) {
+					this.addError(`Unknown initializer member '${designator.name}'`, designator.location);
+					continue;
+				}
+			} else {
+				if (!isArray) {
+					this.addError('An index designator is not valid for a struct initializer', designator.location);
+					continue;
+				}
+				const value = this.constantCaseValue(designator.expression);
+				if (value === undefined) {
+					this.addError('An initializer index needs a constant expression', designator.location);
+					continue;
+				}
+				index = Math.trunc(value);
+				if (index < 0 || index >= total) {
+					this.addError(`Initializer index ${index} is out of range`, designator.location);
+					continue;
+				}
+			}
+			if (slots[index] !== null) {
+				this.addError(`Initializer for slot ${index} is specified more than once`, designator.location);
+				continue;
+			}
+			slots[index] = child;
+		}
+		const elementType = isArray ? givenType.extractKth(0) : null;
+		for (let i = 0; i < total; i++) {
+			if (slots[i] !== null) continue;
+			const type = isArray ? elementType : visibleMembers[i]?.type;
+			slots[i] = this.zeroInitializerNode(type, node.location);
+		}
+		node.children = slots;
+		node.setAttribute('designatedNormalized', true);
+	}
+
+	zeroInitializerNode(type, location) {
+		if (type && (type.kind === 'struct' || type.kind === 'union')) {
+			const list = ASTBuilder.initializerList();
+			list.location = location;
+			const members = (type.members ?? []).filter(m => m.isBitfieldStorage !== true);
+			const selected = type.kind === 'union' ? members.slice(0, 1) : members;
+			selected.forEach(member => list.addChild(this.zeroInitializerNode(member.type, location)));
+			return list;
+		}
+		if (type && type.kind === 'array') {
+			const list = ASTBuilder.initializerList();
+			list.location = location;
+			const total = type.arraySize?.[0] ?? 0;
+			const elementType = type.extractKth(0);
+			for (let i = 0; i < total; i++) {
+				list.addChild(this.zeroInitializerNode(elementType, location));
+			}
+			return list;
+		}
+		const zero = ASTBuilder.numericLiteral(0);
+		zero.location = location;
+		return zero;
+	}
+
 	visitInitializerList(node, param) {
+		if (param?.givenType) this.applyInitializerDesignators(node, param.givenType);
 		const declaratorTypes = ['VariableDeclarator', 'Declarator'];
 		node.dataType = this.typeTable.get('null_t').duplicate();	// size might be modified
 		node.dataType.size = 0;
