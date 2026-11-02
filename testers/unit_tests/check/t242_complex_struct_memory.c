@@ -18,8 +18,8 @@ int y = 11;
 struct WithArray wa[1] = {{{4, 5}, 6}};
 struct WithUnion wu[1] = {{{7}, 8}};
 struct WithPointer wp[1] = {{&x, 9}};
-struct WithByname wb[1] = {{byname(&y), 12}};
-struct Bits bits[2] = {{3, 5}, {1, 2}};
+struct WithByname wb[1] = array("traditional", {{byname(&y), 12}});
+struct Bits bits[2] = array("traditional", {{3, 5}, {1, 2}});
 
 auto device message1;
 

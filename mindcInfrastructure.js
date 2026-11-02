@@ -213,12 +213,13 @@ export function isNamePointerType(type) {
 /**
  * How many registers one array element occupies when it stays out of memory.
  *
- * Only single-cell elements and `byname` pointers are register-compatible for
- * now. Ordinary pointers (block/pos) and aggregates return null and have to
+ * A leaf is one register: a single-cell value, a `byname` pointer, or a
+ * bitfield storage cell (a bitfield shares that cell with its neighbours).
+ * Ordinary pointers (block/pos), arrays and unions return null and have to
  * use the memory layout.
  *
  * @param {any} type
- * @returns {{kind: 'cell'|'name-pointer', components: number}?}
+ * @returns {{kind: 'cell'|'name-pointer'|'struct', components: number}?}
  */
 export function registerElementLayoutOf(type) {
 	if (!type || type.isTypeInfo !== true) return null;
@@ -229,16 +230,22 @@ export function registerElementLayoutOf(type) {
 	if (type.kind === 'struct') {
 		/*
 		A registry struct can be laid out as one register per (recursive)
-		member. A memory-implemented struct, an embedded array, a union or a
-		bitfield needs a representation the current flat element names cannot
-		provide.
+		storage leaf. A bitfield's storage cell is one leaf even though several
+		visible fields share it; a memory-implemented struct, an embedded
+		array or a union still needs a representation the flat element names
+		cannot provide.
 		*/
 		if (type.isPointerImpl?.() || type.isRequireMem?.()) return null;
 		let components = 0;
 		for (const member of type.members ?? []) {
-			if (member.isBitfieldStorage === true || member.isBitfield === true) return null;
+			// Visible bitfields are slices of a storage cell handled below.
+			if (member.isBitfield === true) continue;
+			if (member.isBitfieldStorage === true) {
+				components += 1;
+				continue;
+			}
 			const layout = registerElementLayoutOf(member.type ?? member.memberType);
-			if (!layout || !['cell', 'struct'].includes(layout.kind)) return null;
+			if (!layout || !['cell', 'struct', 'name-pointer'].includes(layout.kind)) return null;
 			components += layout.components;
 		}
 		return components > 0 ? { kind: 'struct', components } : null;
@@ -1431,7 +1438,13 @@ export class RegistryStructRet extends StructRefRet {
 		const glob = this.glob;
 		const type = memberType ?? memberTypeOf(glob, this.type, memberName);
 		const name = `${this.instructionReturn}.${memberName}`;
-		const member = valueClassOf(glob, type).create(glob, this.instructions, name, type, false);
+		/*
+		A `byname` member is one register that holds a target NAME. A generic
+		pointer value would try to read a block/pos pair that does not exist.
+		*/
+		const member = isNamePointerType(type)
+			? new NamePointerRet(glob, this.instructions, name, type, false)
+			: valueClassOf(glob, type).create(glob, this.instructions, name, type, false);
 		member.setAttribute('isFromRegStruct', true);
 		member.setAttribute('isSymbolic', true);
 		/*
@@ -2170,9 +2183,14 @@ class SelectedRegisterRet extends VariableRet {
 
 	get() {
 		const glob = this.glob;
+		const namePointer = isNamePointerType(this.type);
 		if (this.operand.constant) {
+			const name = this.elementName(this.operand.value);
+			if (namePointer) {
+				return new NamePointerRet(glob, this.instructions, name, this.type, false);
+			}
 			return valueClassOf(glob, this.type).create(glob, this.instructions,
-				this.elementName(this.operand.value), this.type, false);
+				name, this.type, false);
 		}
 		const target = glob.tmp(this.type);
 		const parts = [InstructionBuilder.set(target, this.elementName(0))];
@@ -2180,18 +2198,28 @@ class SelectedRegisterRet extends VariableRet {
 			parts.push(InstructionBuilder.selectx(target,
 				`equal ${this.operand.name} ${i}`, this.elementName(i), target));
 		}
+		if (namePointer) {
+			return new NamePointerRet(glob, [this.instructions, parts],
+				nameOf(target), this.type, true);
+		}
 		return valueClassOf(glob, this.type).create(glob,
 			[this.instructions, parts], target, this.type, true);
 	}
 
 	set(other) {
 		const glob = this.glob;
-		const value = other.get().convertTo(this.type ?? other.type);
+		const rawValue = other.get();
+		const namePointer = isNamePointerType(this.type);
+		// A name is not an address: converting it would ask for `_block`/`_pos`.
+		const value = namePointer ? rawValue : rawValue.convertTo(this.type ?? other.type);
 		if (this.operand.constant) {
+			const instructions = [this.instructions, value.instructions,
+				InstructionBuilder.set(this.elementName(this.operand.value), value.name)];
+			if (namePointer) {
+				return new NamePointerRet(glob, instructions, value.name, this.type, false);
+			}
 			return valueClassOf(glob, this.type).create(glob,
-				[this.instructions, value.instructions,
-					InstructionBuilder.set(this.elementName(this.operand.value), value.name)],
-				value.name, this.type, false);
+				instructions, value.name, this.type, false);
 		}
 		const chosen = glob.tmp(null);
 		const parts = [this.instructions, value.instructions,
@@ -2201,6 +2229,9 @@ class SelectedRegisterRet extends VariableRet {
 				`equal ${this.operand.name} ${i}`, `"${this.elementName(i)}"`, chosen));
 		}
 		parts.push(InstructionBuilder.write(value.name, '@this', chosen));
+		if (namePointer) {
+			return new NamePointerRet(glob, parts, value.name, this.type, false);
+		}
 		return valueClassOf(glob, this.type).create(glob, parts, value.name, this.type, false);
 	}
 }
@@ -2216,6 +2247,7 @@ class DynamicStructRef extends RegistryStructRet {
 		this.array = array;
 		this.operand = operand;
 		this.path = path;
+		this.setAttribute('isDynamicStruct', true);
 	}
 
 	member(memberName, memberType = null) {
@@ -2236,7 +2268,9 @@ class DynamicStructRef extends RegistryStructRet {
 		const result = new Instruction(this.instructions);
 		const fill = (dynamic, targetBase) => {
 			for (const member of (dynamic.type.members ?? [])
-				.filter(m => m.isBitfieldStorage !== true)) {
+				// Visible bitfields live inside `__bitsN`; copying the storage
+				// cell is both cheaper and the only representation that exists.
+				.filter(m => m.isBitfield !== true)) {
 				const child = dynamic.member(member.name, member.type);
 				if (member.type?.kind === 'struct') {
 					fill(child, `${targetBase}.${member.name}`);
@@ -2258,7 +2292,8 @@ class DynamicStructRef extends RegistryStructRet {
 		const result = new Instruction(this.instructions);
 		const walk = (dynamic, source) => {
 			for (const member of (dynamic.type.members ?? [])
-				.filter(m => m.isBitfieldStorage !== true)) {
+				// Visible bitfields share `__bitsN`; copy the storage leaf once.
+				.filter(m => m.isBitfield !== true)) {
 				const target = dynamic.member(member.name, member.type);
 				const sourceMember = source.member(member.name, member.type);
 				if (member.type?.kind === 'struct') {

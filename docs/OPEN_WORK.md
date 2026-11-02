@@ -20,9 +20,9 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 255 passed, 0 failed (148 shape assertions, 1134 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 101 passed, 0 failed |
-| `node ../tools/nomem.mjs` | 13 passed, 0 failed |
+| `node ../tools/check.mjs` | 257 passed, 0 failed (148 shape assertions, 1142 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 100 passed, 0 failed |
+| `node ../tools/nomem.mjs` | 14 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
 
@@ -93,7 +93,8 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | byname pointer arrays (§7.37) | **done**; name pointers in register arrays, dynamic access, handles, tests t237 | §7.37 |
 | flat registry-struct register arrays (§7.38) | **done**; coordinate/struct members, constants and nested structs, tests t238/t239 + negatives | §7.38 |
 | dynamic multi-register struct subscripts (§7.39) | **done**; per-leaf select reads, selected-name writes, whole-element copy, test t240 | §7.39 |
-| complex struct member initializers (§7.40) | **done**; enum/nested-enum register arrays, memory fallbacks for array/union/pointer/byname/bitfield members, tests t241/t242 + negatives | §7.40 |
+| complex struct member initializers (§7.40) | **done**; enum/nested-enum register arrays, memory-layout coverage for array/union/pointer/byname/bitfield members, tests t241/t242 + negative | §7.40 |
+| bitfield and byname struct members in register arrays (§7.41) | **done**; packed `__bitsN` leaves, name-pointer leaves, constant/dynamic access, tests t243/t244/n14 | §7.41 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -828,21 +829,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 654 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 656 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 654 under `testers/unit_tests`, every one of
+bring the count to 656 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 255 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 101 | `negative/` |
-| `nomem.mjs` | 13 | `nomem/` |
+| `check.mjs` | 257 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `negative.mjs` | 100 | `negative/` |
+| `nomem.mjs` | 14 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-255 + 10 + 101 + 13 + 275 = 654. The caveat that replaces "no runner" is weaker but real:
+257 + 10 + 100 + 14 + 275 = 656. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -1527,10 +1528,11 @@ called `f` even when `a` was false.
   `__bitsN` storage members.
 - Signed fields sign-extend on read using a `select`; writes still mask to the
   declared width. 52-bit signed values are supported.
-- Memory-backed bitfield struct initializer lists are refused for now; assign
-  the fields individually (register struct initializer lists work).
-- Cases: t205 (register, widths, split at 52), t206 (memory), t207 (signed);
-  negatives for width 53, address-of-bitfield and bitfields in a union.
+- Initializer lists pack fields into their shared storage cell in both register
+  and memory structs; omitted fields stay zero (§7.40).
+- Cases: t205 (register, widths, split at 52), t206 (memory), t207 (signed),
+  t243 (bitfields in register struct arrays); negatives for width 53,
+  address-of-bitfield and bitfields in a union.
 
 ### 7.25 Function prototypes, forward declarations and block scope
 
@@ -1840,10 +1842,10 @@ called `f` even when `a` was false.
 
 - A register/lookup/encoded array uses one name/register per element or
   register component. Elements that the register layout cannot express
-  (ordinary block/pos pointers, unions, bitfields, arrays, structs containing
-  those) are forced to the traditional memory layout instead of silently
-  reading 0. Flat registry structs and byname pointers are covered in §7.37
-  and §7.38.
+  (ordinary block/pos pointers, unions, arrays, structs containing those) are
+  forced to the traditional memory layout instead of silently reading 0.
+  Flat registry structs, byname pointers, bitfields and byname members are
+  covered in §7.37, §7.38 and §7.41.
 - Unsupported-element arrays automatically choose traditional memory, even
   when memory is available. An explicit `array("traditional", ...)` is
   accepted; an unsupported explicit register/lookup/encoded request is
@@ -1879,8 +1881,9 @@ called `f` even when `a` was false.
   (`<array>_<index>.q.x`). Coordinate-like `struct { int x; int y; }` arrays
   work, including multidimensional register arrays with constant indices.
 - Initialization writes each member directly (zero-filling omitted members);
-  whole-element assignment copies member by member. Ordinary pointers,
-  unions, bitfields and memory-requiring structs still force memory.
+  whole-element assignment copies member by member. Ordinary pointers, unions,
+  arrays and memory-requiring structs still force memory; bitfields and
+  `byname` members are register-capable (see §7.41).
 - Dynamic subscripts of multi-register struct elements are covered in §7.39.
   Open-handle travel is still rejected with a clear diagnostic; let the call
   inline or use memory.
@@ -1909,11 +1912,11 @@ called `f` even when `a` was false.
   registry members, so they work in embedded_divided struct arrays without a
   special case. t241 covers enum, nested struct+enum and typedef'd enum
   members, constant/dynamic subscripts and whole-element assignment.
-- Structs containing an array, a union, an ordinary pointer or a `byname`
-  pointer member are not register-compatible and automatically use memory.
-  t242 covers all four. Explicit embedded_divided is refused with the usual
-  "needs single-cell elements" diagnostic (negatives for array and bitfield
-  members).
+- Structs containing an array, a union or an ordinary pointer member are not
+  register-compatible and automatically use memory. t242 also exercises
+  `byname`/bitfield members in the memory layout. Explicit embedded_divided is
+  refused with the usual "needs single-cell elements" diagnostic (negative for
+  an array-member struct).
 - Memory-backed struct initializers are now layout-aware for bitfields: the
   fields are packed into their shared storage cell instead of being written as
   consecutive words. Omitted members are zeroed.
@@ -1921,5 +1924,28 @@ called `f` even when `a` was false.
   initializer now writes that name instead of the null `_block`/`_pos` pair.
   Extra braces around a scalar member (`{{byname(&x)}}`) are unwrapped too.
 - Cases: t241 (enum/nested-enum register arrays), t242 (array/union/pointer/
-  byname/bitfield members in memory); negatives for explicit register layout of
-  an array-member struct and a bitfield struct.
+  byname/bitfield members in memory); negative for explicit register layout of
+  an array-member struct.
+
+### 7.41 Bitfield and byname members in register struct arrays
+
+- The register element layout now treats a bitfield storage cell (`__bitsN`) as
+  one leaf and a `byname` pointer as one leaf. A struct is accepted when every
+  leaf is one register; ordinary pointers (block/pos), arrays and unions still
+  force memory.
+- Initialization zeroes each `__bitsN` cell, packs supplied fields with
+  `BitfieldRet`, and writes a `byname` member as a target name. Omitted fields
+  stay zero. Extra braces around a scalar member are unwrapped.
+- Constant subscripts keep the direct `<array>_<i>.__bitsN` / `<array>_<i>.p`
+  path. Dynamic subscripts select the storage cell for bitfields (reads extract
+  bits, writes do read-modify-write through the selected register name) and
+  select the name register for `byname` members. Whole-element assignment
+  copies the storage cells and name registers.
+- Nested structs containing bitfields or `byname` members recurse with the same
+  path, including dynamic access.
+- Open-handle travel for multi-register struct arrays is still rejected; a
+  single-register element does not change that rule yet.
+- Cases: t243 (bitfields: initialization, constant/dynamic read/write/copy,
+  mixed and nested structs), t244 (`byname` members: constant/dynamic
+  dereference/assignment, copy, nested), nomem n14 (automatic register layout
+  without memory).

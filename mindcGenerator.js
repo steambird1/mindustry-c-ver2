@@ -3202,8 +3202,9 @@ export class CodeGenerator extends ASTVisitor {
 
 	/**
 	 * Initialize one registry-struct array element (`<base>.x`, `<base>.y`, ...).
-	 * C1 supports flat structs made of single-cell members and nested registry
-	 * structs; pointer/array/union members are rejected by the layout check.
+	 * Every storage leaf is one register. Bitfield fields are packed into their
+	 * shared `__bitsN` cell; a `byname` member stores a target name in one
+	 * register. Pointer/array/union members are rejected by the layout check.
 	 */
 	initializeRegisterStructTarget(baseName, type, initializer) {
 		const result = new Instruction();
@@ -3213,12 +3214,34 @@ export class CodeGenerator extends ASTVisitor {
 			result.concat(this.copyStruct(baseName, value.instructionReturn ?? 'null', type, type));
 			return result;
 		}
+		const intType = this.semantic.getTypeInfo('int');
+		/*
+		Bitfield storage cells are not visible members, so the visible-member
+		loop never reaches them. Zero them first; fields that are omitted stay
+		zero, and supplied fields OR their bits into the cell.
+		*/
+		for (const storage of type.bitfieldStorages ?? []) {
+			result.concat(InstructionBuilder.set(`${baseName}.${storage.name}`, '0'));
+		}
 		const members = (type.members ?? []).filter(member => member.isBitfieldStorage !== true);
 		const children = initializer?.children ?? [];
 		for (let i = 0; i < members.length; i++) {
 			const member = members[i];
-			const target = `${baseName}.${member.name}`;
 			const child = children[i];
+			if (member.isBitfield === true) {
+				if (!child) continue;
+				const storage = new BasicRet(this.glob, [],
+					`${baseName}.${member.storageName}`, intType, true);
+				const bitfield = new BitfieldRet(this.glob, storage, member.type,
+					member.bitOffset, member.bitWidth, member.isSigned);
+				const value = this.visitAndRead(
+					this.unwrapScalarInitializer(child, member.type));
+				result.concat(value);
+				result.concat(bitfield.set(ExportRet(this.glob, value,
+					child.dataType ?? member.type)));
+				continue;
+			}
+			const target = `${baseName}.${member.name}`;
 			if (!child) {
 				result.concat(this.zeroRegisterMember(target, member.type));
 				continue;
@@ -3227,7 +3250,8 @@ export class CodeGenerator extends ASTVisitor {
 				result.concat(this.initializeRegisterStructTarget(target, member.type, child));
 				continue;
 			}
-			const value = this.visitAndRead(child);
+			const value = this.visitAndRead(
+				this.unwrapScalarInitializer(child, member.type));
 			result.concat(value);
 			if (member.type?.kind === 'struct') {
 				result.concat(this.copyStruct(target, value.instructionReturn ?? 'null',
@@ -3244,7 +3268,8 @@ export class CodeGenerator extends ASTVisitor {
 	zeroRegisterMember(target, type) {
 		const result = new Instruction();
 		if (type?.kind === 'struct') {
-			for (const member of (type.members ?? []).filter(m => m.isBitfieldStorage !== true)) {
+			// Visible bitfields are slices of a storage cell; zero the storage.
+			for (const member of (type.members ?? []).filter(m => m.isBitfield !== true)) {
 				result.concat(this.zeroRegisterMember(`${target}.${member.name}`, member.type));
 			}
 			return result;
@@ -5700,6 +5725,14 @@ export class CodeGenerator extends ASTVisitor {
 			step through a block/offset pair that does not exist.
 			*/
 			if (node.getAttribute('memberByname') === true) {
+				/*
+				A dynamically selected element has no single compile-time name
+				for this member. `SelectedRegisterRet` selects the name register
+				of the chosen element instead.
+				*/
+				if (object.getAttribute?.('isDynamicStruct') === true) {
+					return object.member(node.children[1].name, node.dataType);
+				}
 				return new NamePointerRet(glob, object.instructions ?? [],
 					`${object.instructionReturn}.${node.children[1].name}`,
 					node.dataType, false);

@@ -43,7 +43,7 @@ void main() {
 | `printf` / `scanf` / `FILE` / `malloc` / `free` / `str*` 等 | `printf` 是编译器内建（格式串必须是字面量；支持 `%d/%i/%u/%f/%s/%%`；v150+ 用 `format`，低版本逐段用 `print`；常量参数编译期格式化，运行时整数宽度/显式精度浮点/v150+ 字符串宽度精度可用）；`assert` 也是内建；`scanf`、`FILE`、动态分配不提供；`strlen`/`strcpy`/`strcat`/`strcmp` 由 `include/string.h` 按 `char*` 提供。见 [STANDARD_LIBRARY.md](STANDARD_LIBRARY.md)。 |
 | `setjmp` / `longjmp`、信号、线程、文件 | 不提供。 |
 | 联合体（`union`） | **布局已支持**：所有成员 offset 0、大小为最大成员；多成员 union 目前强制放内存。跨不同类型读取是**数值别名**，不是 C 的字节级 bitcast。union 内位域暂不支持。 |
-| 位域（bit-field） | **unsigned/signed 已支持**：按声明顺序 LSB-first 打包，每 cell 最多 52 bit；写入按宽度掩码，signed 读取做符号扩展。`&bitfield` 会被拒绝；内存结构体的位域初始化列表暂不支持。 |
+| 位域（bit-field） | **unsigned/signed 已支持**：按声明顺序 LSB-first 打包，每 cell 最多 52 bit；写入按宽度掩码，signed 读取做符号扩展。`&bitfield` 会被拒绝；寄存器和内存结构体的初始化列表都支持位域打包。 |
 | `char` 作为小整数 | **已支持**：`char c = 'A';` 和 `char c = 65;` 都得到 65，`char` 通常参与数值运算。没有 8 位宽度、回绕或有符号性；所有标量都是 1 个 cell。 |
 | `auto` 类型推断 | 不支持 `auto x = ...;`。`auto` 是限定符/存储类，只用于 `auto device`、`auto` 参数/结构体成员等，见 §6。 |
 | 函数原型 | **支持**：`int f(int);` 让调用可以出现在定义之前；原型和定义按参数类型合并为同一条目，重复原型允许，返回类型不一致或重复定义报错。从未调用的原型可以没有定义；调用了却没有定义会报 “declared but never defined”。`auto` 函数的原型并入模板条目，只有定义展开具体版本。 |
@@ -262,8 +262,8 @@ int enc[4] = array("encoded", {1, 2, 3, 4});
 | `encoded` | 整个常量数组编码成 base-57 字符串表；只适合常量、不可写。 |
 
 `array("...")` 必须给字符串字面量；`encoded` 必须同时给内容列表。具体布局也可能因为“内存不够/指令预算”回退或换用别的实现；`#pragma optimize(array)` 打开自动布局选择，显式 `array()` 请求优先。
-- `embedded_divided` 支持单 cell 元素、`byname` 指针元素和由单 cell/嵌套 registry struct 组成的 flat struct 元素。struct 元素按 `<array>_<i>.<member>` 命名；`byname` 指针元素仍是一寄存器名字。
-- `embedded_lookup` / `encoded` 仍要求单 cell 数字/content 元素。普通指针（block/pos）、union、位域、含数组或需要 memory 的 struct 元素使用 memory 布局。多寄存器 struct 元素支持常量下标，也支持动态下标（逐叶 select 读取、选中成员名字写入）；但作为非内联 open handle 传递暂不支持，需 memory 或内联调用。
+- `embedded_divided` 支持单 cell 元素、`byname` 指针元素和由单寄存器叶子（单 cell、`byname` 指针、位域 storage cell、嵌套 registry struct）组成的 flat struct 元素。struct 元素按 `<array>_<i>.<leaf>` 命名；位域字段共享 `<array>_<i>.__bitsN`，`byname` 成员是 `<array>_<i>.p`。
+- `embedded_lookup` / `encoded` 仍要求单 cell 数字/content 元素。普通指针（block/pos）、union、含数组或需要 memory 的 struct 元素使用 memory 布局；位域和 `byname` 成员可以留在寄存器布局。多寄存器 struct 元素支持常量下标，也支持动态下标（逐叶 select 读取、选中成员名字写入）；但作为非内联 open handle 传递暂不支持，需 memory 或内联调用。
 - memory 布局的 struct 数组初始化按成员布局写入：位域成员打包进共享存储 cell，`byname` 指针成员只写目标名字，省略成员补零；标量成员外多余的 `{}` 会被展开。
 
 ### 7.3 开放数组与句柄
@@ -418,10 +418,10 @@ remote int *p = remote(processor1, qq);      // 指针本身在对端
 - 函数调用、数组句柄、结构体返回值都可能生成 helper；`auto` 参数/结构体模板就是为了让这些表示在编译期确定。
 - 没有动态分配；数组/结构体的存储是编译期确定的。
 - `union`：所有成员从 offset 0 开始，大小取最大成员；多成员 union 目前强制放内存。跨类型读取是数值别名，不是 C 的字节级 bitcast。
-- 位域：连续位域按声明顺序 LSB-first 打包，每个 storage cell 最多 52 bit；寄存器结构体和内存结构体都支持。写入按位宽掩码，signed 读取做符号扩展；`&bitfield` 被拒绝。内存结构体的位域初始化列表暂不支持，逐字段赋值可用。
+- 位域：连续位域按声明顺序 LSB-first 打包，每个 storage cell 最多 52 bit；寄存器结构体和内存结构体都支持。写入按位宽掩码，signed 读取做符号扩展；`&bitfield` 被拒绝。初始化列表在两种布局下都会把位域打包进共享 storage cell；省略字段补零。
 - 复合字面量支持标准 C99 写法 `(type){ ... }`：标量得到值，结构体/联合体/数组得到带作用域生命周期的隐藏对象；`&(T){ ... }` 可取地址，`(struct P){ ... }.field` 和 `(int[]){ ... }[i]` 可直接后缀访问。旧的 `(type)({ ... })` 仍可用；裸 `{ ... }` 仍保持原来的 `null_t` 语义。未写长度的数组维度由初始化器（含 `[index]` designator）推断。
 - 当复合字面量直接作为**数组声明的初始化器**时（`int a[3] = (int[]){...}`、`int a[] = (int[]){...}`），它初始化 `a` 自己的存储，不是 `a` 到隐藏对象的别名；元素类型、维度和长度会被校验。指针/表达式上下文仍保留隐藏对象。
-- cast 的抽象数组类型按“基类型 → 指针层级 → 数组维度”构造，因此 `(struct P[2][2])` 和 `(int *[2][2])` 保留真实形状。多维寄存器数组支持单 cell 元素；指针/struct/union 元素的多维数组使用 memory 布局。
+- cast 的抽象数组类型按“基类型 → 指针层级 → 数组维度”构造，因此 `(struct P[2][2])` 和 `(int *[2][2])` 保留真实形状。多维寄存器数组支持单 cell 元素和单寄存器叶子的 flat struct（含位域 storage、`byname` 成员）；普通指针/union/含数组的 struct 元素使用 memory 布局。
 - `handle` 是**一维 span**：多维数组可以传给 `int s[]`/`int s[N]` 并用行优先扁平下标访问；固定 `int s[2][3]` 参数保留形状，嵌套下标由编译器展平。handle 的 length 字段是 16 bit（最多 65535 个元素），set/get 行号和元素大小各 12 bit；encoded 常量表不作为可写 handle 传递。
 - 嵌套 designator 和 union designator 暂不支持；多维数组指针 `int (*p)[3]` 暂不支持。
 - 前向声明：`struct P;`、`union P;`、`typedef struct P P;` 声明一个不完整类型；后续定义补全同一个类型对象。完成前只能通过指针使用它；按值声明变量/成员或 `sizeof` 会被拒绝。互指结构体和模板结构体（含 `auto` 成员）都可以这样写。
