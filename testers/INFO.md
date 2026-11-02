@@ -13,8 +13,8 @@
 
 | 命令（从 `testers/unit_tests` 执行） | 读哪个目录 | 当前结果 | 判定标准 |
 |---|---|---|---|
-| `node ..\tools\check.mjs` | `check/` | **240 passed, 0 failed**（141 shape assertions, 1060 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
-| `node ..\tools\negative.mjs` | `negative/` | **92 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
+| `node ..\tools\check.mjs` | `check/` | **244 passed, 0 failed**（147 shape assertions, 1080 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
+| `node ..\tools\negative.mjs` | `negative/` | **96 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
 | `node ..\tools\nomem.mjs` | `nomem/` | **10 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
 | `node ..\tools\loadorder.mjs` | 仓库根的 `mindc*.js` | **12 passed, 0 failed, 2 exempt** | 每个入口单独起一个 `node` 进程导入，不得有循环依赖 |
 | `node ..\tools\runall.mjs` | 14 个目录：`suite/` `mem/` `arr/` `arr2/` `ptr2/` `stack/` `tests/` `uc/` `cases/` `exttests/` `hdr/` `t/` `big/` `u/` | **267/275**（8 个已知坏例以 KNOWN-GAP 如实上报，不算失败） | 能编译、能跑完不崩；带 `EXPECT:` 的还比对输出 |
@@ -60,7 +60,7 @@
 | `EXPECT: a b c` | `runall/` | 期望输出，与 `check.mjs` 同样的逐行比对；runall 目录里只有 6 个文件带它 |
 
 `check/` 的 pragma 不变性：每个用例都会被加上各种 `optimize(...)` 变体**重跑一遍**，
-输出必须完全一致。**任何 pragma 都不得改变程序输出。** 目前 240 个用例里只有
+输出必须完全一致。**任何 pragma 都不得改变程序输出。** 目前 244 个用例里只有
 t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `pointer` / `struct_pointer`
 这些变体本身要求 v150+。
 
@@ -70,13 +70,13 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 
 ## 目录地图
 
-`testers/unit_tests/` 下共 **627 个 `.c`，全部有 runner**（240 + 10 + 92 + 10 + 275 = 627）：
+`testers/unit_tests/` 下共 **636 个 `.c`，全部有 runner**（244 + 10 + 96 + 11 + 275 = 636）：
 
 | 目录 | 文件数 | 谁来跑 |
 |---|---|---|
-| `check/` | 240 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
+| `check/` | 244 | `check.mjs`（同时驱动 `check/peers/` 的 10 个对端，见下文） |
 | `t/` | 98 | `runall.mjs`（早期按主题分的用例，`2dc683e` 起纳入） |
-| `negative/` | 92 | `negative.mjs` |
+| `negative/` | 96 | `negative.mjs` |
 | `suite/` | 50 | `runall.mjs` |
 | `mem/` | 25 | `runall.mjs` |
 | `tests/` | 25 | `runall.mjs`（另有手工的 `batch.mjs [baseline]`） |
@@ -86,7 +86,7 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 | `arr2/` | 11 | `runall.mjs` |
 | `peers/` | 10 | 不是独立用例：由 `check.mjs` 代它们的属主跑 |
 | `big/` | 8 | `runall.mjs` |
-| `nomem/` | 10 | `nomem.mjs` |
+| `nomem/` | 11 | `nomem.mjs` |
 | `u/` | 6 | `runall.mjs` |
 | `exttests/` | 4 | `runall.mjs` |
 | `cases/` | 3 | `runall.mjs` |
@@ -98,7 +98,7 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 
 ## check/ 的编号约定
 
-`check/` 用 `tNN_主题.c` 命名，**编号 1–227 已用满，没有空号**，下一个用例是 `t228`。
+`check/` 用 `tNN_主题.c` 命名，**编号 1–231 已用满，没有空号**，下一个用例是 `t232`。
 另有 13 个不带编号的（`m1`–`m3`、`n1`–`n2`、`rw1`–`rw2`、`seq1`、`memsp2`–`memsp3`），
 它们早于编号制，保留原名。
 
@@ -229,6 +229,10 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 | `t225` | **§7.31**：指定初始化器——结构体/数组、全局/局部、未指定成员补零；输出 `0 2 7 0 0 0 0 0 5 3 4` |
 | `t226` | **§7.31**：宏 `#`/`##`/`__VA_ARGS__`——`STR`/`XSTR`、`CAT`/`CAT3`、`ADD`；输出 `42 hello 3 7 5` |
 | `t227` | **§7.32**：标准复合字面量——标量/旧写法、寄存器与内存结构体、指定初始化器、数组、直接后缀访问、函数参数、取地址、`sizeof`、全局对象；输出 `3 3 7 1 2 0 7 2 5 6 8 9 7 8 5 6 4 7 2 3 8 9 7 6` |
+| `t228` | **§7.33**：复合字面量作为数组初始化器——固定/开放/extern、结构体与指针二维数组、designator；输出 `7 8 9 1 2 3 4 5 6 5 6 10 20 7 3` |
+| `t229` | **§7.33**：extern 数组按实际布局导出——memory 导出 `_block/_pos`、寄存器数组导出元素名、handle 不导出；输出 `2 5 8` |
+| `t230` | **§7.33**：别名解析——本地与 extern 别名数组的 `remote()` 绑定使用根数组；输出 `2 2 5 5` |
+| `t231` | **§7.33**：extern 生命周期组合——`extern`、`extern static`、`persistent extern` 两轮运行；输出 `1 0 1 1 1 1 1 2` |
 
 设计背景见 `docs/PLAN_array_layout.md`。
 
@@ -241,7 +245,7 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 在它想守住的那条检查被删掉之后**依然会通过**——这正是删掉的检查不被发现的方式。
 所以每条 `MESSAGE:` 都必须匹配到编译器真实给出的某一条错误。
 
-**负债已清零**（`1584cf3`）。`negative/` 的 92 个用例全部带 `MESSAGE:`，没有
+**负债已清零**（`1584cf3`）。`negative/` 的 96 个用例全部带 `MESSAGE:`，没有
 `KNOWN-GAP`：原先那两个（`ovl_auto.c`、`ovl_pragma.c`）已删除——自动模板 / 重载
 已经实现，`check/t109`、`check/t110` 用正向用例断言同一事实。
 `remote_as_value_refused.c`（§7.3）是第一个真正用上 `NOT-MESSAGE:` 的用例，

@@ -2670,6 +2670,11 @@ export class CodeGenerator extends ASTVisitor {
 		for (const symbol of scope.recursivelyGetAllSymbols()) {
 			if (symbol.kind !== 'variable') continue;
 			if (symbol.isRemote) continue;			// an import
+			/*
+			A runtime handle has no stable elements or address to export; its
+			packed get/set entry points are local line numbers.
+			*/
+			if (symbol.isUnboundHandle === true) continue;
 			const type = symbol.myType?.() ?? null;
 			const isArray = !!type && type.kind === 'array';
 			/*
@@ -2702,11 +2707,36 @@ export class CodeGenerator extends ASTVisitor {
 			`x` itself).
 			*/
 			if (symbol.isRemote) continue;
-			if (!symbol.isExtern && symbol.arrayInitialValues && symbol.arrayInitialValues.length) continue;
-			const style = this.arrayStyleFor?.(symbol) ?? null;
-			if (!symbol.isExtern && (!style || style.type === 'traditional')) continue;
-			const length = this.arrayLengthOf?.(symbol) ?? arrayLengthOfType(type);
-			const assembly = symbol.getAssemblySymbol();
+			/*
+			Compile-time aliases (`int w[] = s;`) have no storage or names of
+			their own; export the root array's real representation. A runtime
+			handle was skipped above.
+			*/
+			const root = this.semantic?.arrayRootOf?.(symbol) ?? symbol;
+			if (root?.isUnboundHandle === true) continue;
+			const rootType = root.myType?.() ?? type;
+			const exported = symbol.isExtern === true || root.isExtern === true;
+			if (!exported && root.arrayInitialValues && root.arrayInitialValues.length) continue;
+			const style = this.arrayStyleFor?.(root) ?? null;
+			if (!exported && (!style || style.type === 'traditional')) continue;
+			const length = this.arrayLengthOf?.(root) ?? arrayLengthOfType(rootType);
+			const assembly = root.getAssemblySymbol();
+			/*
+			A memory array has no element names of its own; export the address
+			pair that actually exists. This works for any element type and any
+			number of dimensions (the owner and the reader have to agree on the
+			row-major stride).
+			*/
+			if (style && style.type === 'traditional') {
+				push(`${assembly}_block`);
+				push(`${assembly}_pos`);
+				continue;
+			}
+			/*
+			An encoded array is a read-only table: there is no writable element
+			register to export.
+			*/
+			if (style && style.type === 'encoded') continue;
 			if (style && style.implement === 'lookup') {
 				/*
 				The elements are not named after the array at all -- they are named
@@ -2714,9 +2744,27 @@ export class CodeGenerator extends ASTVisitor {
 				what the other processor reads. Those are the names that have to be
 				declared, and the array's own name says nothing about them.
 				*/
-				for (const name of this.lookupNamesOf(length, {}, symbol).names) push(name);
+				for (const name of this.lookupNamesOf(length, {}, root).names) push(name);
 				continue;
 			}
+			/*
+			One name per element only describes a single-cell element. A pointer
+			needs a block/pos pair, and a struct has several member registers;
+			those representations need a memory descriptor instead.
+			*/
+			const elementType = rootType?.pointerTo ?? null;
+			const dimensionCount = this.semantic?.arrayDimensionsOf
+				? this.semantic.arrayDimensionsOf(rootType).length
+				: (Array.isArray(rootType?.arraySize) ? rootType.arraySize.length : 1);
+			/*
+			The flat `<name>_<i>` scheme describes one element per register.
+			Multi-dimensional register arrays do not have that layout in the
+			current implementation, and pointer/struct/array elements need more
+			than one register (or a memory descriptor).
+			*/
+			const flatElement = dimensionCount === 1 && !!elementType
+				&& !['pointer', 'struct', 'union', 'array'].includes(elementType.kind);
+			if (!flatElement) continue;
 			for (let i = 0; i < length; i++) push(`${assembly}_${i}`);
 		}
 		return names;
@@ -5362,6 +5410,19 @@ export class CodeGenerator extends ASTVisitor {
 			*/
 			const arraySymbol = this.arraySymbolOf(objectRoot);
 			if (arraySymbol) {
+				const arrayType = arraySymbol.myType?.() ?? null;
+				const dimensions = this.semantic?.arrayDimensionsOf
+					? this.semantic.arrayDimensionsOf(arrayType).length : 1;
+				const arrayStyle = this.arrayStyleFor(arraySymbol);
+				if (dimensions > 1 && arrayStyle && arrayStyle.type !== 'traditional'
+					&& arraySymbol.multiDimLayoutError !== true) {
+					arraySymbol.multiDimLayoutError = true;
+					this.addError(
+						`Multidimensional register/lookup arrays are not supported yet: `
+						+ `'${arraySymbol.name}' needs a memory-backed layout`,
+						node.location ?? arraySymbol.location ?? null);
+					return new MemoryRefRet(glob, [], 'null', node.dataType ?? null, true);
+				}
 				/*
 				A compound literal array that is held in registers still has to
 				be filled before an element is read. Evaluating the literal here

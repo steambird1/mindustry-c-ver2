@@ -20,9 +20,9 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 240 passed, 0 failed (141 shape assertions, 1060 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 92 passed, 0 failed |
-| `node ../tools/nomem.mjs` | 10 passed, 0 failed |
+| `node ../tools/check.mjs` | 244 passed, 0 failed (147 shape assertions, 1080 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 96 passed, 0 failed |
+| `node ../tools/nomem.mjs` | 11 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
 
@@ -86,6 +86,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | C99 headers + static assert/__func__/restrict (§7.30) | **done**; compatibility headers, NDEBUG, declaration touches, tests t222–t224 | §7.30 |
 | designated initializers + macro #/##/__VA_ARGS__ (§7.31) | **done**; designator normalization, macro operator expansion, tests t225/t226 | §7.31 |
 | standard compound literals (§7.32) | **done**; scalar/aggregate/array forms, hidden objects, postfix access and address-of, test t227 | §7.32 |
+| extern array representation + compound array initializers (§7.33) | **done**; actual-layout exports, alias roots, handle warnings/refusals, array-initializer normalization, tests t228–t231 | §7.33 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -820,21 +821,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 627 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 636 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 627 under `testers/unit_tests`, every one of
+bring the count to 636 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 240 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 92 | `negative/` |
-| `nomem.mjs` | 10 | `nomem/` |
+| `check.mjs` | 244 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `negative.mjs` | 96 | `negative/` |
+| `nomem.mjs` | 11 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-240 + 10 + 92 + 10 + 275 = 627. The caveat that replaces "no runner" is weaker but real:
+244 + 10 + 96 + 11 + 275 = 636. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -1734,3 +1735,41 @@ called `f` even when `a` was false.
 - Current limits: nested designators and union designators (also rejected for
   declarations), and multidimensional array *pointers* (`int (*p)[3]`) are not
   supported.
+
+### 7.33 Extern array representation and compound array initializers
+
+- An array declaration initialised by a compound literal
+  (`int a[3] = (int[]){...}`, `int a[] = (int[]){...}`) now treats the literal
+  as its initializer list. The declared array owns its storage; it is not an
+  alias of the hidden compound object. The cast is still kept for pointer
+  declarations and expression contexts.
+- The normalizer runs before dimension deduction, validates element type and
+  dimension count/length, transfers finite dimensions and infers open ones
+  (including designator extent). It fixes the embedded/no-memory path, which
+  previously saw a `CastExpression` and initialized nothing.
+- `typeInfoFromTypeNode` builds a cast type structurally (base -> pointer
+  levels -> array dimensions), so `(struct P[2][2])` and `(int *[2][2])` keep
+  their real shapes. `getTypeNameFromTypeNode` also retains array dimensions on
+  struct/union/enum names.
+- `collectRemoteExportedNames` now exports each extern array's actual
+  representation: `_block` / `_pos` for a memory array, element names for a
+  register array, content names for lookup, and nothing for a runtime handle.
+  Compile-time aliases (`int w[] = s;`) resolve to the root array for exports
+  and for `remote()`; runtime handles do not.
+- `extern` on an unbound array handle only warns: the handle stays local and
+  volatile-like for optimisation, but cannot be externally element-addressed.
+  `remote()` whose target is a handle is a compile error, and handle elements
+  are not exported.
+- `extern static` (run-local guard) and `persistent extern` (cross-run guard)
+  are supported and tested; an extern initializer still runs at its position
+  on every pass, while an extern without an initializer is left alone.
+- Multidimensional register/lookup arrays are rejected when an element is
+  actually read or written; `lenof`/`sizeof` remain available. Memory-backed
+  multidimensional arrays continue to work, and extern memory arrays export
+  their block/pos pair. `remote()` arrays remain one-dimensional.
+- Cases: t228 (compound array initializers: fixed/open/extern, struct and
+  pointer 2-D, designators), t229 (extern memory/register exports and handle
+  suppression), t230 (alias remote resolution), t231 (extern lifetime
+  combinations); negative tests for a remote handle target, compound length and
+  element-type mismatches, and a register multidimensional layout; nomem n11
+  (compound array initializer without a memory block).

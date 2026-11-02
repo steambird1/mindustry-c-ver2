@@ -2400,6 +2400,14 @@ export class SemanticAnalyzer extends ASTVisitor {
 			but there is no harm in accepting an inner one too when the nesting
 			makes it obvious.
 			*/
+			/*
+			`int a[3] = (int[]){...}` initialises `a`'s own storage; it is not
+			an alias of the compound literal. Expanding the literal before the
+			dimensions are deduced makes it the ordinary list initializer it
+			means, and avoids the embedded-array path seeing a CastExpression
+			(which has no element list).
+			*/
+			this.normalizeCompoundArrayInitializer(declarator, finalType);
 			this.deduceRemoteArrayDimensions(declarator);
 			/*
 			`char a[] = "hi"` is a C character array: expand the literal into
@@ -2560,6 +2568,13 @@ export class SemanticAnalyzer extends ASTVisitor {
 					varSymbol.isUnboundHandle = true;
 					/* The one representation this cell can have. */
 					varSymbol.arrayParamRep = 'handle';
+					if (varSymbol.isExtern) {
+						this.addWarning(
+							`'${declarator.name}' is an array handle, which packs local helper `
+							+ `entry points; 'extern' cannot make it accessible to another processor. `
+							+ `Bind a concrete array, or expose an array with a fixed layout instead.`,
+							declarator.location);
+					}
 				}
 			}
 
@@ -3011,6 +3026,84 @@ export class SemanticAnalyzer extends ASTVisitor {
 		reference.setAttribute('location', node.location);
 		reference.parent = parent;
 		return reference;
+	}
+
+	/**
+	 * `int a[3] = (int[]){1,2,3};` initialises the declared array's own
+	 * storage. Expand the compound literal into the ordinary initializer list
+	 * before dimensions are deduced, so memory and register layouts both use
+	 * the same, well-tested declaration path.
+	 *
+	 * The cast is left alone for pointer declarations and expression contexts
+	 * (`int *p = (int[]){...}`), where the compound literal really is an
+	 * object of its own.
+	 *
+	 * @param {ASTNode} declarator
+	 * @param {TypeInfo?} elementType The declared array's element type
+	 * @returns {void}
+	 */
+	normalizeCompoundArrayInitializer(declarator, elementType) {
+		const initializer = declarator?.initializer;
+		if (!initializer || initializer.getAttribute?.('isCompoundLiteral') !== true) return;
+		const list = initializer.expression;
+		if (!list || list.type !== 'InitializerList') return;
+		const dims = declarator.arrayDimensions;
+		if (!Array.isArray(dims) || dims.length === 0) return;
+
+		const castType = this.typeInfoFromTypeNode(initializer.typeNode);
+		if (!castType || castType.kind !== 'array') return;
+		const castElement = castType.pointerTo ?? null;
+		if (elementType && castElement
+			&& !this.isSameType(elementType, castElement)
+			&& !this.isSameType(castElement, elementType)) {
+			this.addError(
+				`Cannot initialize array '${declarator.name}' with a compound literal of `
+				+ `element type '${this.typeToString(castElement)}'`,
+				initializer.location ?? declarator.location);
+			return;
+		}
+
+		const castSizes = Array.isArray(castType.arraySize)
+			? castType.arraySize : [castType.arraySize];
+		if (castSizes.length !== dims.length) {
+			this.addError(
+				`Array '${declarator.name}' and its compound literal have different `
+				+ `dimension counts`,
+				initializer.location ?? declarator.location);
+			return;
+		}
+
+		let level = list;
+		for (let i = 0; i < dims.length; i++) {
+			const declared = dims[i];
+			const castSize = Number(castSizes[i]);
+			if (declared) {
+				const declaredValue = this.constantCaseValue(declared);
+				if (declaredValue !== undefined && Number.isFinite(castSize)
+					&& Math.trunc(declaredValue) !== Math.trunc(castSize)) {
+					this.addError(
+						`Array '${declarator.name}' has length ${Math.trunc(declaredValue)}, `
+						+ `but its compound literal has length ${Math.trunc(castSize)}`,
+						initializer.location ?? declarator.location);
+					return;
+				}
+			} else if (Number.isFinite(castSize)) {
+				dims[i] = ASTBuilder.numericLiteral(Math.trunc(castSize));
+			} else {
+				/*
+				`(int[])` / `(int[][3])`: the literal itself supplies the
+				missing length. Count designators too, so
+				`(int[]){[2] = 7}` means length 3.
+				*/
+				const count = this.compoundInitializerCount(level);
+				if (count > 0) dims[i] = ASTBuilder.numericLiteral(count);
+			}
+			level = this.descendInitializer(level);
+		}
+
+		declarator.initializer = list;
+		list.parent = declarator;
+		declarator.setAttribute('compoundInitializerExpanded', true);
 	}
 
 	deduceArrayDimensions(declarator, baseType) {
@@ -3579,6 +3672,23 @@ export class SemanticAnalyzer extends ASTVisitor {
 		representation this compiler does not build yet. Reserved below.
 		*/
 		if (targetSymbol.myType?.()?.kind === 'array') {
+			/*
+			A runtime handle has no static root and its packed get/set helpers
+			are local line numbers; another processor cannot follow it. Static
+			aliases (`int w[] = s;`) do have a root, and are resolved here.
+			*/
+			const root = this.arrayRootOf(targetSymbol);
+			if (root?.isUnboundHandle === true) {
+				this.addError(
+					`'${targetSymbol.name}' is a runtime array handle and cannot be the `
+					+ `target of remote(): it can be rebound and its helper entry points `
+					+ `are local to this processor. Name the concrete array, or give it a `
+					+ `fixed layout.`,
+					location);
+				declarator.initializer = null;
+				return;
+			}
+			targetSymbol = root ?? targetSymbol;
 			if (!this.supportsRemoteArray()) {
 				this.addError(`A remote array is not supported yet`, location);
 				declarator.initializer = null;
@@ -3857,6 +3967,57 @@ export class SemanticAnalyzer extends ASTVisitor {
 	// 修改getTypeNameFromTypeNode以处理指针和结构体
 	// Priority adjusted manually !!!
 	// Also add pointer dereference manually
+	/**
+	 * Build the TypeInfo a cast's type node describes.
+	 *
+	 * `getTypeInfo(getTypeNameFromTypeNode(node))` cannot express an array of
+	 * pointers: the textual form `int*[2]` would be read as a pointer to an
+	 * array. Applying the pointer levels first and the array dimensions on the
+	 * outside preserves the abstract declarator's real shape, including
+	 * `struct P[2][2]` and `int *[2][2]`.
+	 *
+	 * @param {ASTNode?} typeNode
+	 * @returns {TypeInfo?}
+	 */
+	typeInfoFromTypeNode(typeNode) {
+		if (!typeNode) return null;
+		if (typeNode.isTypeInfo === true) return typeNode;
+
+		const baseNode = Object.create(Object.getPrototypeOf(typeNode));
+		Object.assign(baseNode, typeNode);
+		baseNode.pointerDepth = 0;
+		baseNode.pointerQualifiers = [];
+		baseNode.arrayDimensions = [];
+		let result = this.getTypeInfo(this.getTypeNameFromTypeNode(baseNode));
+		if (!result) return null;
+
+		const depth = typeNode.pointerDepth ?? typeNode.type?.pointerDepth ?? 0;
+		const levelQualifiers = typeNode.pointerQualifiers
+			?? typeNode.type?.pointerQualifiers ?? [];
+		for (let i = 0; i < depth; i++) {
+			const pointer = new TypeInfo('', 'pointer', 2);
+			pointer.pointerTo = result;
+			pointer.qualifiers = [...(levelQualifiers[i] ?? [])];
+			result = pointer;
+		}
+
+		const dimensions = typeNode.arrayDimensions ?? [];
+		if (dimensions.length > 0) {
+			const sizes = dimensions.map(dimension => {
+				if (!dimension) return NaN;
+				const value = this.constantCaseValue(dimension);
+				return value === undefined ? NaN : Math.trunc(value);
+			});
+			let total = 1;
+			for (const size of sizes) total *= size;
+			const array = new TypeInfo('', 'array', total);
+			array.arraySize = sizes;
+			array.pointerTo = result;
+			result = array;
+		}
+		return result;
+	}
+
 	// This function doesn't case const qualifier
 	/**
 	 * 
@@ -3894,42 +4055,43 @@ export class SemanticAnalyzer extends ASTVisitor {
 				prefix = attributes.join(' ') + ' ';
 		}
 
-		// 处理结构体/联合体类型
-        if (typeNode.type === 'TypeSpecifier' && 
-            (typeNode.typeName === 'struct' || typeNode.typeName === 'union')) {
-            const structName = typeNode.getAttribute('structOrUnionName');
-            return prefix + (structName || typeNode.typeName) + ptrSuffix;
-        }
-		// 枚举类型：`enum Tag` / `enum { ... }`
-		if (typeNode.type === 'TypeSpecifier' && typeNode.typeName === 'enum') {
-			const enumName = typeNode.getAttribute('enumName');
-			return prefix + (enumName || 'enum') + ptrSuffix;
-		}
-
+		let arraySuffix = '';
 		if (typeNode.arrayDimensions && typeNode.arrayDimensions.length) {
 			/*
 			An unspecified dimension (`int p[]`) has no node to read a value
 			from -- it is exactly the "any size" the caller is allowed to pass.
 			*/
-			ptrSuffix += ' ' + typeNode.arrayDimensions.map(dim => {
+			arraySuffix = ' ' + typeNode.arrayDimensions.map(dim => {
 				if (!dim) return '[]';
 				const folded = this.constantCaseValue(dim);
 				const value = folded !== undefined ? Math.trunc(folded) : (dim.value ?? '');
 				return `[${value}]`;
 			}).join('');
 		}
+
+		// 处理结构体/联合体类型
+        if (typeNode.type === 'TypeSpecifier' &&
+            (typeNode.typeName === 'struct' || typeNode.typeName === 'union')) {
+            const structName = typeNode.getAttribute('structOrUnionName');
+            return prefix + (structName || typeNode.typeName) + ptrSuffix + arraySuffix;
+        }
+		// 枚举类型：`enum Tag` / `enum { ... }`
+		if (typeNode.type === 'TypeSpecifier' && typeNode.typeName === 'enum') {
+			const enumName = typeNode.getAttribute('enumName');
+			return prefix + (enumName || 'enum') + ptrSuffix + arraySuffix;
+		}
 		
         // 如果是TypeSpecifier节点
         if (typeNode.typeName && typeof typeNode.typeName === 'string') {
-            return prefix + typeNode.typeName + ptrSuffix;
+            return prefix + typeNode.typeName + ptrSuffix + arraySuffix;
         }
 		if (typeof typeNode.type === 'object') {
-			return prefix + this.getTypeNameFromTypeNode(typeNode.type) + ptrSuffix;
+			return prefix + this.getTypeNameFromTypeNode(typeNode.type) + ptrSuffix + arraySuffix;
 		}
         
         // 如果是标识符节点（处理typedef定义的类型）
         if (typeNode.type === 'Identifier') {
-            return typeNode.name + ptrSuffix;
+            return typeNode.name + ptrSuffix + arraySuffix;
         }
         
         return null;
@@ -5178,6 +5340,27 @@ export class SemanticAnalyzer extends ASTVisitor {
             ?? this.currentScope?.lookup?.(node.name)
             ?? this.globalScope?.lookup?.(node.name)
             ?? null;
+    }
+
+    /**
+     * Follow compile-time array aliases (`int w[] = s;`) to the array that
+     * really owns the storage.
+     *
+     * A runtime handle (`int a[]; a = b;`) is deliberately NOT followed: it
+     * is a value that can be rebound, has no static root, and its packed
+     * helper entry points are local to this processor.
+     *
+     * @param {SymbolEntry?} symbol
+     * @returns {SymbolEntry?}
+     */
+    arrayRootOf(symbol) {
+        let current = symbol ?? null;
+        const seen = new Set();
+        while (current?.arrayAliasOf && !seen.has(current)) {
+            seen.add(current);
+            current = current.arrayAliasOf;
+        }
+        return current ?? symbol ?? null;
     }
 
     /**
@@ -8654,11 +8837,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 			case 'CastExpression':
 				// 类型转换表达式的类型是转换后的类型
 				if (node.typeNode) {
-					const typeNode = node.typeNode;
-					const typeName = this.getTypeNameFromTypeNode(typeNode);
-					let baseType = this.getTypeInfo(typeName);
-					
-					return baseType;
+					return this.typeInfoFromTypeNode(node.typeNode);
 				}
 				return null;
 
