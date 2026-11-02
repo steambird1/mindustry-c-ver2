@@ -18,6 +18,7 @@ Annotations a test file may carry in comments:
   /* NO-INVARIANT *​/                skip the pragma-invariance run below
   /* NO-INVARIANT: optimize(array) *​/   skip only these pragmas
   /* VERSION: 148 *​/                compile for an older target version
+  /* CONCAT *​/                     compare the print buffer without added newlines
 
 An annotation is read out of the comments by `annotations.mjs`, and its value
 runs to the END OF ITS LINE -- so it may contain `*`, which a regex usually
@@ -61,7 +62,8 @@ for (const f of files) {
 	const expectedLines = annotationsOf(src, 'EXPECT-LINE');
 	const versionText = annotationWords(src, 'VERSION')[0] ?? null;
 	const extra = versionText !== null ? { targetVersion: Number(versionText) } : {};
-	const r = await simulate(full, undefined, extra);
+	const runOptions = hasBareAnnotation(src, 'CONCAT') ? { printTerminator: '' } : {};
+	const r = await simulate(full, undefined, extra, runOptions);
 	const problems = [];
 	if (!r.success) { console.log(`FAIL ${f}: compile error: ${r.errors.join(' | ')}`); fail++; continue; }
 	if (r.trap) { console.log(`FAIL ${f}: runtime trap: ${r.trap}`); fail++; continue; }
@@ -115,7 +117,7 @@ for (const f of files) {
 			const alt = path.join(dir, `${path.basename(f, '.c')}__INV.c`);
 			fs.writeFileSync(alt, `${pragma}\n${src}`);
 			let v;
-			try { v = await simulate(alt, undefined, extra); }
+			try { v = await simulate(alt, undefined, extra, runOptions); }
 			finally { fs.unlinkSync(alt); }
 			if (!v.success) {
 				problems.push(`     with ${pragma}: compile error: ${v.errors.join(' | ')}`);

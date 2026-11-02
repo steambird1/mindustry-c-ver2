@@ -82,7 +82,7 @@ export async function compileAndRun(source, memoryBlocks = [{ name: 'bank1', siz
 	return { result, memoryBlocks };
 }
 
-export async function simulate(pathOrSource, memoryBlocks, extraAttributes = {}) {
+export async function simulate(pathOrSource, memoryBlocks, extraAttributes = {}, runOptions = {}) {
 	const source = pathOrSource.includes('\n') || !/\.c$/.test(pathOrSource)
 		? pathOrSource : fs.readFileSync(pathOrSource, 'utf8');
 	const runs = Math.max(1, Math.min(100,
@@ -245,7 +245,7 @@ export async function simulate(pathOrSource, memoryBlocks, extraAttributes = {})
 		sources.push({ name: '__main__', deviceName: selfMatch ? selfMatch[1] : undefined,
 			code: String(result.code ?? '') });
 		const world = runProcessors(sources, {
-			memoryBlocks: blocks, devices, maxSteps: 5_000_000, ...worldOptions
+			memoryBlocks: blocks, devices, maxSteps: 5_000_000, ...worldOptions, ...runOptions
 		});
 		return {
 			success: true,
@@ -261,7 +261,7 @@ export async function simulate(pathOrSource, memoryBlocks, extraAttributes = {})
 	}
 	const proc = runProgram(String(result.code ?? ''), {
 		links, devices, maxSteps: 5_000_000, runs,
-		...worldOptions
+		...worldOptions, ...runOptions
 	});
 	return {
 		success: true,

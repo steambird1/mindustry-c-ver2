@@ -158,6 +158,7 @@ export class Processor {
 		this.links = options.links ?? [];
 		this.namedDevices = options.devices ?? {};
 		this.maxSteps = options.maxSteps ?? 2_000_000;
+		this.printTerminator = options.printTerminator ?? '\n';
 		this.buffer = '';
 		this.lines = [];
 		this.draws = [];
@@ -416,7 +417,7 @@ export class Processor {
 				next(); return;
 			}
 			case 'print': {
-				this.buffer += this.format(a(0)) + '\n';
+				this.buffer += this.format(a(0)) + this.printTerminator;
 				next(); return;
 			}
 			case 'printchar': {
@@ -823,7 +824,8 @@ export function runProcessors(sources, options = {}) {
 			sensorProvider: options.sensorProvider ?? null,
 			unitProvider: options.unitProvider ?? null,
 			ucontrolProvider: options.ucontrolProvider ?? null,
-			ulocateProvider: options.ulocateProvider ?? null
+			ulocateProvider: options.ulocateProvider ?? null,
+			printTerminator: options.printTerminator ?? '\n'
 		});
 	});
 	/*

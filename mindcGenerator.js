@@ -994,6 +994,416 @@ export class CodeGenerator extends ASTVisitor {
 	}
 
 	/**
+	 * Packed spec for the runtime printf helpers:
+	 * width: low 8 bits; precision + 1: next 8 bits (0 = no precision);
+	 * flags: bits 16+ (1 left, 2 zero, 4 plus, 8 space).
+	 */
+	printfSpecCode(width, precision, flags = '') {
+		let bits = 0;
+		if (flags.includes('-')) bits |= 1;
+		if (flags.includes('0')) bits |= 2;
+		if (flags.includes('+')) bits |= 4;
+		if (flags.includes(' ')) bits |= 8;
+		const pcode = precision === null ? 0 : precision + 1;
+		return (width & 255) | ((pcode & 255) << 8) | (bits << 16);
+	}
+
+	ensurePrintfHelper(kind) {
+		const name = `__printf_${kind}`;
+		if (this.functionManagement.functionCollection.has(name)) return name;
+		let body;
+		if (kind === 'int') body = this.buildPrintfIntHelper();
+		else if (kind === 'float') body = this.buildPrintfFloatHelper();
+		else body = this.buildPrintfStringHelper();
+		this.functionManagement.addFunction(name, body, null, [], true, false, true);
+		return name;
+	}
+
+	printfHelperCall(kind, valueRet, width, precision, flags) {
+		const name = this.ensurePrintfHelper(kind);
+		const spec = this.printfSpecCode(width, precision, flags);
+		return this.functionManagement.getFunctionCall(name, new Map([
+			['__printf_value', valueRet],
+			['__printf_spec', String(spec)]
+		]), null, false, null);
+	}
+
+	/** Small instruction builder shared by the runtime printf helpers. */
+	printfBodyBuilder(prefix) {
+		const body = [];
+		let id = 0;
+		const newLabel = () => `${prefix}_${id++}`;
+		const push = (...items) => items.forEach(item => body.push(item));
+		const set = (target, value) => push(InstructionBuilder.set(target, value));
+		const op = (type, target, a, b = null) => push(InstructionBuilder.op(type, target, a, b));
+		const print = value => push(InstructionBuilder.print(value));
+		const jump = (name, condition, a = null, b = null) => {
+			const instruction = InstructionBuilder.jump(`{${name}}`, condition, a, b);
+			push(instruction);
+			return instruction;
+		};
+		const branch = (condition, a = null, b = null) => {
+			const name = newLabel();
+			return { name, jump: jump(name, condition, a, b) };
+		};
+		const mark = (...branches) => branches.forEach(branch => {
+			if (branch) push(new InstructionReferrer(branch.jump, branch.name));
+		});
+		const loopStart = () => {
+			const name = newLabel();
+			const back = InstructionBuilder.jump(`{${name}}`, 'always');
+			push(new InstructionReferrer(back, name));
+			return back;
+		};
+		const repeat = (count, char) => {
+			const back = loopStart();
+			const done = branch('lessThanEq', count, 0);
+			print(char);
+			op('sub', count, count, 1);
+			push(back);
+			mark(done);
+		};
+		return { body, push, set, op, print, jump, branch, mark, loopStart, repeat };
+	}
+
+	buildPrintfIntHelper() {
+		const b = this.printfBodyBuilder('pf_int');
+		const { body, push, set, op, print, branch, mark, loopStart, repeat } = b;
+		const value = '__printf_value', spec = '__printf_spec';
+		const width = '__pf_width', pcode = '__pf_pcode', prec = '__pf_prec';
+		const flags = '__pf_flags', tmp = '__pf_tmp', abs = '__pf_abs';
+		const digits = '__pf_digits', zeroes = '__pf_zeroes', num = '__pf_num';
+		const len = '__pf_len', pad = '__pf_pad';
+		const sign = '__pf_sign', signlen = '__pf_signlen', zeroPad = '__pf_zeropad';
+
+		op('and', width, spec, 255);
+		op('shr', tmp, spec, 8);
+		op('and', pcode, tmp, 255);
+		op('shr', flags, spec, 16);
+		op('sub', prec, pcode, 1);
+
+		set(signlen, 0);
+		const endJumps = [];
+		const positive = branch('greaterThanEq', value, 0);
+		set(sign, '"-"');
+		set(signlen, 1);
+		endJumps.push(branch('always'));
+		mark(positive);
+		op('and', tmp, flags, 4);
+		const plus = branch('notEqual', tmp, 0);
+		op('and', tmp, flags, 8);
+		const space = branch('notEqual', tmp, 0);
+		endJumps.push(branch('always'));
+		mark(plus);
+		set(sign, '"+"');
+		set(signlen, 1);
+		endJumps.push(branch('always'));
+		mark(space);
+		set(sign, '" "');
+		set(signlen, 1);
+		mark(...endJumps);
+		op('abs', abs, value);
+
+		set(digits, 1);
+		set(tmp, abs);
+		const countBack = loopStart();
+		const countDone = branch('lessThan', tmp, 10);
+		op('div', tmp, tmp, 10);
+		op('floor', tmp, tmp);
+		op('add', digits, digits, 1);
+		push(countBack);
+		mark(countDone);
+
+		op('sub', zeroes, prec, digits);
+		const zeroNeg = branch('greaterThanEq', zeroes, 0);
+		set(zeroes, 0);
+		mark(zeroNeg);
+		op('max', num, digits, prec);
+		op('add', len, num, signlen);
+		op('sub', pad, width, len);
+		const padNeg = branch('greaterThanEq', pad, 0);
+		set(pad, 0);
+		mark(padNeg);
+
+		set(zeroPad, 0);
+		op('and', tmp, flags, 2);
+		const noZero = branch('equal', tmp, 0);
+		const hasPrec = branch('notEqual', pcode, 0);
+		set(zeroPad, 1);
+		mark(noZero, hasPrec);
+
+		const emitSign = () => {
+			const noSign = branch('equal', signlen, 0);
+			print(sign);
+			mark(noSign);
+		};
+		const end = [];
+		op('and', tmp, flags, 1);
+		const right = branch('equal', tmp, 0);
+
+		// left aligned
+		emitSign();
+		repeat(zeroes, '"0"');
+		print(abs);
+		repeat(pad, '" "');
+		end.push(branch('always'));
+
+		mark(right);
+		const rightSpace = branch('equal', zeroPad, 0);
+
+		// right aligned, zero padding
+		emitSign();
+		repeat(pad, '"0"');
+		repeat(zeroes, '"0"');
+		print(abs);
+		end.push(branch('always'));
+
+		mark(rightSpace);
+		// right aligned, space padding
+		repeat(pad, '" "');
+		emitSign();
+		repeat(zeroes, '"0"');
+		print(abs);
+		mark(...end);
+
+		return new Instruction(body);
+	}
+
+	buildPrintfFloatHelper() {
+		const b = this.printfBodyBuilder('pf_float');
+		const { push, set, op, print, branch, mark, loopStart, repeat } = b;
+		const value = '__printf_value', spec = '__printf_spec';
+		const width = '__pff_width', pcode = '__pff_pcode', prec = '__pff_prec';
+		const flags = '__pff_flags', tmp = '__pff_tmp', abs = '__pff_abs';
+		const digits = '__pff_digits', num = '__pff_num', len = '__pff_len';
+		const pad = '__pff_pad', sign = '__pff_sign', signlen = '__pff_signlen';
+		const zeroPad = '__pff_zeropad', scale = '__pff_scale', pcopy = '__pff_pcopy';
+		const scaled = '__pff_scaled', intPart = '__pff_int', frac = '__pff_frac';
+		const pointLen = '__pff_pointlen', divisor = '__pff_divisor';
+		const fracCount = '__pff_fraccount', digit = '__pff_digit';
+
+		op('and', width, spec, 255);
+		op('shr', tmp, spec, 8);
+		op('and', pcode, tmp, 255);
+		op('shr', flags, spec, 16);
+		op('sub', prec, pcode, 1);
+
+		set(signlen, 0);
+		const endJumps = [];
+		const positive = branch('greaterThanEq', value, 0);
+		set(sign, '"-"');
+		set(signlen, 1);
+		endJumps.push(branch('always'));
+		mark(positive);
+		op('and', tmp, flags, 4);
+		const plus = branch('notEqual', tmp, 0);
+		op('and', tmp, flags, 8);
+		const space = branch('notEqual', tmp, 0);
+		endJumps.push(branch('always'));
+		mark(plus);
+		set(sign, '"+"');
+		set(signlen, 1);
+		endJumps.push(branch('always'));
+		mark(space);
+		set(sign, '" "');
+		set(signlen, 1);
+		mark(...endJumps);
+		op('abs', abs, value);
+
+		set(scale, 1);
+		set(pcopy, prec);
+		const scaleBack = loopStart();
+		const scaleDone = branch('lessThanEq', pcopy, 0);
+		op('mul', scale, scale, 10);
+		op('sub', pcopy, pcopy, 1);
+		push(scaleBack);
+		mark(scaleDone);
+
+		op('mul', tmp, abs, scale);
+		op('add', tmp, tmp, 0.5);
+		op('floor', scaled, tmp);
+		op('div', intPart, scaled, scale);
+		op('floor', intPart, intPart);
+		op('mul', tmp, intPart, scale);
+		op('sub', frac, scaled, tmp);
+
+		set(digits, 1);
+		set(tmp, intPart);
+		const countBack = loopStart();
+		const countDone = branch('lessThan', tmp, 10);
+		op('div', tmp, tmp, 10);
+		op('floor', tmp, tmp);
+		op('add', digits, digits, 1);
+		push(countBack);
+		mark(countDone);
+
+		set(pointLen, 0);
+		const noPoint = branch('lessThanEq', prec, 0);
+		op('add', pointLen, prec, 1);
+		mark(noPoint);
+		op('add', num, digits, pointLen);
+		op('add', len, num, signlen);
+		op('sub', pad, width, len);
+		const padNeg = branch('greaterThanEq', pad, 0);
+		set(pad, 0);
+		mark(padNeg);
+
+		set(zeroPad, 0);
+		op('and', tmp, flags, 2);
+		const noZero = branch('equal', tmp, 0);
+		set(zeroPad, 1);
+		mark(noZero);
+
+		const emitSign = () => {
+			const noSign = branch('equal', signlen, 0);
+			print(sign);
+			mark(noSign);
+		};
+		const emitValue = () => {
+			print(intPart);
+			const skipPoint = branch('lessThanEq', prec, 0);
+			print('"."');
+			op('div', divisor, scale, 10);
+			set(fracCount, prec);
+			const fracBack = loopStart();
+			const fracDone = branch('lessThanEq', fracCount, 0);
+			op('div', digit, frac, divisor);
+			op('floor', digit, digit);
+			print(digit);
+			op('mul', tmp, digit, divisor);
+			op('sub', frac, frac, tmp);
+			op('div', divisor, divisor, 10);
+			op('floor', divisor, divisor);
+			op('sub', fracCount, fracCount, 1);
+			push(fracBack);
+			mark(fracDone);
+			mark(skipPoint);
+		};
+
+		const end = [];
+		op('and', tmp, flags, 1);
+		const right = branch('equal', tmp, 0);
+
+		// left aligned
+		emitSign();
+		emitValue();
+		repeat(pad, '" "');
+		end.push(branch('always'));
+
+		mark(right);
+		const rightSpace = branch('equal', zeroPad, 0);
+
+		// right aligned, zero padding
+		emitSign();
+		repeat(pad, '"0"');
+		emitValue();
+		end.push(branch('always'));
+
+		mark(rightSpace);
+		// right aligned, space padding
+		repeat(pad, '" "');
+		emitSign();
+		emitValue();
+		mark(...end);
+
+		return new Instruction(b.body);
+	}
+
+	buildPrintfStringHelper() {
+		const b = this.printfBodyBuilder('pf_string');
+		const { push, set, op, print, branch, mark, loopStart, repeat } = b;
+		const value = '__printf_value', spec = '__printf_spec';
+		const width = '__pfs_width', pcode = '__pfs_pcode', prec = '__pfs_prec';
+		const flags = '__pfs_flags', tmp = '__pfs_tmp';
+		const length = '__pfs_len', effective = '__pfs_effective';
+		const pad = '__pfs_pad', index = '__pfs_index', char = '__pfs_char';
+
+		op('and', width, spec, 255);
+		op('shr', tmp, spec, 8);
+		op('and', pcode, tmp, 255);
+		op('shr', flags, spec, 16);
+
+		push(InstructionBuilder.sensor(length, value, '@size'));
+		set(effective, length);
+		const noPrec = branch('equal', pcode, 0);
+		op('sub', prec, pcode, 1);
+		op('min', effective, length, prec);
+		mark(noPrec);
+
+		op('sub', pad, width, effective);
+		const padNeg = branch('greaterThanEq', pad, 0);
+		set(pad, 0);
+		mark(padNeg);
+
+		const emitChars = () => {
+			set(index, 0);
+			const back = loopStart();
+			const done = branch('greaterThanEq', index, effective);
+			push(InstructionBuilder.read(char, value, index));
+			push(InstructionBuilder.printchar(char));
+			op('add', index, index, 1);
+			push(back);
+			mark(done);
+		};
+
+		const end = [];
+		op('and', tmp, flags, 1);
+		const right = branch('equal', tmp, 0);
+
+		// left aligned
+		emitChars();
+		repeat(pad, '" "');
+		end.push(branch('always'));
+
+		mark(right);
+		// right aligned
+		repeat(pad, '" "');
+		emitChars();
+		mark(...end);
+
+		return new Instruction(b.body);
+	}
+
+	/** Simple runtime integer width: no flags, no precision. */
+	printfInlineIntWidth(valueRet, width) {
+		const b = this.printfBodyBuilder('pf_iw');
+		const { body, push, set, op, print, branch, mark, loopStart, repeat } = b;
+		const val = this.getTempSymbol().getAssemblySymbol();
+		const digits = this.getTempSymbol().getAssemblySymbol();
+		const tmp = this.getTempSymbol().getAssemblySymbol();
+		const signlen = this.getTempSymbol().getAssemblySymbol();
+		const len = this.getTempSymbol().getAssemblySymbol();
+		const pad = this.getTempSymbol().getAssemblySymbol();
+
+		set(val, valueRet);
+		set(signlen, 0);
+		const positive = branch('greaterThanEq', val, 0);
+		print('"-"');
+		set(signlen, 1);
+		mark(positive);
+		op('abs', val, val);
+
+		set(digits, 1);
+		set(tmp, val);
+		const countBack = loopStart();
+		const countDone = branch('lessThan', tmp, 10);
+		op('div', tmp, tmp, 10);
+		op('floor', tmp, tmp);
+		op('add', digits, digits, 1);
+		push(countBack);
+		mark(countDone);
+
+		op('add', len, digits, signlen);
+		op('sub', pad, width, len);
+		const padNeg = branch('greaterThanEq', pad, 0);
+		set(pad, 0);
+		mark(padNeg);
+		repeat(pad, '" "');
+		print(val);
+		return new Instruction(body);
+	}
+
+	/**
 	 * The old name of `writeSymbol`, still called from the builtin handlers in
 	 * mindc.js (pdcreate / pdread).
 	 *
@@ -6007,18 +6417,43 @@ export class CodeGenerator extends ASTVisitor {
 								: formatInteger(constant, conversion, flags, width, precision);
 						continue;
 					}
-					/*
-					A runtime value has no printable length until run time, and
-					mlog has no width/precision operand. Applying them would
-					mean silently printing the unformatted value, so refuse.
-					*/
-					if (flags.length > 0 || width > 0 || precision !== null) {
-						this.addError('printf flags/width/precision are only supported for compile-time constant arguments',
+					const modifier = flags.length > 0 || width > 0 || precision !== null;
+					if (!modifier) {
+						flushText();
+						segments.push({ arg, conversion });
+						continue;
+					}
+					if (width > 255 || (precision !== null && precision > 30)) {
+						this.addError('printf field width/precision is too large', arg?.location ?? ast.location);
+						return result;
+					}
+					if (conversion === 'd' || conversion === 'i' || conversion === 'u') {
+						flushText();
+						if (flags.length === 0 && precision === null && width > 0) {
+							segments.push({ arg, conversion, runtime: 'inline-int-width', width });
+						} else {
+							segments.push({ arg, conversion, runtime: 'helper', kind: 'int', width, precision, flags });
+						}
+						continue;
+					}
+					if (conversion === 'f') {
+						if (precision === null) {
+							this.addError('printf width/flags for %f require an explicit precision',
+								arg?.location ?? ast.location);
+							return result;
+						}
+						flushText();
+						segments.push({ arg, conversion, runtime: 'helper', kind: 'float', width, precision, flags });
+						continue;
+					}
+					// %s
+					if ((this.targetVersion ?? 0) < 150) {
+						this.addError('printf width/precision for %s requires v150 or higher',
 							arg?.location ?? ast.location);
 						return result;
 					}
 					flushText();
-					segments.push({ arg, conversion });
+					segments.push({ arg, conversion, runtime: 'helper', kind: 'string', width, precision, flags });
 				}
 				if (valueIndex < values.length) {
 					this.addError('printf has more arguments than its format uses', ast.location);
@@ -6032,30 +6467,54 @@ export class CodeGenerator extends ASTVisitor {
 						: this.visitAndRead(segment.arg);
 					return printed;
 				};
+				const emitRuntime = segment => {
+					const printed = emitValue(segment);
+					result.concat(printed);
+					if (segment.runtime === 'inline-int-width') {
+						result.concat(this.printfInlineIntWidth(printed.instructionReturn, segment.width));
+					} else {
+						result.concat(this.printfHelperCall(segment.kind, printed.instructionReturn,
+							segment.width, segment.precision, segment.flags));
+					}
+				};
 
 				if (!legacy) {
 					let data = '';
 					const formats = [];
+					const flush = () => {
+						if (data.length > 0) {
+							result.concat(InstructionBuilder.print(JSON.stringify(data)));
+						}
+						formats.forEach(entry => {
+							result.concat(entry.instruction);
+							result.concat(InstructionBuilder.format(entry.name));
+						});
+						data = '';
+						formats.length = 0;
+					};
 					segments.forEach(segment => {
 						if (segment.text !== undefined) {
 							data += segment.text;
+							return;
+						}
+						if (segment.runtime) {
+							flush();
+							emitRuntime(segment);
 							return;
 						}
 						const printed = emitValue(segment);
 						formats.push({ instruction: printed, name: printed.instructionReturn });
 						data += `{${formats.length - 1}}`;
 					});
-					if (data.length > 0) {
-						result.concat(InstructionBuilder.print(JSON.stringify(data)));
-					}
-					formats.forEach(entry => {
-						result.concat(entry.instruction);
-						result.concat(InstructionBuilder.format(entry.name));
-					});
+					flush();
 				} else {
 					segments.forEach(segment => {
 						if (segment.text !== undefined) {
 							result.concat(InstructionBuilder.print(JSON.stringify(segment.text)));
+							return;
+						}
+						if (segment.runtime) {
+							emitRuntime(segment);
 							return;
 						}
 						const printed = emitValue(segment);
