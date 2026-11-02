@@ -20,8 +20,8 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 248 passed, 0 failed (148 shape assertions, 1100 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 96 passed, 0 failed |
+| `node ../tools/check.mjs` | 249 passed, 0 failed (148 shape assertions, 1105 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 99 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 12 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
@@ -89,6 +89,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | extern array representation + compound array initializers (§7.33) | **done**; actual-layout exports, alias roots, handle warnings/refusals, array-initializer normalization, tests t228–t231 | §7.33 |
 | multidimensional local arrays + flat handles (§7.34) | **done**; flat row-major layout, nested-subscript lowering, embedded/encoded multidim, 1D span handles, 16-bit handle length, tests t232/t233/n12 | §7.34 |
 | multidimensional remote arrays (§7.35) | **done**; shaped/flat remote views, flat owner exports, remote lenof, tests t234/t235 | §7.35 |
+| complex-element arrays are memory-backed (§7.36) | **done**; embedded/lookup/encoded reject multi-cell elements, automatic traditional layout, tests t236 + negatives | §7.36 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -823,21 +824,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 641 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 645 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 641 under `testers/unit_tests`, every one of
+bring the count to 645 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 248 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 96 | `negative/` |
+| `check.mjs` | 249 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `negative.mjs` | 99 | `negative/` |
 | `nomem.mjs` | 12 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-248 + 10 + 96 + 12 + 275 = 641. The caveat that replaces "no runner" is weaker but real:
+249 + 10 + 99 + 12 + 275 = 645. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -1830,3 +1831,22 @@ called `f` even when `a` was false.
 - Cases: t234 (shaped and flat self-remote views, flat owner exports), t235
   (real peer with `int[2][3]` owner); negative for a remote multidimensional
   pointer-element array.
+
+### 7.36 Complex-element arrays are memory-backed
+
+- `embedded`/`lookup`/`encoded` layouts have one name/register per element.
+  They now reject pointer, struct, union and nested-array elements up front;
+  before this, such arrays compiled and silently read 0.
+- Complex-element arrays automatically choose the traditional memory layout,
+  even when memory is available and the automatic heuristic might otherwise
+  pick registers. An explicit `array("traditional", ...)` is accepted; any
+  other explicit implementation is diagnosed.
+- A no-memory program with a complex-element array is rejected with the
+  existing "Cannot assign memory for symbol" diagnosis rather than silently
+  degrading to registers.
+- Single-cell elements (numeric, content, device, `string_t`) keep working in
+  embedded/lookup/encoded arrays, including multidimensional layouts.
+- Cases: t236 (struct and pointer arrays in memory, automatic and explicit);
+  negatives for struct embedded, pointer lookup, and no-memory struct array;
+  the existing multidim register-struct negative now uses the same early
+  diagnostic.

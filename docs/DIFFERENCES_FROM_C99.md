@@ -262,6 +262,7 @@ int enc[4] = array("encoded", {1, 2, 3, 4});
 | `encoded` | 整个常量数组编码成 base-57 字符串表；只适合常量、不可写。 |
 
 `array("...")` 必须给字符串字面量；`encoded` 必须同时给内容列表。具体布局也可能因为“内存不够/指令预算”回退或换用别的实现；`#pragma optimize(array)` 打开自动布局选择，显式 `array()` 请求优先。
+- `embedded`/`lookup`/`encoded` 的元素必须是单 cell 类型（数字、content、device、`string_t` 等）。指针、struct、union、数组元素需要多个寄存器，不能使用这些布局：编译器会自动选择 memory；显式请求这些布局会报错。
 
 ### 7.3 开放数组与句柄
 

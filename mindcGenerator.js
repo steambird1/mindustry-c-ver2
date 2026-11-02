@@ -3047,14 +3047,13 @@ export class CodeGenerator extends ASTVisitor {
 		const dimensions = this.semantic?.arrayDimensionsOf
 			? this.semantic.arrayDimensionsOf(symbol.myType?.() ?? null)
 			: [];
-		const isMultiDimensional = dimensions.length > 1;
 		const elementType = this.semantic?.innermostArrayElementOf
 			? this.semantic.innermostArrayElementOf(symbol.myType?.() ?? null)
 			: null;
-		if (isMultiDimensional && elementType
+		if (elementType
 			&& ['pointer', 'struct', 'union', 'array'].includes(elementType.kind)) {
 			this.addError(
-				`A multidimensional register/lookup array needs single-cell elements: `
+				`A register/lookup array needs single-cell elements: `
 				+ `'${symbol.name}' has element type '${this.semantic.typeToString(elementType)}'`,
 				symbol.location ?? null);
 			return new Instruction();
@@ -5168,6 +5167,11 @@ export class CodeGenerator extends ASTVisitor {
 	forcedTraditionalReason(symbol) {
 		if (symbol.isVolatile) return 'a volatile array must be kept in memory';
 		if (symbol.myType()?.isVolatile?.()) return 'a volatile array must be kept in memory';
+		const elementType = this.semantic?.innermostArrayElementOf?.(symbol.myType?.() ?? null) ?? null;
+		if (elementType
+			&& ['pointer', 'struct', 'union', 'array'].includes(elementType.kind)) {
+			return 'a complex element array must be kept in memory';
+		}
 		if (this.isInRecursiveFunction(symbol)) {
 			return 'an array in a recursive function must be kept on the stack';
 		}

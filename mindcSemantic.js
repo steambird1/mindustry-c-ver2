@@ -3298,6 +3298,21 @@ export class SemanticAnalyzer extends ASTVisitor {
 				initializer.location);
 			return;
 		}
+		/*
+		One name per element only works for a single-cell element. A pointer
+		needs a block/pos pair and a struct needs several member registers, so
+		those arrays have to use the memory layout.
+		*/
+		const elementType = this.innermostArrayElementOf(symbol.myType?.() ?? null);
+		if (requested !== 'traditional' && elementType
+			&& ['pointer', 'struct', 'union', 'array'].includes(elementType.kind)) {
+			this.addError(
+				`array("${requested}") needs single-cell elements: '${symbol.name}' has `
+				+ `element type '${this.typeToString(elementType)}'. Use a memory-backed array.`,
+				initializer.location);
+			declarator.initializer = null;
+			return;
+		}
 		const contents = (args.length >= 2 && args[1].type === 'InitializerList') ? args[1] : null;
 		if (requested === 'encoded' && !contents) {
 			this.addError(`An encoded array must be given its contents: array("encoded", {...})`,
