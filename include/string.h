@@ -57,6 +57,110 @@ inline int strcmp(const char* a, const char* b) {
 	return a[i] - b[i];
 }
 
+inline char* strncpy(char* dst, const char* src, unsigned n) {
+	unsigned i = 0;
+	while (i < n && src[i] != 0) {
+		dst[i] = src[i];
+		i++;
+	}
+	while (i < n) {
+		dst[i] = 0;
+		i++;
+	}
+	return dst;
+}
+
+inline char* strncat(char* dst, const char* src, unsigned n) {
+	unsigned i = 0, j = 0;
+	while (dst[i] != 0) i++;
+	while (j < n && src[j] != 0) {
+		dst[i] = src[j];
+		i++;
+		j++;
+	}
+	dst[i] = 0;
+	return dst;
+}
+
+inline int strncmp(const char* a, const char* b, unsigned n) {
+	unsigned i = 0;
+	while (i < n && a[i] == b[i] && a[i] != 0) i++;
+	if (i >= n) return 0;
+	return a[i] - b[i];
+}
+
+inline char* strchr(const char* s, int c) {
+	while (*s != 0) {
+		if (*s == c) return (char*)s;
+		s++;
+	}
+	return c == 0 ? (char*)s : null;
+}
+
+inline char* strrchr(const char* s, int c) {
+	const char* found = null;
+	while (*s != 0) {
+		if (*s == c) found = s;
+		s++;
+	}
+	if (c == 0) found = s;
+	return (char*)found;
+}
+
+inline char* strstr(const char* haystack, const char* needle) {
+	if (*needle == 0) return (char*)haystack;
+	while (*haystack != 0) {
+		const char* h = haystack;
+		const char* n = needle;
+		while (*n != 0 && *h == *n) {
+			h++;
+			n++;
+		}
+		if (*n == 0) return (char*)haystack;
+		haystack++;
+	}
+	return null;
+}
+
+inline int memcmp(const void* a, const void* b, unsigned n) {
+	const char* x = (const char*)a;
+	const char* y = (const char*)b;
+	unsigned i = 0;
+	while (i < n && x[i] == y[i]) i++;
+	return i >= n ? 0 : x[i] - y[i];
+}
+
+inline void* memmove(void* dst, const void* src, unsigned n) {
+	char* d = (char*)dst;
+	const char* s = (const char*)src;
+	if (d < s) {
+		unsigned i = 0;
+		while (i < n) {
+			d[i] = s[i];
+			i++;
+		}
+	} else if (d > s) {
+		while (n > 0) {
+			n--;
+			d[n] = s[n];
+		}
+	}
+	return dst;
+}
+
+#ifndef _MINDC_MEMSET_DEFINED
+#define _MINDC_MEMSET_DEFINED 1
+inline void* memset(void* dst, int c, unsigned n) {
+	char* d = (char*)dst;
+	unsigned i = 0;
+	while (i < n) {
+		d[i] = (char)c;
+		i++;
+	}
+	return dst;
+}
+#endif
+
 #if __MINDC_TARGET_VERSION__ >= 150
 
 string_view sv_of_string(string_t s) {

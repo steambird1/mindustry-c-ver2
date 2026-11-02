@@ -9027,6 +9027,10 @@ export class Optimizer extends ASTVisitor {
 				clone.value = node.value;
 				clone.raw = node.raw;
 				break;
+
+			case 'AsmStatement':
+				clone.code = node.code;
+				break;
 				
 			case 'CharacterLiteral':
 				/*
