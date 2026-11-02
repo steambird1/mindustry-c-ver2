@@ -263,7 +263,7 @@ int enc[4] = array("encoded", {1, 2, 3, 4});
 
 `array("...")` 必须给字符串字面量；`encoded` 必须同时给内容列表。具体布局也可能因为“内存不够/指令预算”回退或换用别的实现；`#pragma optimize(array)` 打开自动布局选择，显式 `array()` 请求优先。
 - `embedded_divided` 支持单 cell 元素、`byname` 指针元素和由单 cell/嵌套 registry struct 组成的 flat struct 元素。struct 元素按 `<array>_<i>.<member>` 命名；`byname` 指针元素仍是一寄存器名字。
-- `embedded_lookup` / `encoded` 仍要求单 cell 数字/content 元素。普通指针（block/pos）、union、位域、含数组或需要 memory 的 struct 元素使用 memory 布局。多寄存器 struct 元素的动态下标和 handle 传递暂不支持；用常量下标或 memory 数组。
+- `embedded_lookup` / `encoded` 仍要求单 cell 数字/content 元素。普通指针（block/pos）、union、位域、含数组或需要 memory 的 struct 元素使用 memory 布局。多寄存器 struct 元素支持常量下标，也支持动态下标（逐叶 select 读取、选中成员名字写入）；但作为非内联 open handle 传递暂不支持，需 memory 或内联调用。
 
 ### 7.3 开放数组与句柄
 

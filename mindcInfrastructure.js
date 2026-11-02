@@ -2026,12 +2026,8 @@ class DividedSlotRet extends VariableRet {
 		const layout = registerElementLayoutOf(this.type);
 		if (layout?.kind === 'struct') {
 			if (!this.operand.constant) {
-				glob.generator?.addError(
-					`Dynamic subscript of a multi-register register array is not `
-					+ `supported yet; use a constant index or a memory-backed array`,
-					null);
-				return new RegistryStructRet(glob, this.instructions,
-					'__invalid_struct', this.type, true);
+				return new DynamicStructRef(glob, this.instructions, this.array,
+					this.operand, this.type);
 			}
 			const index = this.operand.value;
 			if (index < 0 || index >= this.array.length) {
@@ -2096,11 +2092,9 @@ class DividedSlotRet extends VariableRet {
 		const layout = registerElementLayoutOf(this.type);
 		if (layout?.kind === 'struct') {
 			if (!this.operand.constant) {
-				glob.generator?.addError(
-					`Dynamic subscript of a multi-register register array is not `
-					+ `supported yet; use a constant index or a memory-backed array`,
-					null);
-				return new Instruction([], 'null');
+				const target = new DynamicStructRef(glob, this.instructions, this.array,
+					this.operand, this.type);
+				return target.set(other);
 			}
 			const index = this.operand.value;
 			if (index < 0 || index >= this.array.length) {
@@ -2151,6 +2145,132 @@ class DividedSlotRet extends VariableRet {
 			return new NamePointerRet(glob, parts, value.name, this.type, false);
 		}
 		return valueClassOf(glob, this.type).create(glob, parts, value.name, this.type, false);
+	}
+}
+
+/**
+ * One member of a dynamically indexed registry-struct array element.
+ *
+ * A struct uses several member registers, so a dynamic subscript cannot be
+ * represented by selecting one register. For reads we select the value for
+ * each leaf member; for writes we select the NAME of each leaf register and
+ * use `write @this`.
+ */
+class SelectedRegisterRet extends VariableRet {
+	constructor(glob, instructions, array, operand, path, type) {
+		super(glob, instructions, array.name, type, false);
+		this.array = array;
+		this.operand = operand;
+		this.path = path;
+	}
+
+	elementName(index) {
+		return `${this.array.elementName(index)}${this.path.map(part => `.${part}`).join('')}`;
+	}
+
+	get() {
+		const glob = this.glob;
+		if (this.operand.constant) {
+			return valueClassOf(glob, this.type).create(glob, this.instructions,
+				this.elementName(this.operand.value), this.type, false);
+		}
+		const target = glob.tmp(this.type);
+		const parts = [InstructionBuilder.set(target, this.elementName(0))];
+		for (let i = 1; i < this.array.length; i++) {
+			parts.push(InstructionBuilder.selectx(target,
+				`equal ${this.operand.name} ${i}`, this.elementName(i), target));
+		}
+		return valueClassOf(glob, this.type).create(glob,
+			[this.instructions, parts], target, this.type, true);
+	}
+
+	set(other) {
+		const glob = this.glob;
+		const value = other.get().convertTo(this.type ?? other.type);
+		if (this.operand.constant) {
+			return valueClassOf(glob, this.type).create(glob,
+				[this.instructions, value.instructions,
+					InstructionBuilder.set(this.elementName(this.operand.value), value.name)],
+				value.name, this.type, false);
+		}
+		const chosen = glob.tmp(null);
+		const parts = [this.instructions, value.instructions,
+			InstructionBuilder.set(chosen, `"${this.elementName(0)}"`)];
+		for (let i = 1; i < this.array.length; i++) {
+			parts.push(InstructionBuilder.selectx(chosen,
+				`equal ${this.operand.name} ${i}`, `"${this.elementName(i)}"`, chosen));
+		}
+		parts.push(InstructionBuilder.write(value.name, '@this', chosen));
+		return valueClassOf(glob, this.type).create(glob, parts, value.name, this.type, false);
+	}
+}
+
+/**
+ * A dynamically selected registry-struct array element. Reading it
+ * materializes a temporary struct; writing it copies member by member into
+ * the selected element's registers.
+ */
+class DynamicStructRef extends RegistryStructRet {
+	constructor(glob, instructions, array, operand, type, path = []) {
+		super(glob, instructions, array.name, type, true, null);
+		this.array = array;
+		this.operand = operand;
+		this.path = path;
+	}
+
+	member(memberName, memberType = null) {
+		const type = memberType ?? memberTypeOf(this.glob, this.type, memberName);
+		const path = [...this.path, memberName];
+		if (type?.kind === 'struct') {
+			return new DynamicStructRef(this.glob, this.instructions, this.array,
+				this.operand, type, path);
+		}
+		return new SelectedRegisterRet(this.glob, this.instructions, this.array,
+			this.operand, path, type);
+	}
+
+	get() {
+		const glob = this.glob;
+		const temp = glob.generator?.getTempSymbol?.(this.type) ?? glob.tmp(this.type);
+		const base = temp.getAssemblySymbol();
+		const result = new Instruction(this.instructions);
+		const fill = (dynamic, targetBase) => {
+			for (const member of (dynamic.type.members ?? [])
+				.filter(m => m.isBitfieldStorage !== true)) {
+				const child = dynamic.member(member.name, member.type);
+				if (member.type?.kind === 'struct') {
+					fill(child, `${targetBase}.${member.name}`);
+					continue;
+				}
+				const value = child.get();
+				result.concat(value);
+				result.concat(InstructionBuilder.set(
+					`${targetBase}.${member.name}`, value.instructionReturn ?? '0'));
+			}
+		};
+		fill(this, base);
+		return new RegistryStructRet(glob, result.instructions, base, this.type, true, temp);
+	}
+
+	set(other) {
+		const glob = this.glob;
+		const value = other.get();
+		const result = new Instruction(this.instructions);
+		const walk = (dynamic, source) => {
+			for (const member of (dynamic.type.members ?? [])
+				.filter(m => m.isBitfieldStorage !== true)) {
+				const target = dynamic.member(member.name, member.type);
+				const sourceMember = source.member(member.name, member.type);
+				if (member.type?.kind === 'struct') {
+					walk(target, sourceMember);
+					continue;
+				}
+				result.concat(target.set(sourceMember));
+			}
+		};
+		walk(this, value);
+		return new RegistryStructRet(glob, result.instructions, value.name,
+			this.type, false);
 	}
 }
 

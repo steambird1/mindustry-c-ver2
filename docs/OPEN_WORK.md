@@ -20,8 +20,8 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 252 passed, 0 failed (148 shape assertions, 1120 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 100 passed, 0 failed |
+| `node ../tools/check.mjs` | 253 passed, 0 failed (148 shape assertions, 1124 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 99 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 13 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
@@ -92,6 +92,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | complex-element arrays are memory-backed (§7.36) | **done**; embedded/lookup/encoded reject multi-cell elements, automatic traditional layout, tests t236 + negatives | §7.36 |
 | byname pointer arrays (§7.37) | **done**; name pointers in register arrays, dynamic access, handles, tests t237 | §7.37 |
 | flat registry-struct register arrays (§7.38) | **done**; coordinate/struct members, constants and nested structs, tests t238/t239 + negatives | §7.38 |
+| dynamic multi-register struct subscripts (§7.39) | **done**; per-leaf select reads, selected-name writes, whole-element copy, test t240 | §7.39 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -835,12 +836,12 @@ them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 252 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 100 | `negative/` |
+| `check.mjs` | 253 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `negative.mjs` | 99 | `negative/` |
 | `nomem.mjs` | 13 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-252 + 10 + 100 + 13 + 275 = 650. The caveat that replaces "no runner" is weaker but real:
+253 + 10 + 99 + 13 + 275 = 650. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -1879,11 +1880,24 @@ called `f` even when `a` was false.
 - Initialization writes each member directly (zero-filling omitted members);
   whole-element assignment copies member by member. Ordinary pointers,
   unions, bitfields and memory-requiring structs still force memory.
-- Dynamic subscripts of multi-register struct elements are rejected: a single
-  `select` cannot choose a whole struct. A memory-backed array works, or a
-  constant index. Open-handle travel is also rejected with a clear diagnostic;
-  let the call inline or use memory.
+- Dynamic subscripts of multi-register struct elements are covered in §7.39.
+  Open-handle travel is still rejected with a clear diagnostic; let the call
+  inline or use memory.
 - Cases: t238 (1-D struct register array: member access, assignment, nested
   struct, zero fill, lenof/sizeof), t239 (multidimensional register struct
-  array), nomem n13; negatives for dynamic struct subscript and non-inline
-  handle travel.
+  array with constant indices), nomem n13; negative for non-inline handle
+  travel.
+
+### 7.39 Dynamic multi-register struct subscripts
+
+- A dynamic subscript of a registry-struct register array is lowered per leaf:
+  reads select the value of every leaf register into a temporary struct;
+  writes select the NAME of every leaf register and use `write @this`.
+  Whole-element assignment (`a[i] = a[j]`) copies member by member through
+  those selected names.
+- Constant subscripts keep the direct `<array>_<index>.<member>` path, so
+  they remain the cheapest form.
+- Open-handle travel for these arrays is still not implemented: a handle
+  helper returns one register, while a struct element spans several. Use a
+  memory-backed array or allow the call to inline.
+- Case: t240 (dynamic read/write/copy and nested struct access).
