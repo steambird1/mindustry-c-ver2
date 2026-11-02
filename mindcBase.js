@@ -167,6 +167,7 @@ export const ASTNodeType = {
     
     // 特殊
     ASM_STATEMENT: 'AsmStatement',
+    STATIC_ASSERT_DECLARATION: 'StaticAssertDeclaration',
     BUILTIN_CALL: 'BuiltinCall',
 	
 	// For optimizer
@@ -590,6 +591,14 @@ export class AsmStatementNode extends ASTNode {
     }
 }
 
+export class StaticAssertDeclarationNode extends ASTNode {
+    constructor(condition, message = null) {
+        super(ASTNodeType.STATIC_ASSERT_DECLARATION);
+        this.condition = condition;
+        this.message = message;
+    }
+}
+
 export class PointerTypeNode extends ASTNode {
     constructor(baseType, qualifiers = [], pointerDepth = 1) {
         super(ASTNodeType.POINTER_TYPE);
@@ -756,6 +765,10 @@ export class ASTBuilder {
 	
     static asmStatement(code) {
         return new AsmStatementNode(code);
+    }
+
+    static staticAssert(condition, message = null) {
+        return new StaticAssertDeclarationNode(condition, message);
     }
 }
 

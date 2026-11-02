@@ -1755,6 +1755,10 @@ export class CodeGenerator extends ASTVisitor {
 	 * 
 	 * @param {AsmStatementNode} node 
 	 */
+	visitStaticAssertDeclaration(node) {
+		return new Instruction();
+	}
+
 	visitAsmStatement(node) {
 		if (node.code.length && node.code[0] === ':') {
 			const instructionSplit = node.code.split(' ');
@@ -6002,6 +6006,10 @@ export class CodeGenerator extends ASTVisitor {
 	 */
 	visitIdentifier(node) {
 		const glob = this.glob;
+		if (node.name === '__func__') {
+			return new Instruction([], JSON.stringify(String(node.getAttribute?.('funcName') ?? this.currentFunction ?? '')),
+				new Map([['disallowReplacement', true]]));
+		}
 		const isBuiltinConstant = node.name.length && node.name[0] == '@';
 		if (isBuiltinConstant) {
 			// Builtin constants (@copper, @this, ...) are immediate values

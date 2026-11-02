@@ -1921,7 +1921,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 			return arr;
 		};
 		const checkQualifiers = ['const', 'volatile', 'near', 'extern', 'auto',
-			'static', 'persistent', 'register', 'remote', 'byname', 'byvaluename'];
+			'static', 'persistent', 'register', 'remote', 'byname', 'byvaluename', 'restrict'];
 		const chunks = String(typeNameRaw).split(/\s+/).filter(c => c.length > 0);
 		if (chunks.length === 0) {
 			return null;
@@ -2084,6 +2084,21 @@ export class SemanticAnalyzer extends ASTVisitor {
 
     visitTypeSpecifier(node) {
         if (node?.typeName === 'enum') this.processEnumDefinition(node, this.currentScope);
+    }
+
+    visitStaticAssertDeclaration(node) {
+        if (!node.condition) return;
+        this.visit(node.condition);
+        const value = this.constantCaseValue(node.condition);
+        if (value === undefined) {
+            this.addError('_Static_assert() needs a constant expression', node.location);
+            return;
+        }
+        if (!value) {
+            this.addError(node.message
+                ? `Static assertion failed: ${node.message}`
+                : 'Static assertion failed', node.location);
+        }
     }
 
     visitFunctionDeclaration(node) {
@@ -3916,6 +3931,11 @@ export class SemanticAnalyzer extends ASTVisitor {
     }
 
     visitIdentifier(node) {
+		if (node.name === '__func__') {
+			node.dataType = this.getTypeInfo('string_t');
+			node.setAttribute('funcName', this.currentFunction?.name ?? '');
+			return;
+		}
 		const specialTypes = this.specialTypes;
 		if (node.name.length && node.name[0] === '@') {
 			if (node.name === '@counter') {
@@ -8069,6 +8089,14 @@ export class SemanticAnalyzer extends ASTVisitor {
                     case '^': return a ^ b;
                     case '<<': return a << b;
                     case '>>': return a >> b;
+                    case '==': return a === b ? 1 : 0;
+                    case '!=': return a !== b ? 1 : 0;
+                    case '<': return a < b ? 1 : 0;
+                    case '<=': return a <= b ? 1 : 0;
+                    case '>': return a > b ? 1 : 0;
+                    case '>=': return a >= b ? 1 : 0;
+                    case '&&': return (a !== 0 && b !== 0) ? 1 : 0;
+                    case '||': return (a !== 0 || b !== 0) ? 1 : 0;
                     default: return undefined;
                 }
             }
@@ -8381,7 +8409,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 		older, lossier parsing used to make both read the same -- which is what
 		made the two spellings match here.
 		*/
-		const ignoredQualifiers = ['auto', 'static', 'persistent', 'extern', 'near', 'register', 'byname', 'byvaluename', 'volatile'];
+		const ignoredQualifiers = ['auto', 'static', 'persistent', 'extern', 'near', 'register', 'byname', 'byvaluename', 'volatile', 'restrict'];
 		const strip = t => {
 			let head = t;
 			while (head) {
@@ -8435,7 +8463,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 		sourceType = sourceType.duplicate();
         
 		// Remove auto and volatile qualifier for both sides:
-		const ignoredQualifiers = ['auto', 'volatile', 'static', 'persistent', 'extern', 'near'];
+		const ignoredQualifiers = ['auto', 'volatile', 'static', 'persistent', 'extern', 'near', 'restrict'];
 		sourceType.qualifiers = sourceType.qualifiers.filter(
 			item => (!ignoredQualifiers.includes(item) && (sourceType.isStrictPointerImpl() || item !== 'const')) );	// 'const' of source does not matter
 		targetType.qualifiers = targetType.qualifiers.filter(

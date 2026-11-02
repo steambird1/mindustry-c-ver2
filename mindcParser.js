@@ -244,6 +244,15 @@ export class Parser {
                 }
             }
 
+            if (this.matchToken(TokenType.STATIC_ASSERT)) {
+                const assertion = this.parseStaticAssert();
+                if (assertion) {
+                    assertion.parent = program;
+                    program.globalDeclarations.push(assertion);
+                    continue;
+                }
+            }
+
             // 解析全局声明或函数定义
             const declaration = this.parseDeclaration();
             if (declaration) {
@@ -784,7 +793,7 @@ export class Parser {
         while (this.matchTokenTypeAt(this.currentTokenIndex, [
             TokenType.CONST, TokenType.VOLATILE,
             TokenType.STATIC, TokenType.PERSISTENT, TokenType.EXTERN, TokenType.AUTO, TokenType.REGISTER,
-			TokenType.NEAR, TokenType.BYNAME
+			TokenType.NEAR, TokenType.BYNAME, TokenType.RESTRICT
         ])) {
 			const qualifierToken = this.consumeToken();
             qualifiers.push(qualifierToken.value);
@@ -1378,6 +1387,9 @@ export class Parser {
             
             case TokenType.ASM:
                 return this.parseAsmStatement();
+
+            case TokenType.STATIC_ASSERT:
+                return this.parseStaticAssert();
 			
 			case TokenType.TYPEDEF:
 				return this.parseTypedefDeclaration();
@@ -1870,6 +1882,28 @@ export class Parser {
         const asmStmt = ASTBuilder.asmStatement(codeToken.value);
         asmStmt.location = asmToken.location;
         return asmStmt;
+    }
+
+    parseStaticAssert() {
+        const token = this.expectToken(TokenType.STATIC_ASSERT);
+        if (!token) return null;
+        this.expectToken(TokenType.LEFT_PAREN);
+        const condition = this.parseExpression();
+        let message = null;
+        if (this.matchToken(TokenType.COMMA)) {
+            this.consumeToken();
+            if (this.matchToken(TokenType.STRING)) {
+                message = this.consumeToken().value;
+            } else {
+                this.addError('_Static_assert message must be a string literal');
+            }
+        }
+        this.expectToken(TokenType.RIGHT_PAREN);
+        this.expectToken(TokenType.SEMICOLON);
+        const assertion = ASTBuilder.staticAssert(condition, message);
+        assertion.location = token.location;
+        if (condition) condition.parent = assertion;
+        return assertion;
     }
 
     parseExpressionStatement(expectSemicolon = true, expectSingle = false) {
