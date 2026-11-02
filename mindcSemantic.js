@@ -3577,17 +3577,23 @@ export class SemanticAnalyzer extends ASTVisitor {
 		}
 		/*
 		A remote array is a flat row of registers on the other side, one name
-		per element. Two or more dimensions have no such shape, and without
-		saying so here the failure came much later, as an internal error about
-		registers.
+		per element. Multidimensional arrays are flattened, but every element
+		must still fit in ONE register: pointers need a block/pos pair and
+		structs need several member registers.
 		*/
 		const dimCount = (declarator.arrayDimensions ?? []).length
 			|| (symbol.arrayDimensions ?? symbol.dimensions ?? []).length || 1;
 		if (finalType.kind === 'array' && dimCount > 1) {
-			this.addError(`A 'remote' array can only have one dimension: its elements are `
-				+ `single registers of the other processor`, location);
-			declarator.initializer = null;
-			return;
+			const elementType = this.innermostArrayElementOf(finalType);
+			if (elementType
+				&& ['pointer', 'struct', 'union', 'array'].includes(elementType.kind)) {
+				this.addError(
+					`A multidimensional remote array needs single-cell elements: `
+					+ `'${declarator.name}' has element type '${this.typeToString(elementType)}'`,
+					location);
+				declarator.initializer = null;
+				return;
+			}
 		}
 		if (args.length < 2 || args.length > 3) {
 			this.addError(`remote() takes the processor and the variable, and optionally `
@@ -6328,24 +6334,59 @@ export class SemanticAnalyzer extends ASTVisitor {
 			if (argNode.type === 'Identifier') {
 				const sym = this.currentScope?.lookup(argNode.name) ?? null;
 				const symType = sym?.myType?.() ?? null;
-				const dims = (symType && symType.kind === 'array')
-					? (this.dimensionListOf(symType) ?? []) : null;
-				/*
-				`void f(int s[])` -- the parameter's type says nothing about the
-				length, so the answer has to come from the handle at run time.
-				(`arrayParamRep` cannot be used here: it is filled in only after
-				the call sites have been seen, which is later than this.)
-				*/
-				const known = dims ? dims[0] : null;
-				if (sym && dims && (known === undefined || known === null
-					|| !Number.isFinite(Number(known)) || Number(known) === 0)) {
-					node.dataType = this.getTypeInfo('int');
-					node.setAttribute('lenofOfHandle', sym.getAssemblySymbol?.() ?? argNode.name);
-					return true;
+				if (sym?.isRemote === true && symType?.kind === 'array') {
+					const declared = this.arrayDimensionsOf(symType);
+					const targetType = sym.remoteTarget?.myType?.() ?? null;
+					const targetDims = targetType && targetType.kind === 'array'
+						? this.arrayDimensionsOf(targetType) : [];
+					let length = null;
+					if (declared.length === 1) {
+						/*
+						A flat remote span: `lenof` is the total element count.
+						A local target supplies it; for a target on another
+						processor the declaration has to carry an explicit size.
+						*/
+						length = targetType ? this.totalArraySizeOf(targetType) : null;
+						if (!(Number(length) > 0)) {
+							length = Number(declared[0]);
+						}
+					} else {
+						length = Number(declared[0]);
+						if (!(Number(length) > 0)) {
+							length = Number(targetDims[0]);
+						}
+					}
+					if (!(Number(length) > 0)) {
+						this.addError(
+							`lenof() cannot determine the length of remote array `
+							+ `'${argNode.name}': give the target an explicit size, or `
+							+ `declare it on this processor too`,
+							location);
+						return true;
+					}
+					value = length;
+				} else {
+					const dims = (symType && symType.kind === 'array')
+						? (this.dimensionListOf(symType) ?? []) : null;
+					/*
+					`void f(int s[])` -- the parameter's type says nothing about the
+					length, so the answer has to come from the handle at run time.
+					(`arrayParamRep` cannot be used here: it is filled in only after
+					the call sites have been seen, which is later than this.)
+					*/
+					const known = dims ? dims[0] : null;
+					if (sym && dims && (known === undefined || known === null
+						|| !Number.isFinite(Number(known)) || Number(known) === 0)) {
+						node.dataType = this.getTypeInfo('int');
+						node.setAttribute('lenofOfHandle', sym.getAssemblySymbol?.() ?? argNode.name);
+						return true;
+					}
 				}
 			}
-			value = this.lenofOf(args[0], location);
-			if (value === null) return true;
+			if (value === null) {
+				value = this.lenofOf(args[0], location);
+				if (value === null) return true;
+			}
 		}
 		// Become the number itself
 		node.type = 'NumericLiteral';

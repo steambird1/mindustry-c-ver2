@@ -77,7 +77,8 @@ For grammar introduction (about the features unique to Mindustry-C) and examples
   or encoded tables (single-cell elements for the latter two). Nested
   subscripts flatten to `i * dim1 + j`; a handle is a flat 1D span, so
   `int s[]` can receive a multidimensional array and `lenof(s)` is its total
-  element count.
+  element count. `remote` arrays may keep their shape or use a flat view;
+  element names remain a flat sequence on the owner side.
 - C99 compatibility headers: `stddef.h`, `stdint.h`, `limits.h`, `float.h`,
   `ctype.h`, `stdlib.h` (atoi/strtol/div/exit subset), `string.h` extensions,
   `inttypes.h`, `iso646.h`, `stdalign.h`, `stdnoreturn.h` and `errno.h`.

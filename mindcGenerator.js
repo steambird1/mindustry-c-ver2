@@ -2752,17 +2752,10 @@ export class CodeGenerator extends ASTVisitor {
 			needs a block/pos pair, and a struct has several member registers;
 			those representations need a memory descriptor instead.
 			*/
-			const elementType = rootType?.pointerTo ?? null;
-			const dimensionCount = this.semantic?.arrayDimensionsOf
-				? this.semantic.arrayDimensionsOf(rootType).length
-				: (Array.isArray(rootType?.arraySize) ? rootType.arraySize.length : 1);
-			/*
-			The flat `<name>_<i>` scheme describes one element per register.
-			Multi-dimensional register arrays do not have that layout in the
-			current implementation, and pointer/struct/array elements need more
-			than one register (or a memory descriptor).
-			*/
-			const flatElement = dimensionCount === 1 && !!elementType
+			const elementType = this.semantic?.innermostArrayElementOf
+				? this.semantic.innermostArrayElementOf(rootType)
+				: (rootType?.pointerTo ?? null);
+			const flatElement = !!elementType
 				&& !['pointer', 'struct', 'union', 'array'].includes(elementType.kind);
 			if (!flatElement) continue;
 			for (let i = 0; i < length; i++) push(`${assembly}_${i}`);
@@ -5968,15 +5961,17 @@ export class CodeGenerator extends ASTVisitor {
 			/*
 			`remote int rs[]` leaves the length open, so it has to come from the
 			array on the other side -- guessing 1 would make every subscript but
-			the first land on element 0.
+			the first land on element 0. A shaped declaration already carries the
+			total length in its type.
 			*/
-			let length = arrayLengthOfType(type);
+			const flatType = this.flatArrayViewTypeOf(type) ?? type;
+			let length = this.arrayLengthOf(symbol) || arrayLengthOfType(type);
 			if (!length || length <= 1) {
 				const guessed = symbol.remoteTarget ? this.arrayLengthOf(symbol.remoteTarget) : 0;
 				if (guessed > 0) length = guessed;
 			}
 			return new RemoteArrayRet(glob, remoteDeviceRegOf(symbol.getAssemblySymbol()),
-				target, type, length);
+				target, flatType, length);
 		}
 		return this.arrayRetFor(symbol, null);
 	}

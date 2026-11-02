@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 246 passed, 0 failed (147 shape assertions, 1090 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 248 passed, 0 failed (148 shape assertions, 1100 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 96 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 12 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
@@ -88,6 +88,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | standard compound literals (§7.32) | **done**; scalar/aggregate/array forms, hidden objects, postfix access and address-of, test t227 | §7.32 |
 | extern array representation + compound array initializers (§7.33) | **done**; actual-layout exports, alias roots, handle warnings/refusals, array-initializer normalization, tests t228–t231 | §7.33 |
 | multidimensional local arrays + flat handles (§7.34) | **done**; flat row-major layout, nested-subscript lowering, embedded/encoded multidim, 1D span handles, 16-bit handle length, tests t232/t233/n12 | §7.34 |
+| multidimensional remote arrays (§7.35) | **done**; shaped/flat remote views, flat owner exports, remote lenof, tests t234/t235 | §7.35 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -822,21 +823,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 639 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 641 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 639 under `testers/unit_tests`, every one of
+bring the count to 641 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 246 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `check.mjs` | 248 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
 | `negative.mjs` | 96 | `negative/` |
 | `nomem.mjs` | 12 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-246 + 10 + 96 + 12 + 275 = 639. The caveat that replaces "no runner" is weaker but real:
+248 + 10 + 96 + 12 + 275 = 641. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -1799,8 +1800,33 @@ called `f` even when `a` was false.
   size stays 12 bits (max 4095). `handleTailOf` now refuses field overflow
   instead of silently corrupting neighbouring fields.
 - Encoded arrays remain constant tables and do not travel as writable handles.
-  `remote()` multidimensional arrays remain a separate, still-disabled feature.
+  Multidimensional `remote()` arrays are covered separately in §7.35.
 - Cases: t232 (embedded/encoded/memory nested and flat multidim access),
   t233 (flat and shaped handles over memory/embedded multidim arrays), nomem
   n12 (register multidim arrays without a memory block); negative for a
   multidimensional register array of struct elements.
+
+### 7.35 Multidimensional remote arrays
+
+- A remote array may now have multiple dimensions when its elements are
+  single-cell. `remote int ru[2][3] = remote(...)` keeps the shape for nested
+  subscripts and `lenof` (outermost dimension); `remote int ru[]` over a local
+  multidimensional target is a flat 1D span whose `lenof` is the total element
+  count.
+- Nested subscripts on a remote array use the same row-major flattening as
+  local arrays: `ru[i][j]` becomes `ru[i * dim1 + j]`, and the remote element
+  name is the flat `<target>_<index>`.
+- `collectRemoteExportedNames` exports flattened element names for extern
+  multidimensional register arrays (`u_0 ... u_(total-1)`); memory arrays keep
+  exporting block/pos, and runtime handles remain unexported.
+- `lenof` for a remote array no longer decodes a local handle: shaped remote
+  declarations use the outermost dimension, while a flat remote view uses the
+  local target's total length (or an explicit remote size when the target is on
+  another processor).
+- Remote memory arrays are intentionally not implemented: stack addresses are
+  local to a call, and global memory allocation/link numbers are not a stable
+  cross-processor ABI. Remote element access therefore needs embedded/lookup
+  (element names); explicit traditional/volatile targets are diagnosed.
+- Cases: t234 (shaped and flat self-remote views, flat owner exports), t235
+  (real peer with `int[2][3]` owner); negative for a remote multidimensional
+  pointer-element array.

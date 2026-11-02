@@ -145,7 +145,7 @@ print(lenof(mem));    // 4
 - `extern` 变量会被保留下来，不因为“本程序没读”而被删除；它对跨处理器通信很重要。
 - `extern` 数组按**实际表示**对外导出：memory 布局导出 `<name>_block` / `<name>_pos`，寄存器布局导出 `<name>_i`（lookup 布局导出内容名）。编译期别名 `int w[] = s;` 在导出和 `remote()` 中解析到根数组 `s`；运行期句柄没有稳定的外部元素名。
 - 对 `extern` 数组句柄只发出警告：它仍然可以作为本地句柄使用、仍然受“类似 volatile”的优化限制，但不会导出元素名，`remote()` 也不能以它为绑定目标。
-- 多维寄存器/lookup 数组支持单 cell 元素（数字、content/device 等）；指针/struct/union 元素需要 memory 布局。多维数组按行优先展平，`a[i][j]` 会编译成 `a[i * dim1 + j]`；`lenof(a)` 仍返回最外层维度。`remote()` 数组仍限制为一维。
+- 多维寄存器/lookup 数组支持单 cell 元素（数字、content/device 等）；指针/struct/union 元素需要 memory 布局。多维数组按行优先展平，`a[i][j]` 会编译成 `a[i * dim1 + j]`；`lenof(a)` 仍返回最外层维度。`remote()` 数组也支持 shaped/扁平多维视图。
 - `static` 是**本次运行内持久**：同一运行里的多次函数调用共享一个对象；程序从头开始下一次运行时，初始化 tag 重置，带初始化器的 static 会重新初始化，未初始化的 static 会被显式置零（指针除外）。
 - `persistent` 是**跨运行持久**：处理器/程序加载后初始化一次，后续运行继续使用同一个对象；它和 `static` 一样不能被内联复制。
 - 文件作用域的**普通变量默认按运行重置**：有初始化器时每次运行执行初始化，没有初始化器时显式置零（指针除外）。需要跨运行状态时写 `persistent`，不要依赖未初始化全局变量的“碰巧保留”。
@@ -383,16 +383,21 @@ extern int u[4] = array("embedded_divided");
 remote int ru[] = remote(@this, u);          // 长度从对端数组推导
 print(ru[2]);
 
+extern int grid[2][3] = array("embedded_divided", {1,2,3,4,5,6});
+remote int rg[2][3] = remote(@this, grid);
+print(rg[1][2]);                             // 底层是 g:.grid_5
+
 remote int *p = remote(processor1, qq);      // 指针本身在对端
 (*p) = 33;
 ```
 
 - `remote int ru[]` 是一个 1 字句柄，元素访问走 `read`/`write`。
+- `remote int ru[2][3]` 或 `remote int rf[]` 支持多维/扁平视图：底层仍是扁平元素名 `<target>_<flatIndex>`，`ru[i][j]` 编译成 `ru[i * dim1 + j]`。`lenof(ru[2][3])` 返回外层维度，扁平 `ru[]` 返回总元素数。
 - `remote int *p` 声明“指针本身存储在别的处理器”；`remote int *p` 与 `int *remote p` 的含义不同：前者指针本地、指向远程 int；后者指针本身在远程。
 - `&remoteVar` 得到 1 字名字指针（处理器 + 名字），不是普通 block/offset。
 - 远程数组的布局要与对端一致；跨处理器时用显式 `array("embedded_divided")` 等布局名最稳。
-- `remote()` 的元素访问需要元素名，也就是 embedded/lookup 表示；memory 数组可以导出 `_block` / `_pos` 供共享内存协议使用，但不能直接套用 `remote int r[]` 的元素名模型。
-- `remote int r[]` 仍只支持一维；多维 memory 数组按行优先展平，外部代码需要自行计算 `i * dim1 + j`。
+- `remote()` 的元素访问需要元素名，也就是 embedded/lookup 表示；memory 数组可以导出 `_block` / `_pos` 供共享内存协议使用，但不能直接套用 `remote int r[]` 的元素名模型。远程 memory 数组未实现（栈地址随调用变化，全局内存编号也不是稳定的跨处理器 ABI）。
+- 多维 remote 数组的元素必须是单 cell 类型；指针/struct/union 元素需要 memory 或每元素多寄存器协议，暂不支持。
 
 ### 9.3 限制
 
