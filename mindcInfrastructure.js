@@ -226,7 +226,24 @@ export function registerElementLayoutOf(type) {
 		return isNamePointerType(type)
 			? { kind: 'name-pointer', components: 1 } : null;
 	}
-	if (['struct', 'union', 'array'].includes(type.kind)) return null;
+	if (type.kind === 'struct') {
+		/*
+		A registry struct can be laid out as one register per (recursive)
+		member. A memory-implemented struct, an embedded array, a union or a
+		bitfield needs a representation the current flat element names cannot
+		provide.
+		*/
+		if (type.isPointerImpl?.() || type.isRequireMem?.()) return null;
+		let components = 0;
+		for (const member of type.members ?? []) {
+			if (member.isBitfieldStorage === true || member.isBitfield === true) return null;
+			const layout = registerElementLayoutOf(member.type ?? member.memberType);
+			if (!layout || !['cell', 'struct'].includes(layout.kind)) return null;
+			components += layout.components;
+		}
+		return components > 0 ? { kind: 'struct', components } : null;
+	}
+	if (type.kind === 'union' || type.kind === 'array') return null;
 	return { kind: 'cell', components: 1 };
 }
 
@@ -1865,6 +1882,11 @@ export function pointerStyleOf(symbol, options = {}) {
  * @returns {{instructions: any[], name: string, constant: boolean, value: number?}}
  */
 function operandOf(glob, index) {
+	if (index instanceof ImmediateRet) {
+		const text = String(index.name ?? index.instructionReturn ?? '');
+		const numeric = /^-?\d+$/.test(text) ? Number(text) : null;
+		return { instructions: [], name: text, constant: numeric !== null, value: numeric };
+	}
 	if (index instanceof VariableRet) {
 		const value = index.get();
 		return { instructions: [value.instructions], name: value.name, constant: false, value: null };
@@ -2001,6 +2023,23 @@ class DividedSlotRet extends VariableRet {
 	 */
 	get() {
 		const glob = this.glob;
+		const layout = registerElementLayoutOf(this.type);
+		if (layout?.kind === 'struct') {
+			if (!this.operand.constant) {
+				glob.generator?.addError(
+					`Dynamic subscript of a multi-register register array is not `
+					+ `supported yet; use a constant index or a memory-backed array`,
+					null);
+				return new RegistryStructRet(glob, this.instructions,
+					'__invalid_struct', this.type, true);
+			}
+			const index = this.operand.value;
+			if (index < 0 || index >= this.array.length) {
+				throw new InfrastructureNotImplementedExpection('subscript out of range');
+			}
+			return new RegistryStructRet(glob, this.instructions,
+				this.array.elementName(index), this.type, false);
+		}
 		if (this.operand.constant) {
 			const index = this.operand.value;
 			if (index < 0 || index >= this.array.length) {
@@ -2054,6 +2093,23 @@ class DividedSlotRet extends VariableRet {
 	 */
 	set(other) {
 		const glob = this.glob;
+		const layout = registerElementLayoutOf(this.type);
+		if (layout?.kind === 'struct') {
+			if (!this.operand.constant) {
+				glob.generator?.addError(
+					`Dynamic subscript of a multi-register register array is not `
+					+ `supported yet; use a constant index or a memory-backed array`,
+					null);
+				return new Instruction([], 'null');
+			}
+			const index = this.operand.value;
+			if (index < 0 || index >= this.array.length) {
+				throw new InfrastructureNotImplementedExpection('subscript out of range');
+			}
+			const target = new RegistryStructRet(glob, this.instructions,
+				this.array.elementName(index), this.type, false);
+			return target.set(other);
+		}
 		const rawValue = other.get();
 		const value = isNamePointerType(this.type)
 			? rawValue : rawValue.convertTo(this.type ?? other.type);
@@ -3512,6 +3568,11 @@ function helperAddressOf(key) {
  */
 function handleShapeOf(array) {
 	if (!array) return null;
+	if (array instanceof DividedArrayRet
+		&& registerElementLayoutOf(array.elementTypeInfo)?.kind === 'struct') {
+		// A handle helper returns one register; a struct element needs several.
+		return null;
+	}
 	const device = array.deviceReg ?? '@this';
 	// A remote array: its elements are registers of the other processor
 	if (array instanceof RemoteArrayRet) {

@@ -3044,6 +3044,59 @@ export class CodeGenerator extends ASTVisitor {
 		return result;
 	}
 
+	/**
+	 * Initialize one registry-struct array element (`<base>.x`, `<base>.y`, ...).
+	 * C1 supports flat structs made of single-cell members and nested registry
+	 * structs; pointer/array/union members are rejected by the layout check.
+	 */
+	initializeRegisterStructTarget(baseName, type, initializer) {
+		const result = new Instruction();
+		if (initializer && initializer.type !== 'InitializerList') {
+			const value = this.visitAndRead(initializer);
+			result.concat(value);
+			result.concat(this.copyStruct(baseName, value.instructionReturn ?? 'null', type, type));
+			return result;
+		}
+		const members = (type.members ?? []).filter(member => member.isBitfieldStorage !== true);
+		const children = initializer?.children ?? [];
+		for (let i = 0; i < members.length; i++) {
+			const member = members[i];
+			const target = `${baseName}.${member.name}`;
+			const child = children[i];
+			if (!child) {
+				result.concat(this.zeroRegisterMember(target, member.type));
+				continue;
+			}
+			if (member.type?.kind === 'struct' && child.type === 'InitializerList') {
+				result.concat(this.initializeRegisterStructTarget(target, member.type, child));
+				continue;
+			}
+			const value = this.visitAndRead(child);
+			result.concat(value);
+			if (member.type?.kind === 'struct') {
+				result.concat(this.copyStruct(target, value.instructionReturn ?? 'null',
+					member.type, member.type));
+			} else {
+				result.concat(InstructionBuilder.set(target,
+					value.instructionReturn !== null && value.instructionReturn !== undefined
+						? value.instructionReturn : '0'));
+			}
+		}
+		return result;
+	}
+
+	zeroRegisterMember(target, type) {
+		const result = new Instruction();
+		if (type?.kind === 'struct') {
+			for (const member of (type.members ?? []).filter(m => m.isBitfieldStorage !== true)) {
+				result.concat(this.zeroRegisterMember(`${target}.${member.name}`, member.type));
+			}
+			return result;
+		}
+		result.concat(InstructionBuilder.set(target, '0'));
+		return result;
+	}
+
 	initializeEmbeddedArray(symbol, style, initializer) {
 		const dimensions = this.semantic?.arrayDimensionsOf
 			? this.semantic.arrayDimensionsOf(symbol.myType?.() ?? null)
@@ -3058,6 +3111,7 @@ export class CodeGenerator extends ASTVisitor {
 				symbol.location ?? null);
 			return new Instruction();
 		}
+		const elementLayout = elementType ? registerElementLayoutOf(elementType) : null;
 		const items = this.flatInitializerItems(initializer, dimensions.length || 1);
 		if (!Array.isArray(items) || items.length === 0) return new Instruction();
 		const length = this.arrayLengthOf(symbol);
@@ -3067,12 +3121,17 @@ export class CodeGenerator extends ASTVisitor {
 		for (let i = 0; i < items.length && i < length; i++) {
 			const register = names ? names[i] : `${symbol.getAssemblySymbol()}_${i}`;
 			if (!register) break;
+			const item = items[i];
+			if (elementLayout?.kind === 'struct') {
+				result.concat(this.initializeRegisterStructTarget(register, elementType, item));
+				this.releaseTempVariable?.();
+				continue;
+			}
 			/*
 			A content constant (@lead) initialising a numeric array must become
 			its id: the register would otherwise hold the content itself and
 			print as `@lead` instead of `1`.
 			*/
-			const item = items[i];
 			const isContent = item && item.type === 'Identifier'
 				&& typeof item.name === 'string' && item.name[0] === '@';
 			if (isContent) {
@@ -5570,6 +5629,14 @@ export class CodeGenerator extends ASTVisitor {
 				}
 				element.setAttribute('isNearPointer', isNearPointerHere);
 				element.setAttribute('isFromRegStruct', false);
+				/*
+				A struct element is an LValue made of several member registers.
+				Return its structured reference, not the one-register slot, so a
+				following `.member` access takes the registry-struct path.
+				*/
+				if (registerElementLayoutOf(node.dataType)?.kind === 'struct') {
+					return element.get();
+				}
 				return element;
 			}
 			// Array subscript: evaluate the index first
@@ -6107,6 +6174,17 @@ export class CodeGenerator extends ASTVisitor {
 
 			const handle = array ? ensureArrayHandle(glob, array) : null;
 			if (!handle) {
+				const elementType = argSymbol
+					? this.semantic?.innermostArrayElementOf?.(argSymbol.myType?.() ?? null) : null;
+				const elementLayout = elementType ? registerElementLayoutOf(elementType) : null;
+				if (elementLayout?.kind === 'struct') {
+					this.addError(
+						`A multi-register register array cannot travel as a handle: `
+						+ `'${argSymbol?.name ?? argNode?.name ?? 'array'}'. Use a memory-backed `
+						+ `array, a constant-index access, or let the call be inlined`,
+						argNode?.location ?? null);
+					return new MemoryRefRet(glob, [], 'null', slotType ?? null, true);
+				}
 				throw new InternalGenerationFailure(
 					`Array '${argNode.name}' cannot be handed to a function: `
 					+ `it has no representation that travels as a value`, argNode.location);

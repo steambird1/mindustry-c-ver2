@@ -20,9 +20,9 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 249 passed, 0 failed (148 shape assertions, 1105 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 99 passed, 0 failed |
-| `node ../tools/nomem.mjs` | 12 passed, 0 failed |
+| `node ../tools/check.mjs` | 252 passed, 0 failed (148 shape assertions, 1120 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 100 passed, 0 failed |
+| `node ../tools/nomem.mjs` | 13 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
 
@@ -90,6 +90,8 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | multidimensional local arrays + flat handles (§7.34) | **done**; flat row-major layout, nested-subscript lowering, embedded/encoded multidim, 1D span handles, 16-bit handle length, tests t232/t233/n12 | §7.34 |
 | multidimensional remote arrays (§7.35) | **done**; shaped/flat remote views, flat owner exports, remote lenof, tests t234/t235 | §7.35 |
 | complex-element arrays are memory-backed (§7.36) | **done**; embedded/lookup/encoded reject multi-cell elements, automatic traditional layout, tests t236 + negatives | §7.36 |
+| byname pointer arrays (§7.37) | **done**; name pointers in register arrays, dynamic access, handles, tests t237 | §7.37 |
+| flat registry-struct register arrays (§7.38) | **done**; coordinate/struct members, constants and nested structs, tests t238/t239 + negatives | §7.38 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -824,21 +826,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 645 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 650 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 645 under `testers/unit_tests`, every one of
+bring the count to 650 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 249 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 99 | `negative/` |
-| `nomem.mjs` | 12 | `nomem/` |
+| `check.mjs` | 252 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `negative.mjs` | 100 | `negative/` |
+| `nomem.mjs` | 13 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-249 + 10 + 99 + 12 + 275 = 645. The caveat that replaces "no runner" is weaker but real:
+252 + 10 + 100 + 13 + 275 = 650. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -1834,19 +1836,54 @@ called `f` even when `a` was false.
 
 ### 7.36 Complex-element arrays are memory-backed
 
-- `embedded`/`lookup`/`encoded` layouts have one name/register per element.
-  They now reject pointer, struct, union and nested-array elements up front;
-  before this, such arrays compiled and silently read 0.
-- Complex-element arrays automatically choose the traditional memory layout,
-  even when memory is available and the automatic heuristic might otherwise
-  pick registers. An explicit `array("traditional", ...)` is accepted; any
-  other explicit implementation is diagnosed.
-- A no-memory program with a complex-element array is rejected with the
-  existing "Cannot assign memory for symbol" diagnosis rather than silently
-  degrading to registers.
+- A register/lookup/encoded array uses one name/register per element or
+  register component. Elements that the register layout cannot express
+  (ordinary block/pos pointers, unions, bitfields, arrays, structs containing
+  those) are forced to the traditional memory layout instead of silently
+  reading 0. Flat registry structs and byname pointers are covered in §7.37
+  and §7.38.
+- Unsupported-element arrays automatically choose traditional memory, even
+  when memory is available. An explicit `array("traditional", ...)` is
+  accepted; an unsupported explicit register/lookup/encoded request is
+  diagnosed.
+- A no-memory program with an unsupported complex-element array is rejected
+  with the existing "Cannot assign memory for symbol" diagnosis rather than
+  silently degrading to registers.
 - Single-cell elements (numeric, content, device, `string_t`) keep working in
   embedded/lookup/encoded arrays, including multidimensional layouts.
 - Cases: t236 (struct and pointer arrays in memory, automatic and explicit);
-  negatives for struct embedded, pointer lookup, and no-memory struct array;
-  the existing multidim register-struct negative now uses the same early
-  diagnostic.
+  negatives for an ordinary pointer register array, pointer lookup, dynamic
+  struct subscript and non-inline struct handle travel.
+
+### 7.37 Arrays of byname pointers
+
+- A `byname` pointer is one register holding a target name, so register arrays
+  can store arrays of them. Automatic layout keeps these arrays in
+  embedded_divided; explicit embedded_divided is accepted. Ordinary pointers
+  (block/pos) and aggregates still force memory.
+- DividedArrayRet returns NamePointerRet for these elements, including dynamic
+  indexing: reads/writes use `read/write @this`, assignment copies the name
+  register. ArrayHandleSlotRet handles the same element type for open handles.
+- An explicit traditional layout for a byname pointer array is refused: the
+  memory layout would need a separate name-pointer-in-memory representation.
+- Case: t237 (automatic/explicit arrays, dereference, dynamic index, copy,
+  open handle); negative for traditional layout.
+
+### 7.38 Flat registry-struct register arrays
+
+- A registry struct made of single-cell/nested-registry-struct members can be
+  an element of an embedded_divided array. Elements are named
+  `<array>_<index>.<member>`; nested structs recurse
+  (`<array>_<index>.q.x`). Coordinate-like `struct { int x; int y; }` arrays
+  work, including multidimensional register arrays with constant indices.
+- Initialization writes each member directly (zero-filling omitted members);
+  whole-element assignment copies member by member. Ordinary pointers,
+  unions, bitfields and memory-requiring structs still force memory.
+- Dynamic subscripts of multi-register struct elements are rejected: a single
+  `select` cannot choose a whole struct. A memory-backed array works, or a
+  constant index. Open-handle travel is also rejected with a clear diagnostic;
+  let the call inline or use memory.
+- Cases: t238 (1-D struct register array: member access, assignment, nested
+  struct, zero fill, lenof/sizeof), t239 (multidimensional register struct
+  array), nomem n13; negatives for dynamic struct subscript and non-inline
+  handle travel.
