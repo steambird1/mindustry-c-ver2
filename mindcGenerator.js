@@ -3045,6 +3045,162 @@ export class CodeGenerator extends ASTVisitor {
 	}
 
 	/**
+	 * A scalar member may be written with extra braces (`{3}`, `{{byname(&x)}}`).
+	 * Walk through single-element lists so the value underneath is used.
+	 *
+	 * @param {ASTNode?} node
+	 * @param {any} type
+	 * @returns {ASTNode?}
+	 */
+	unwrapScalarInitializer(node, type) {
+		let current = node;
+		while (current?.type === 'InitializerList'
+			&& (current.children?.length ?? 0) === 1
+			&& !['struct', 'union', 'array'].includes(type?.kind)) {
+			current = current.children[0];
+		}
+		return current;
+	}
+
+	/**
+	 * Write one struct/union element into memory at `space`.
+	 *
+	 * The generic initializer walker lays members out by adding their sizes,
+	 * which is wrong for bitfields: several fields share one storage cell. It
+	 * also treats a `byname` pointer as a block/pos pair, while the memory
+	 * representation stores just the target name in the first cell.
+	 *
+	 * @param {any} space
+	 * @param {any} type
+	 * @param {ASTNode} initializer
+	 * @returns {Instruction}
+	 */
+	initializeMemoryStructAt(space, type, initializer) {
+		const result = new Instruction();
+		const size = Number(type?.size) || 0;
+		// Omitted members must be zero, not whatever a previous pass left.
+		for (let i = 0; i < size; i++) {
+			result.concat(this.memory.outputStorageOf(space.duplicate().forwarding(i), '0'));
+		}
+
+		const children = initializer?.children ?? [];
+		const intType = this.semantic.getTypeInfo('int');
+		const storages = new Map();
+		for (const storage of type?.bitfieldStorages ?? []) {
+			const temp = this.getTempSymbol(intType);
+			const name = temp.getAssemblySymbol();
+			result.concat(InstructionBuilder.set(name, '0'));
+			storages.set(storage.name, name);
+		}
+
+		const visible = (type?.members ?? []).filter(member => member.isBitfieldStorage !== true);
+		for (let i = 0; i < visible.length; i++) {
+			const member = visible[i];
+			const child = children[i];
+			if (!child) continue;
+			const memberType = member.type ?? member.memberType;
+
+			if (member.isBitfield === true) {
+				const storageName = storages.get(member.storageName);
+				if (!storageName) continue;
+				const value = this.visitAndRead(
+					this.unwrapScalarInitializer(child, memberType));
+				result.concat(value);
+				const storage = new BasicRet(this.glob, [], storageName, intType, true);
+				const bitfield = new BitfieldRet(this.glob, storage, memberType,
+					member.bitOffset, member.bitWidth, member.isSigned);
+				result.concat(bitfield.set(ExportRet(this.glob, value,
+					child.dataType ?? memberType)));
+				continue;
+			}
+
+			const target = space.duplicate().forwarding(member.offset ?? 0);
+			if ((memberType?.kind === 'struct' || memberType?.kind === 'union')
+				&& child.type === 'InitializerList') {
+				result.concat(this.initializeMemoryStructAt(target, memberType, child));
+				continue;
+			}
+			if (memberType?.kind === 'array' && child.type === 'InitializerList') {
+				result.concat(this.initializeMemoryArrayAt(target, memberType, child));
+				continue;
+			}
+			const value = this.visitAndRead(
+				this.unwrapScalarInitializer(child, memberType));
+			result.concat(value);
+			const isNamePointer = isNamePointerType(memberType)
+				|| isNamePointerType(value.type)
+				|| value.getAttribute?.('isNamePointer') === true;
+			if (isNamePointer) {
+				// The memory representation is the name itself, one cell.
+				result.concat(this.memory.outputStorageOf(target,
+					value.instructionReturn ?? 'null'));
+			} else if (value.getAttribute?.('isPointer') || memberType?.isPointerImpl?.()) {
+				result.concat(this.memory.outputStorageOf(target,
+					`${value.instructionReturn}_block`));
+				result.concat(this.memory.outputStorageOf(target.duplicate().forwarding(1),
+					`${value.instructionReturn}_pos`));
+			} else {
+				result.concat(this.memory.outputStorageOf(target,
+					value.instructionReturn ?? '0'));
+			}
+		}
+
+		for (const storage of type?.bitfieldStorages ?? []) {
+			const name = storages.get(storage.name);
+			if (name) {
+				result.concat(this.memory.outputStorageOf(
+					space.duplicate().forwarding(storage.offset ?? 0), name));
+			}
+		}
+		return result;
+	}
+
+	/**
+	 * Write an array member (inside a memory struct) element by element.
+	 *
+	 * @param {any} space
+	 * @param {any} type
+	 * @param {ASTNode} initializer
+	 * @returns {Instruction}
+	 */
+	initializeMemoryArrayAt(space, type, initializer) {
+		const result = new Instruction();
+		const elementType = type?.pointerTo ?? type?.elementType ?? null;
+		const stride = Number(elementType?.size) || 1;
+		const children = initializer?.children ?? [];
+		for (let i = 0; i < children.length; i++) {
+			const target = space.duplicate().forwarding(i * stride);
+			const child = children[i];
+			if ((elementType?.kind === 'struct' || elementType?.kind === 'union')
+				&& child.type === 'InitializerList') {
+				result.concat(this.initializeMemoryStructAt(target, elementType, child));
+				continue;
+			}
+			if (elementType?.kind === 'array' && child.type === 'InitializerList') {
+				result.concat(this.initializeMemoryArrayAt(target, elementType, child));
+				continue;
+			}
+			const value = this.visitAndRead(
+				this.unwrapScalarInitializer(child, elementType));
+			result.concat(value);
+			if (isNamePointerType(elementType) || isNamePointerType(value.type)
+				|| value.getAttribute?.('isNamePointer') === true) {
+				result.concat(this.memory.outputStorageOf(target,
+					value.instructionReturn ?? 'null'));
+			} else if (value.getAttribute?.('isPointer') || elementType?.isPointerImpl?.()) {
+				result.concat(this.memory.outputStorageOf(target,
+					`${value.instructionReturn}_block`));
+				result.concat(this.memory.outputStorageOf(target.duplicate().forwarding(1),
+					`${value.instructionReturn}_pos`));
+			} else {
+				result.concat(this.memory.outputStorageOf(target,
+					value.instructionReturn ?? '0'));
+			}
+		}
+		return result;
+	}
+
+	/**
 	 * Initialize one registry-struct array element (`<base>.x`, `<base>.y`, ...).
 	 * C1 supports flat structs made of single-cell members and nested registry
 	 * structs; pointer/array/union members are rejected by the layout check.
@@ -3622,6 +3778,20 @@ export class CodeGenerator extends ASTVisitor {
 				let processed = 0;
 
 				if (obj.type === 'InitializerList') {
+					/*
+					A bitfield member shares its storage cell with its neighbours,
+					so walking the list by member sizes would write the second
+					field over the next cell. Use the layout-aware writer for any
+					struct that has bitfield storage.
+					*/
+					if (typeLayer?.kind === 'struct'
+						&& (typeLayer.bitfieldStorages?.length ?? 0) > 0) {
+						const size = Number(typeLayer.size) || 0;
+						result.concat(this.initializeMemoryStructAt(assignedSpace,
+							typeLayer, obj));
+						assignedSpace.forwarding(size);
+						return size;
+					}
 					obj.children.forEach(child => {
 						processed += initializerProcessor(child, typeLayer ? typeLayer.pointerTo : null);
 					});
@@ -3648,7 +3818,19 @@ export class CodeGenerator extends ASTVisitor {
 					} else {
 					result.concat(valueFetch);
 					// Process assignment-like
-					if (valueFetch.getAttribute('isPointer') || obj.dataType.isPointerImpl()) {
+					const namePointerValue = isNamePointerType(valueFetch.type)
+						|| valueFetch.getAttribute?.('isNamePointer') === true
+						|| isNamePointerType(obj.dataType);
+					if (namePointerValue) {
+						/*
+						A `byname` pointer's memory form is the target NAME in
+						one cell. Writing its `_block` / `_pos` (both null for a
+						name pointer) loses the name and the later dereference
+						reads 0.
+						*/
+						result.concat(this.memory.outputStorageOf(assignedSpace,
+							valueFetch.instructionReturn ?? 'null'));
+					} else if (valueFetch.getAttribute('isPointer') || obj.dataType.isPointerImpl()) {
 						// They are implemented as pointer...
 						result.concat(new Instruction([
 							this.memory.outputStorageOf(assignedSpace, `${valueFetch.instructionReturn}_block`),

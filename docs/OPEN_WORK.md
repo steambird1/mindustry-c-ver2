@@ -20,8 +20,8 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 253 passed, 0 failed (148 shape assertions, 1124 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 99 passed, 0 failed |
+| `node ../tools/check.mjs` | 255 passed, 0 failed (148 shape assertions, 1134 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 101 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 13 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
@@ -93,6 +93,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | byname pointer arrays (§7.37) | **done**; name pointers in register arrays, dynamic access, handles, tests t237 | §7.37 |
 | flat registry-struct register arrays (§7.38) | **done**; coordinate/struct members, constants and nested structs, tests t238/t239 + negatives | §7.38 |
 | dynamic multi-register struct subscripts (§7.39) | **done**; per-leaf select reads, selected-name writes, whole-element copy, test t240 | §7.39 |
+| complex struct member initializers (§7.40) | **done**; enum/nested-enum register arrays, memory fallbacks for array/union/pointer/byname/bitfield members, tests t241/t242 + negatives | §7.40 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -827,21 +828,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 650 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 654 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 650 under `testers/unit_tests`, every one of
+bring the count to 654 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 253 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 99 | `negative/` |
+| `check.mjs` | 255 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `negative.mjs` | 101 | `negative/` |
 | `nomem.mjs` | 13 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-253 + 10 + 99 + 13 + 275 = 650. The caveat that replaces "no runner" is weaker but real:
+255 + 10 + 101 + 13 + 275 = 654. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -1901,3 +1902,24 @@ called `f` even when `a` was false.
   helper returns one register, while a struct element spans several. Use a
   memory-backed array or allow the call to inline.
 - Case: t240 (dynamic read/write/copy and nested struct access).
+
+### 7.40 Complex struct members in array initializers
+
+- Enum members and nested structs containing enums are ordinary single-cell
+  registry members, so they work in embedded_divided struct arrays without a
+  special case. t241 covers enum, nested struct+enum and typedef'd enum
+  members, constant/dynamic subscripts and whole-element assignment.
+- Structs containing an array, a union, an ordinary pointer or a `byname`
+  pointer member are not register-compatible and automatically use memory.
+  t242 covers all four. Explicit embedded_divided is refused with the usual
+  "needs single-cell elements" diagnostic (negatives for array and bitfield
+  members).
+- Memory-backed struct initializers are now layout-aware for bitfields: the
+  fields are packed into their shared storage cell instead of being written as
+  consecutive words. Omitted members are zeroed.
+- A `byname` pointer member's memory form is its target name in one cell; the
+  initializer now writes that name instead of the null `_block`/`_pos` pair.
+  Extra braces around a scalar member (`{{byname(&x)}}`) are unwrapped too.
+- Cases: t241 (enum/nested-enum register arrays), t242 (array/union/pointer/
+  byname/bitfield members in memory); negatives for explicit register layout of
+  an array-member struct and a bitfield struct.
