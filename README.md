@@ -62,7 +62,8 @@ For grammar introduction (about the features unique to Mindustry-C) and examples
 - C-like core: functions, structs, pointers, arrays, `typedef`,
   `for`/`while`/`do-while`/`switch`, `break`/`continue`/`return`.
 - C99 conveniences: `//` comments, `bool`/`true`/`false`, `inline`,
-  declarations in `for` initializers.
+  declarations in `for` initializers, designated initializers (`.field =`,
+  `[index] =`), and function-like macros with `#`, `##` and `__VA_ARGS__`.
 - C surface: real `enum` (including `typedef enum`, and enum-typed struct/union
   members and function parameters/returns), `typedef struct { ... }
   Name;` (anonymous, tagged, self-referential), short-circuit `&&`/`||` and
@@ -93,7 +94,7 @@ For grammar introduction (about the features unique to Mindustry-C) and examples
   each run.
 - Preprocessor: `#define` (object-like and function-like), `#undef`,
   `#if`/`#elif`/`#else`/`#endif`, `#ifdef`/`#ifndef`, `#include`, `#pragma`.
-  Variadic macros are not supported; `goto` and VLAs are rejected.
+  `goto` and VLAs are rejected.
 - Mindustry types: `device`, `content_t`, `null_t`, `item_t`, `liquid_t`,
   `unit_t`, `block_t`, plus `remote` bindings.
 - `auto device` startup binding, plus `getlink` for runtime link access.

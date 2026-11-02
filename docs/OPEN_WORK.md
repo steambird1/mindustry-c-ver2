@@ -20,8 +20,8 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 237 passed, 0 failed (141 shape assertions, 1045 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 88 passed, 0 failed |
+| `node ../tools/check.mjs` | 239 passed, 0 failed (141 shape assertions, 1055 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 89 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 10 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
@@ -84,6 +84,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | nominal pointers / removal of volatile output casts (§7.28) | **done**; `&x` for `ulocate`/`ucontrol`, extension `nominalPointers`, tests t216/t217 | §7.28 |
 | runtime `printf` width/precision (§7.29) | **done**; inline int width, `__printf_int/float/string`, tests t218–t221 | §7.29 |
 | C99 headers + static assert/__func__/restrict (§7.30) | **done**; compatibility headers, NDEBUG, declaration touches, tests t222–t224 | §7.30 |
+| designated initializers + macro #/##/__VA_ARGS__ (§7.31) | **done**; designator normalization, macro operator expansion, tests t225/t226 | §7.31 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -818,21 +819,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 620 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 623 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 620 under `testers/unit_tests`, every one of
+bring the count to 623 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 237 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 88 | `negative/` |
+| `check.mjs` | 239 + 10 peers | `check/`, plus the 10 `check/peers/*.c` it drives on their owners' behalf |
+| `negative.mjs` | 89 | `negative/` |
 | `nomem.mjs` | 10 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-237 + 10 + 88 + 10 + 275 = 620. The caveat that replaces "no runner" is weaker but real:
+239 + 10 + 89 + 10 + 275 = 623. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -1682,3 +1683,23 @@ called `f` even when `a` was false.
   assertion.
 - Not done in this batch: designated initializers, standard compound literals,
   `#`/`##` and variadic macros, printf `%c/%x/%o`, `goto`, qsort/bsearch/malloc.
+
+### 7.31 Designated initializers and macro operators
+
+- Initializer lists accept C99 `.member = value` and `[constant] = value`.
+  Semantic normalization maps them onto struct/array slots, zero-fills omitted
+  slots (recursively for nested structs/arrays), and leaves ordinary positional
+  lists unchanged. Unknown members, out-of-range indices, duplicate slots,
+  nested designators and union designators are diagnosed (the last two are
+  explicit current limits).
+- `#define` recognises `...` and maps extra arguments to `__VA_ARGS__`.
+  `#param` stringifies the raw argument, `##` removes surrounding whitespace and
+  pastes tokens, and normal parameters are macro-expanded before substitution
+  (`XSTR(VERSION)` produces the expanded value). Function-like macro names
+  without arguments are left as identifiers. Included headers share the
+  variadic metadata.
+- Cases: t225 (global/local struct and array designators), t226 (`STR`/`XSTR`,
+  `CAT`/`CAT3`, `ADD` with `__VA_ARGS__`); negative for an unknown designated
+  member.
+- Compound literals remain the next item; their expression/storage semantics
+  are not changed by this batch.

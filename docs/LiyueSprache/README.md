@@ -22,7 +22,7 @@ Mindustry-C 不需要安装。你只需要下载 `main.html` 和所有 JavaScrip
 
 - C 核心：函数、结构体、指针、数组、`typedef`、
   `for`/`while`/`do-while`/`switch`、`break`/`continue`/`return`。
-- C99 便利：`//` 注释、`bool`/`true`/`false`、`inline`、`for` 初始化声明。
+- C99 便利：`//` 注释、`bool`/`true`/`false`、`inline`、`for` 初始化声明、指定初始化器（`.field =`、`[index] =`），以及带 `#`、`##`、`__VA_ARGS__` 的函数宏。
 - C 表面：真正的 `enum`（含 `typedef enum`，可作为 struct/union 成员和函数参数/返回值）、`typedef struct { ... } Name;`（匿名/具名/自引用）、`&&`/`||` 短路与 `?:` 单分支求值、`printf`（格式串需字面量；`%d/%i/%u/%f/%s/%%`；v150+ 用 `format`，低版本逐段用 `print`；常量编译期折叠，运行时整数宽度、显式精度浮点和 v150+ 字符串宽度/精度由内联或 `__printf_*` helper 处理）、`assert`，以及 `<stdbool.h>`/`<stdio.h>`/`<assert.h>` 兼容头。
 - 声明：函数原型（含 `auto` 模式）、结构体/联合体前向声明（`struct P;`、`typedef struct P P;`），以及块作用域内的 typedef、结构体定义、enum 和函数原型（支持遮蔽）。不支持嵌套函数定义和 C11 匿名成员。
 - C99 兼容头：`stddef.h`、`stdint.h`、`limits.h`、`float.h`、`ctype.h`、`stdlib.h`（atoi/strtol/div/exit 子集）、`string.h` 扩展、`inttypes.h`、`iso646.h`、`stdalign.h`、`stdnoreturn.h` 和 `errno.h`。`assert` 支持 `NDEBUG`；`_Static_assert`/`static_assert`、`__func__` 和 `restrict` 可用。

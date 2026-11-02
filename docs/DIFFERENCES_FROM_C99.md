@@ -409,6 +409,7 @@ remote int *p = remote(processor1, qq);      // 指针本身在对端
 - 块作用域：块内允许函数原型、`struct`/`union` 定义或前向声明、typedef 和 enum。局部 tag/typedef 遮蔽外层同名类型，离开块后恢复；块内原型可以指向之后出现的全局定义。**不允许嵌套函数定义**。
 - enum 成员：enum 类型可以作为 struct/union 成员，也可以作为函数参数和返回值；顶层 enum 与 struct/typedef 按源码顺序处理，成员列表里内联或匿名的 enum 会先注册。enum tag 仍须先声明后使用。
 - `_Static_assert` / `static_assert` 支持常量和 `sizeof` 条件；`__func__` 是当前函数名；`restrict` 被接受并忽略。
+- 指定初始化器支持结构体/数组的 `.field =`、`[index] =` 和未指定槽位补零；嵌套 designator 和 union designator 暂不支持。宏支持 `#`、`##`、`...`/`__VA_ARGS__`。
 - C99 兼容头已覆盖 `stddef.h`、`stdint.h`、`limits.h`、`float.h`、`ctype.h`、`stdlib.h` 子集、`string.h` 扩展、`inttypes.h`、`iso646.h`、`stdalign.h`、`stdnoreturn.h` 和 `errno.h`。
 - C11 匿名成员（如 `union { union { int a; int b }; int c }`）不支持。
 - 低于 v150 时 `printf` 逐段生成 `print`；常量参数在编译期格式化，运行时整数宽度、显式精度浮点和 v150+ 的字符串宽度/精度可用。`%f` 只有宽度没有精度、v150 以下的运行时 `%s` 宽度/精度会报错。无内存块不等于必须用 `byname`：普通 stdio 程序在低版本也能编译，只有真正需要名字指针或内存时才会报错。
@@ -420,7 +421,7 @@ remote int *p = remote(processor1, qq);      // 指针本身在对端
 
 支持常见的 C 预处理器子集：
 
-- `#define` / `#undef`，对象宏和函数宏；
+- `#define` / `#undef`，对象宏和函数宏；`#` 字符串化、`##` token 粘贴、`...`/`__VA_ARGS__`；
 - `#if` / `#elif` / `#else` / `#endif` / `#ifdef` / `#ifndef`；
 - `#include "..."` / `#include <...>`；
 - `#pragma`（见 §12）。
