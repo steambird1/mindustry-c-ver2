@@ -13,7 +13,7 @@
 
 | 命令（从 `testers/unit_tests` 执行） | 读哪个目录 | 当前结果 | 判定标准 |
 |---|---|---|---|
-| `node ..\tools\check.mjs` | `check/` | **263 passed, 0 failed**（148 shape assertions, 1172 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
+| `node ..\tools\check.mjs` | `check/` | **264 passed, 0 failed**（153 shape assertions, 1177 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
 | `node ..\tools\negative.mjs` | `negative/` | **101 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
 | `node ..\tools\nomem.mjs` | `nomem/` | **14 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
 | `node ..\tools\loadorder.mjs` | 仓库根的 `mindc*.js` | **12 passed, 0 failed, 2 exempt** | 每个入口单独起一个 `node` 进程导入，不得有循环依赖 |
@@ -60,7 +60,7 @@
 | `EXPECT: a b c` | `runall/` | 期望输出，与 `check.mjs` 同样的逐行比对；runall 目录里只有 6 个文件带它 |
 
 `check/` 的 pragma 不变性：每个用例都会被加上各种 `optimize(...)` 变体**重跑一遍**，
-输出必须完全一致。**任何 pragma 都不得改变程序输出。** 目前 263 个用例里只有
+输出必须完全一致。**任何 pragma 都不得改变程序输出。** 目前 264 个用例里只有
 t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `pointer` / `struct_pointer`
 这些变体本身要求 v150+。
 
@@ -70,11 +70,11 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 
 ## 目录地图
 
-`testers/unit_tests/` 下共 **664 个 `.c`，全部有 runner**（263 + 11 + 101 + 14 + 275 = 664）：
+`testers/unit_tests/` 下共 **665 个 `.c`，全部有 runner**（264 + 11 + 101 + 14 + 275 = 665）：
 
 | 目录 | 文件数 | 谁来跑 |
 |---|---|---|
-| `check/` | 263 | `check.mjs`（同时驱动 `check/peers/` 的 11 个对端，见下文） |
+| `check/` | 264 | `check.mjs`（同时驱动 `check/peers/` 的 11 个对端，见下文） |
 | `t/` | 98 | `runall.mjs`（早期按主题分的用例，`2dc683e` 起纳入） |
 | `negative/` | 101 | `negative.mjs` |
 | `suite/` | 50 | `runall.mjs` |
@@ -98,7 +98,7 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 
 ## check/ 的编号约定
 
-`check/` 用 `tNN_主题.c` 命名，**编号 1–250 已用满，没有空号**，下一个用例是 `t251`。
+`check/` 用 `tNN_主题.c` 命名，**编号 1–251 已用满，没有空号**，下一个用例是 `t252`。
 另有 13 个不带编号的（`m1`–`m3`、`n1`–`n2`、`rw1`–`rw2`、`seq1`、`memsp2`–`memsp3`），
 它们早于编号制，保留原名。
 
@@ -252,6 +252,7 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 | `t248` | **§7.44**：self-remote byname 赋值通过默认 device 检查；输出 `7` |
 | `t249` | **§7.44**：真实对端 device 不匹配，`#pragma checkRemote(fail)` 调用 handler 后停止；输出 `99` |
 | `t250` | **§7.44**：`#pragma checkRemote()` 关闭检查后继续；输出 `1` |
+| `t251` | **§7.45**：persistent register struct 数组清零——位域/标量/嵌套叶子直接置 0，不再生成 `0.<leaf>`；输出 `0 0 0` |
 
 设计背景见 `docs/PLAN_array_layout.md`。
 

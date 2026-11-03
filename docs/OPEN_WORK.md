@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 263 passed, 0 failed (148 shape assertions, 1172 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 264 passed, 0 failed (153 shape assertions, 1177 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 101 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 14 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
@@ -98,6 +98,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | struct assignment through memory references (§7.42) | **done**; content copy for `arr[i] = value`, reverse reads, dereferenced pointer targets, recursion guard, test t245 | §7.42 |
 | remote register struct arrays (§7.43) | **done**; per-leaf remote names, dynamic selection, nested/bitfield/byname members, whole-element copy, export recursion, tests t246/t247 + negative | §7.43 |
 | `#pragma checkRemote` / byname device checks (§7.44) | **done**; default `strictEqual` device check, handler/disable pragma, tests t248–t250 | §7.44 |
+| persistent register-struct array zeroing (§7.45) | **done**; zero storage leaves directly instead of `copyStruct` from literal `0`, test t251 | §7.45 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -832,21 +833,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 664 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 665 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 664 under `testers/unit_tests`, every one of
+bring the count to 665 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 263 + 11 peers | `check/`, plus the 11 `check/peers/*.c` it drives on their owners' behalf |
+| `check.mjs` | 264 + 11 peers | `check/`, plus the 11 `check/peers/*.c` it drives on their owners' behalf |
 | `negative.mjs` | 101 | `negative/` |
 | `nomem.mjs` | 14 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-263 + 11 + 101 + 14 + 275 = 664. The caveat that replaces "no runner" is weaker but real:
+264 + 11 + 101 + 14 + 275 = 665. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -2013,3 +2014,19 @@ called `f` even when `a` was false.
   comparison because the device comes from the container.
 - Cases: t248 (self-remote, check passes), t249 (real peer mismatch with
   handler), t250 (check disabled).
+
+### 7.45 Persistent register-struct array zeroing
+
+- `zeroLifetimeArray` used `element.set(0)` for every element. For a register
+  struct that goes through `copyStruct`, which then reads members off the
+  literal `0`, producing `set x.__bits0 0.__bits0` (or `0.x`) instead of
+  zeroing the element.
+- Register-struct elements now use `zeroRegisterMember` on the element base:
+  visible bitfields are skipped, `__bitsN` storage cells and nested struct
+  leaves are set to 0 directly. The element type is resolved to the innermost
+  element so multidimensional arrays take the same path.
+- This path matters when a `persistent`/`static` array is forced into the
+  register layout, for example by `remote(@this, _data)` or an explicit
+  `array("embedded_divided")`.
+- Case: t251 (extern persistent 2-D struct array with bitfields, scalar and
+  nested members; asserts no `0.<leaf>` and checks the direct zero stores).

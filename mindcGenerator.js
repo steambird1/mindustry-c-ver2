@@ -3099,7 +3099,8 @@ export class CodeGenerator extends ASTVisitor {
 			return new Instruction();
 		}
 		const type = symbol.myType();
-		const elementType = type?.pointerTo ?? null;
+		const elementType = this.semantic?.innermostArrayElementOf?.(type)
+			?? type?.pointerTo ?? null;
 		// A pointer has no meaningful all-zero value; do not initialize it.
 		if (this.containsPointerType(elementType)) return new Instruction();
 		const length = this.arrayLengthOf(symbol);
@@ -3113,6 +3114,20 @@ export class CodeGenerator extends ASTVisitor {
 		const view = this.arrayViewOf(symbol);
 		if (!view) return new Instruction();
 		const result = new Instruction();
+		/*
+		A struct element is several registers. `element.set(0)` would go
+		through `copyStruct` and read members off the literal `0`
+		(`set x.__bits0 0.__bits0`). Zero its storage leaves directly instead.
+		*/
+		const structureLayout = elementType ? registerElementLayoutOf(elementType) : null;
+		if (structureLayout?.kind === 'struct') {
+			for (let i = 0; i < length; i++) {
+				const element = view.element(i);
+				const reference = element.get();
+				result.concat(this.zeroRegisterMember(reference.instructionReturn, elementType));
+			}
+			return result;
+		}
 		for (let i = 0; i < length; i++) {
 			const element = view.element(i);
 			result.concat(element.set(new ImmediateRet(this.glob, '0', element.type ?? null)));
