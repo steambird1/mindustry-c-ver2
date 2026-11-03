@@ -477,6 +477,24 @@ JS 扩展函数可以在 `addinFunctionInfo` 中用 `nominalPointers: [i]` 声�
 
 `strtol`/`strtoul` 目前接受 `endptr` 形参但不回写它；需要解析结束位置的代码应自行扫描。
 
+### 5.19 `packed.h`
+
+```c
+#include "packed.h"
+```
+
+把多个小整数打包进一个 cell，适合在不用编译器新类型的情况下节省存储：
+
+| 宽度 | 每个 cell | 声明宏 | 访问 |
+|---|---|---|---|
+| 4-bit | 13 | `MC_PACK4_DECL(a, n)` | `mc_pack4_get` / `mc_pack4_get_signed` / `mc_pack4_set` |
+| 8-bit | 6 | `MC_PACK8_DECL(a, n)` | `mc_pack8_get` / `mc_pack8_get_signed` / `mc_pack8_set` |
+| 16-bit | 3 | `MC_PACK16_DECL(a, n)` | `mc_pack16_get` / `mc_pack16_get_signed` / `mc_pack16_set` |
+
+`n` 是元素个数，`MC_PACK*_DECL` 会生成 `ceil(n / per-cell)` 个 cell。也可以直接操作单个 cell：`mc_pack8_cell_get` / `mc_pack8_cell_set` 等。
+
+这些是普通 cell 数组加访问器，不是原生 packed 数组类型：没有 `a[i]` 左值、`&a[i]` 或 packed 元素指针算术。访问器接受 `int w[]`，因此可用于 memory、register、remote 和 lookup 数组；lookup 的每个 content 名字对应一个 group。
+
 ---
 
 ## 6. 与 C 标准库的关系

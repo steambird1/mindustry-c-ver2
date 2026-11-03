@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 267 passed, 0 failed (163 shape assertions, 1189 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 269 passed, 0 failed (163 shape assertions, 1199 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 102 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 16 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
@@ -100,6 +100,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | `#pragma checkRemote` / byname device checks (§7.44) | **done**; default `strictEqual` device check, handler/disable pragma, tests t248–t250 | §7.44 |
 | persistent register-struct array zeroing (§7.45) | **done**; zero storage leaves directly instead of `copyStruct` from literal `0`, test t251 | §7.45 |
 | packed lookup structs + lookup handles (§7.46) | **done**; one-register packed structs use lookup, multi-register falls back to divided, lookup handles use lookup+sensor+read/write, tests t252–t254/n15/n16 + negative | §7.46 |
+| packed 4/8/16-bit header (§7.47) | **done**; `packed.h` cell accessors and declaration macros, tests t255/t256 | §7.47 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -834,21 +835,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 671 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 673 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 671 under `testers/unit_tests`, every one of
+bring the count to 673 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 267 + 11 peers | `check/`, plus the 11 `check/peers/*.c` it drives on their owners' behalf |
+| `check.mjs` | 269 + 11 peers | `check/`, plus the 11 `check/peers/*.c` it drives on their owners' behalf |
 | `negative.mjs` | 102 | `negative/` |
 | `nomem.mjs` | 16 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-267 + 11 + 102 + 16 + 275 = 671. The caveat that replaces "no runner" is weaker but real:
+269 + 11 + 102 + 16 + 275 = 673. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -2058,3 +2059,22 @@ called `f` even when `a` was false.
   struct), nomem n15 (automatic packed lookup without memory), nomem n16
   (multi-register struct falls back to divided); negative for explicit lookup
   of a multi-register struct.
+
+### 7.47 Packed 4/8/16-bit header
+
+- `include/packed.h` provides ordinary cell arrays plus bit accessors:
+  4-bit values 13/cell, 8-bit 6/cell, 16-bit 3/cell. `MC_PACK*_DECL(name, n)`
+  uses an enum constant so the array dimension is a compile-time constant
+  (`MC_PACK*_WORDS(n)` alone cannot appear directly in an array dimension in
+  this dialect).
+- `mc_pack*_get`, `mc_pack*_get_signed` and `mc_pack*_set` operate on `int w[]`;
+  `mc_pack*_cell_get`/`_set` operate on one packed cell, which is useful in a
+  lookup-packed struct or a small fixed-size field.
+- The accessors use ordinary array indexing, so they work with register, memory,
+  remote and lookup group arrays. A lookup content name addresses one group,
+  not one 4/8/16-bit element.
+- This is a library fallback, not a native packed array: there is no `a[i]`
+  lvalue, `&a[i]`, pointer arithmetic over elements, or automatic `int8_t`
+  width semantics. `sizeof`/`lenof` describe cells, not packed elements.
+- Cases: t255 (4/8/16-bit values, word counts, signed extraction, single-cell
+  helpers), t256 (8-bit accessors over a lookup array).
