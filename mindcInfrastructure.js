@@ -280,6 +280,40 @@ export function structStorageLeafPathsOf(type, prefix = []) {
 	return result;
 }
 
+/**
+ * The member type at a path produced by `structStorageLeafPathsOf`.
+ * @param {any} type
+ * @param {string[]} path
+ * @returns {any}
+ */
+export function typeAtStoragePath(type, path) {
+	let current = type;
+	for (const part of path) {
+		const member = (current?.members ?? []).find(m => m.name === part);
+		if (!member) return null;
+		current = member.type ?? member.memberType;
+	}
+	return current;
+}
+
+/**
+ * Whether a struct is one packed register that lookup can address.
+ *
+ * This is deliberately stricter than `components === 1`: a single `byname`
+ * leaf would make the packed value a name, and lookup would have to dereference
+ * it with owner/device semantics. Packed lookup covers scalar leaves, bitfield
+ * storage cells and nested versions of those.
+ *
+ * @param {any} type
+ * @returns {boolean}
+ */
+export function packedStructLookupCompatible(type) {
+	const layout = registerElementLayoutOf(type);
+	if (layout?.kind !== 'struct' || layout.components !== 1) return false;
+	return structStorageLeafPathsOf(type).every(path =>
+		!isNamePointerType(typeAtStoragePath(type, path)));
+}
+
 /* ------------------------------------------------------------------ *
  * Exceptions
  * ------------------------------------------------------------------ */
@@ -2479,6 +2513,18 @@ export class LookupArrayRet extends ArrayRet {
 			const at = this.names[operand.value];
 			if (at === undefined) throw new InfrastructureNotImplementedExpection('subscript out of range');
 			/*
+			A struct with exactly one storage leaf is packed into this register.
+			The content name addresses the whole packed value; member access
+			then applies bitfields to that register.
+			*/
+			if (packedStructLookupCompatible(this.elementTypeInfo)) {
+				const intType = glob.semantic.getTypeInfo('int');
+				const cell = this.deviceReg
+					? new RemoteSlotRet(glob, this.deviceReg, `"${at}"`, intType)
+					: new BasicRet(glob, [], at, intType, false);
+				return new PackedStructRet(glob, [], cell, this.elementTypeInfo);
+			}
+			/*
 			The name is known, so nothing has to be computed -- but if the
 			element belongs to ANOTHER processor the name alone is not enough:
 			it has to be read from there. Returning the bare name would read
@@ -2508,6 +2554,39 @@ class LookupSlotRet extends VariableRet {
 		this.array = array;
 		this.operand = operand;
 		this.deviceReg = deviceReg ?? null;
+		this.packed = packedStructLookupCompatible(type);
+		if (this.packed) this.setAttribute('isPackedStructSlot', true);
+	}
+
+	/** The packing cell used by member/whole-struct operations. */
+	packedRef() {
+		const intType = this.glob.semantic.getTypeInfo('int');
+		return new PackedStructRet(this.glob, [],
+			new PackedCellRet(this.glob, [], this, intType), this.type);
+	}
+
+	/** Read the raw packed cell, without converting it to the struct type. */
+	rawGet(type = null) {
+		const glob = this.glob;
+		const content = glob.tmp(glob.semantic.getTypeInfo('content_t'));
+		const nameHolder = glob.tmp(null);
+		const target = glob.tmp(type ?? glob.semantic.getTypeInfo('int'));
+		return new BasicRet(glob, [
+			this.instructions, this.resolve(glob, content, nameHolder),
+			InstructionBuilder.read(nameOf(target), this.device, nameHolder)
+		], nameOf(target), type ?? glob.semantic.getTypeInfo('int'), true);
+	}
+
+	/** Write the raw packed cell. */
+	rawSet(value, type = null) {
+		const glob = this.glob;
+		const content = glob.tmp(glob.semantic.getTypeInfo('content_t'));
+		const nameHolder = glob.tmp(null);
+		return new BasicRet(glob, [
+			this.instructions, value.instructions,
+			this.resolve(glob, content, nameHolder),
+			InstructionBuilder.write(value.name, this.device, nameHolder)
+		], value.name, type ?? glob.semantic.getTypeInfo('int'), false);
 	}
 
 	/** Which processor holds the element: `@this`, or another one. */
@@ -2531,6 +2610,7 @@ class LookupSlotRet extends VariableRet {
 
 	get() {
 		const glob = this.glob;
+		if (this.packed) return this.packedRef();
 		const content = glob.tmp(glob.semantic.getTypeInfo('content_t'));
 		const nameHolder = glob.tmp(null);
 		const target = glob.tmp(this.type);
@@ -2542,6 +2622,7 @@ class LookupSlotRet extends VariableRet {
 
 	set(other) {
 		const glob = this.glob;
+		if (this.packed) return this.packedRef().set(other);
 		const content = glob.tmp(glob.semantic.getTypeInfo('content_t'));
 		const nameHolder = glob.tmp(null);
 		const value = other.get().convertTo(this.type ?? other.type);
@@ -3612,6 +3693,163 @@ export class RemoteNamePointerRet extends VariableRet {
 	}
 }
 
+/**
+ * A single packed register viewed as a scalar storage cell.
+ *
+ * Lookup can only name one register per element, so a struct with exactly one
+ * storage leaf is packed into that register. This wrapper gives bitfield and
+ * whole-struct operations a raw `get`/`set` over the underlying slot.
+ */
+class PackedCellRet extends VariableRet {
+
+	constructor(glob, instructions, slot, type) {
+		super(glob, instructions, slot.name, type, false);
+		this.slot = slot;
+		this.setAttribute('isPackedCell', true);
+	}
+
+	get width() {
+		return 1;
+	}
+
+	get() {
+		const glob = this.glob;
+		if (this.slot instanceof BasicRet) {
+			return new BasicRet(glob, [...(this.slot.instructions ?? [])],
+				this.slot.name, this.type, true);
+		}
+		if (typeof this.slot.rawGet === 'function') {
+			return this.slot.rawGet(this.type);
+		}
+		const read = this.slot.get();
+		return new BasicRet(glob, read.instructions,
+			read.instructionReturn ?? read.name, this.type, true);
+	}
+
+	set(other) {
+		const glob = this.glob;
+		const raw = other.get();
+		if (this.slot instanceof BasicRet) {
+			return new BasicRet(glob,
+				[this.slot.instructions ?? [], raw.instructions,
+					InstructionBuilder.set(this.slot.name, raw.name)],
+				raw.name, this.type, false);
+		}
+		if (typeof this.slot.rawSet === 'function') {
+			return this.slot.rawSet(raw, this.type);
+		}
+		return this.slot.set(raw);
+	}
+}
+
+/** One scalar leaf of a packed struct. */
+class PackedMemberRet extends VariableRet {
+
+	constructor(glob, instructions, cell, type) {
+		super(glob, instructions, cell.name, type, false);
+		this.cell = cell;
+	}
+
+	get() {
+		const glob = this.glob;
+		const raw = this.cell.get();
+		return valueClassOf(glob, this.type).create(glob,
+			raw.instructions, raw.instructionReturn ?? raw.name, this.type, true);
+	}
+
+	set(other) {
+		const raw = other.get();
+		const value = this.type ? raw.convertTo(this.type) : raw;
+		return this.cell.set(value);
+	}
+}
+
+/**
+ * A struct whose whole value is one packed register: a lookup or handle
+ * element with `registerElementLayoutOf(type).components === 1`.
+ *
+ * Visible bitfields read/write the shared cell, nested structs recurse over the
+ * same cell, and scalar leaves read/write it directly. `byname` leaves are
+ * excluded because they need owner/device semantics.
+ */
+export class PackedStructRet extends VariableRet {
+
+	constructor(glob, instructions, cell, type, path = []) {
+		super(glob, instructions, cell.name, type, false);
+		this.cell = cell;
+		this.structType = type;
+		this.path = path;
+		this.setAttribute('isPackedStruct', true);
+		this.setAttribute('disallowReplacement', true);
+	}
+
+	get width() {
+		return 1;
+	}
+
+	member(memberName, memberType = null) {
+		const glob = this.glob;
+		const info = (this.structType?.members ?? []).find(m => m.name === memberName) ?? null;
+		const type = memberType ?? memberTypeOf(glob, this.structType, memberName);
+		if (info?.isBitfield === true) {
+			return new BitfieldRet(glob, this.cell, type,
+				info.bitOffset, info.bitWidth, info.isSigned);
+		}
+		if (type?.kind === 'struct' || type?.kind === 'union') {
+			return new PackedStructRet(glob, [], this.cell,
+				type, [...this.path, memberName]);
+		}
+		if (isNamePointerType(type)) {
+			throw new InfrastructureNotImplementedExpection(
+				'a packed lookup struct cannot contain a byname pointer');
+		}
+		return new PackedMemberRet(glob, this.instructions, this.cell, type);
+	}
+
+	memberAtPath(path) {
+		let current = this;
+		for (const part of path) current = current.member(part);
+		return current;
+	}
+
+	get() {
+		const glob = this.glob;
+		const temp = glob.generator?.getTempSymbol?.(this.structType) ?? glob.tmp(this.structType);
+		const base = temp.getAssemblySymbol();
+		const result = new Instruction(this.instructions);
+		for (const path of structStorageLeafPathsOf(this.structType)) {
+			const value = this.memberAtPath(path).get();
+			result.concat(value);
+			result.concat(InstructionBuilder.set(
+				`${base}${path.map(part => `.${part}`).join('')}`,
+				value.instructionReturn ?? '0'));
+		}
+		return new RegistryStructRet(glob, result.instructions, base,
+			this.structType, true, temp);
+	}
+
+	set(other) {
+		const glob = this.glob;
+		const value = other.get();
+		const result = new Instruction(this.instructions);
+		for (const path of structStorageLeafPathsOf(this.structType)) {
+			const target = this.memberAtPath(path);
+			let source = value;
+			for (const part of path) {
+				if (typeof source?.member !== 'function') {
+					source = null;
+					break;
+				}
+				source = source.member(part);
+			}
+			if (!source) continue;
+			result.concat(target.set(source));
+		}
+		return new PackedStructRet(glob, result.instructions, this.cell,
+			this.structType, this.path);
+	}
+}
+
 export class RemoteStoredPointerRet extends PointerRet {
 
 	/**
@@ -4060,7 +4298,14 @@ function handleShapeOf(array) {
 		return { length: array.length, device, names, dynamic: false };
 	}
 	if (array instanceof LookupArrayRet) {
-		return { length: array.length, device, names: array.names ?? [], dynamic: false };
+		/*
+		lookup elements are named by a CONTENT table, not by a fixed register
+		list. The handle helper must use `lookup` + `sensor`; selecting a
+		precomputed name list would execute one select per element on every
+		access (and would need one helper per length/device combination).
+		*/
+		return { kind: 'lookup', category: array.category ?? 'item',
+			length: array.length, device, dynamic: false };
 	}
 	if (array instanceof NameArrayRet) {
 		/*
@@ -4133,7 +4378,12 @@ export function ensureArrayHandle(glob, array) {
 	if (!shape || shape.length <= 0) return null;
 	const reg = glob?.funcReg;
 	if (!reg) return null;
-	const keyOf = kind => `__arr${kind}_${String(array.name).replace(/[^A-Za-z0-9_]/g, '_')}`;
+	const keyOf = kind => {
+		const suffix = shape.kind === 'lookup'
+			? `${shape.category}_${String(shape.device).replace(/[^A-Za-z0-9_]/g, '_')}`
+			: String(array.name).replace(/[^A-Za-z0-9_]/g, '_');
+		return `__arr${kind}_${suffix}`;
+	};
 	const build = kind => {
 		const key = keyOf(kind);
 		if (reg.functionCollection.has(key)) {
@@ -4162,6 +4412,26 @@ export function ensureArrayHandle(glob, array) {
 				body.concat(InstructionBuilder.read('__arrret', '__arrblk', '__arrsel'));
 			} else {
 				body.concat(InstructionBuilder.write('__arrval', '__arrblk', '__arrsel'));
+			}
+			reg.addFunction(key, body, null, [], true, false, true);
+			reg.functionCollection.get(key).calls++;
+			return key;
+		}
+		if (shape.kind === 'lookup') {
+			/*
+			Index -> content constant -> its @name -> read/write that register.
+			This is the same path a normal lookup element takes, and it is
+			independent of the array length and of which content names are in
+			the table.
+			*/
+			const content = nameOf(glob.tmp(glob.semantic.getTypeInfo('content_t')));
+			const nameReg = nameOf(glob.tmp(null, 'arrname'));
+			body.concat(InstructionBuilder.lookup(shape.category, content, '__arridx'));
+			body.concat(InstructionBuilder.sensor(nameReg, content, '@name'));
+			if (kind === 'get') {
+				body.concat(InstructionBuilder.read('__arrret', shape.device, nameReg));
+			} else {
+				body.concat(InstructionBuilder.write('__arrval', shape.device, nameReg));
 			}
 			reg.addFunction(key, body, null, [], true, false, true);
 			reg.functionCollection.get(key).calls++;
@@ -4364,6 +4634,35 @@ class ArrayHandleSlotRet extends VariableRet {
 		super(glob, operand.instructions, array.name, array.elementTypeInfo, false);
 		this.array = array;
 		this.operand = operand;
+		this.packed = packedStructLookupCompatible(array.elementTypeInfo);
+		if (this.packed) this.setAttribute('isPackedStructSlot', true);
+	}
+
+	packedRef() {
+		const intType = this.glob.semantic.getTypeInfo('int');
+		return new PackedStructRet(this.glob, [],
+			new PackedCellRet(this.glob, [], this, intType), this.type);
+	}
+
+	rawGet(type = null) {
+		const glob = this.glob;
+		const target = glob.tmp(type ?? glob.semantic.getTypeInfo('int'));
+		const tn = nameOf(target);
+		const got = this.extractGet();
+		const call = glob.funcReg.getRawFunctionCall(got.name,
+			new Map([['__arridx', this.operand.name]]), false, null);
+		return new BasicRet(glob, [
+			this.instructions, got.instruction, call, InstructionBuilder.set(tn, '__arrret')
+		], tn, type ?? glob.semantic.getTypeInfo('int'), true);
+	}
+
+	rawSet(value, type = null) {
+		const glob = this.glob;
+		const got = this.extractSet();
+		const call = glob.funcReg.getRawFunctionCall(got.name,
+			new Map([['__arridx', this.operand.name], ['__arrval', value.name]]), false, null);
+		return new BasicRet(glob, [this.instructions, got.instructions, value.instructions, call],
+			value.name, type ?? glob.semantic.getTypeInfo('int'), false);
 	}
 
 	/** `op and <tmp> <handle> 4095` -- the get helper sits in the low bits. */
@@ -4388,6 +4687,7 @@ class ArrayHandleSlotRet extends VariableRet {
 
 	get() {
 		const glob = this.glob;
+		if (this.packed) return this.packedRef();
 		const target = glob.tmp(this.type);
 		const tn = nameOf(target);
 		/*
@@ -4410,6 +4710,7 @@ class ArrayHandleSlotRet extends VariableRet {
 
 	set(other) {
 		const glob = this.glob;
+		if (this.packed) return this.packedRef().set(other);
 		const rawValue = other.get();
 		const value = isNamePointerType(this.type)
 			? rawValue : rawValue.convertTo(this.type ?? other.type);
@@ -4434,6 +4735,8 @@ export function selectArrayImplementation(info) {
 	const budget = info.instructionBudget ?? 1000;
 	const requested = normalizeImplementation(info.requested);
 	const lookupNames = info.lookupNames ?? null;
+	const lookupCapable = info.lookupCapable !== false;
+	const singleCell = info.singleCell !== false;
 
 	if (requested) return requested;
 
@@ -4443,11 +4746,11 @@ export function selectArrayImplementation(info) {
 	}
 	// No (or not enough) memory: consider the layouts that need none
 	const candidates = [];
-	if (version >= 150 && lookupNames && lookupNames.length >= length) {
+	if (version >= 150 && lookupCapable && lookupNames && lookupNames.length >= length) {
 		candidates.push({ type: 'embedded', implement: 'lookup',
 			cost: accessCostOf('embedded.lookup', length) });
 	}
-	if (isConst) {
+	if (isConst && singleCell) {
 		const mapping = buildEncodedMapping(info.values ?? new Array(length).fill(0));
 		candidates.push({ type: 'encoded', implement: null,
 			cost: accessCostOf('encoded', length, mapping.digits) });
@@ -4820,8 +5123,14 @@ function buildRet(glob, inst, type, width, throughPointer, temporary, relevant) 
 
 export function ExportRet(glob, inst, type = null) {
 	if (!inst) return new ImmediateRet(glob, 'null', type);
-	if (inst instanceof RemoteStructRet) return inst.get();
-	if (inst instanceof VariableRet) return inst;
+	if (inst instanceof RemoteStructRet || inst instanceof PackedStructRet) return inst.get();
+	if (inst instanceof VariableRet) {
+		if (inst.getAttribute?.('isPackedStructSlot') === true) {
+			const packed = inst.get();
+			return packed instanceof PackedStructRet ? packed.get() : packed;
+		}
+		return inst;
+	}
 
 	const attrs = name => inst.getAttribute(name);
 	const relevant = attrs('relevantSymbol') ?? attrs('relevantSymbolRead');

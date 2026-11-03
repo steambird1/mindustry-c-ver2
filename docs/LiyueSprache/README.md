@@ -27,7 +27,7 @@ Mindustry-C 不需要安装。你只需要下载 `main.html` 和所有 JavaScrip
 - 声明：函数原型（含 `auto` 模式）、结构体/联合体前向声明（`struct P;`、`typedef struct P P;`），以及块作用域内的 typedef、结构体定义、enum 和函数原型（支持遮蔽）。不支持嵌套函数定义和 C11 匿名成员。
 - C99 兼容头：`stddef.h`、`stdint.h`、`limits.h`、`float.h`、`ctype.h`、`stdlib.h`（atoi/strtol/div/exit 子集）、`string.h` 扩展、`inttypes.h`、`iso646.h`、`stdalign.h`、`stdnoreturn.h` 和 `errno.h`。`assert` 支持 `NDEBUG`；`_Static_assert`/`static_assert`、`__func__` 和 `restrict` 可用。
 - 数据布局：多成员 `union` 在内存中重叠；unsigned/signed 位域按 LSB-first 打包进 52-bit cell，寄存器和内存结构体都支持。跨类型 union 读取是数值别名，不是字节级 bitcast。
-- 多维数组按行优先展平；memory、寄存器、encoded 都可用，`a[i][j]` 编译为 `a[i * dim1 + j]`。handle 是一维 span，`int s[]` 可接收多维数组，`lenof(s)` 为总元素数。寄存器数组也支持 `byname` 指针元素和 flat registry struct 元素（坐标结构体、位域 storage cell、`byname` 成员等）；普通指针/聚合元素使用 memory。`remote` 数组也可以保留维度或使用扁平视图；register struct 元素按叶子名访问，`byname` 成员按 owner-relative 解释，运行时 device 检查由 `#pragma checkRemote` 控制。
+- 多维数组按行优先展平；memory、寄存器、encoded 都可用，`a[i][j]` 编译为 `a[i * dim1 + j]`。handle 是一维 span，`int s[]` 可接收多维数组，`lenof(s)` 为总元素数。寄存器数组也支持 `byname` 指针元素和 flat registry struct 元素（坐标结构体、位域 storage cell、`byname` 成员等）；普通指针/聚合元素使用 memory。lookup 数组支持单 cell 元素和单寄存器 packed struct；多寄存器 struct 回退到寄存器布局。`remote` 数组也可以保留维度或使用扁平视图；register struct 元素按叶子名访问，`byname` 成员按 owner-relative 解释，运行时 device 检查由 `#pragma checkRemote` 控制。
 - `char` 与原生字符串分离：`char` 是 1-cell 字符/数值，`char*` 是普通指针、`char[]` 是 NUL 结尾的 C 数组；`string_t` 是 1-cell 的 Mindustry 字符串。`#include <string.h>` 提供只读 `string_view` 和 message 拼接（字符级操作要求 v150+）。
 - 存储期：自动局部变量按调用；`static` 在本次运行内；`persistent` 跨处理器重启；普通文件作用域变量每次运行重置。
 - 预处理器：对象宏和函数宏、`#undef`、`#if`/`#elif`/`#else`/`#endif`、

@@ -20,9 +20,9 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 264 passed, 0 failed (153 shape assertions, 1177 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 101 passed, 0 failed |
-| `node ../tools/nomem.mjs` | 14 passed, 0 failed |
+| `node ../tools/check.mjs` | 267 passed, 0 failed (163 shape assertions, 1189 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 102 passed, 0 failed |
+| `node ../tools/nomem.mjs` | 16 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
 
@@ -99,6 +99,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | remote register struct arrays (§7.43) | **done**; per-leaf remote names, dynamic selection, nested/bitfield/byname members, whole-element copy, export recursion, tests t246/t247 + negative | §7.43 |
 | `#pragma checkRemote` / byname device checks (§7.44) | **done**; default `strictEqual` device check, handler/disable pragma, tests t248–t250 | §7.44 |
 | persistent register-struct array zeroing (§7.45) | **done**; zero storage leaves directly instead of `copyStruct` from literal `0`, test t251 | §7.45 |
+| packed lookup structs + lookup handles (§7.46) | **done**; one-register packed structs use lookup, multi-register falls back to divided, lookup handles use lookup+sensor+read/write, tests t252–t254/n15/n16 + negative | §7.46 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -833,21 +834,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 665 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 671 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 665 under `testers/unit_tests`, every one of
+bring the count to 671 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 264 + 11 peers | `check/`, plus the 11 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 101 | `negative/` |
-| `nomem.mjs` | 14 | `nomem/` |
+| `check.mjs` | 267 + 11 peers | `check/`, plus the 11 `check/peers/*.c` it drives on their owners' behalf |
+| `negative.mjs` | 102 | `negative/` |
+| `nomem.mjs` | 16 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-264 + 11 + 101 + 14 + 275 = 665. The caveat that replaces "no runner" is weaker but real:
+267 + 11 + 102 + 16 + 275 = 671. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -2030,3 +2031,30 @@ called `f` even when `a` was false.
   `array("embedded_divided")`.
 - Case: t251 (extern persistent 2-D struct array with bitfields, scalar and
   nested members; asserts no `0.<leaf>` and checks the direct zero stores).
+
+### 7.46 Packed lookup structs and lookup handles
+
+- A struct with exactly one storage leaf is a packed one-register value.
+  `packedStructLookupCompatible()` accepts scalar leaves, `__bitsN` storage
+  cells and nested versions of those; `byname` leaves are excluded because they
+  need owner/device semantics.
+- Lookup can now address such a struct directly: constant and dynamic elements
+  use the content-name register as the packed cell. `PackedStructRet` resolves
+  bitfields, nested structs and scalar leaves over that cell; whole-element
+  reads/writes materialize or copy the packed value.
+- `selectArrayImplementation` gets `lookupCapable`/`singleCell`: lookup is
+  allowed for single-cell elements and one-register packed structs; encoded
+  remains single-cell-only. Multi-register structs automatically fall back to
+  `embedded_divided` when memory is unavailable.
+- Explicit `array("embedded_lookup")` follows the same rule: one-register packed
+  structs are accepted; multi-register structs are rejected.
+- Lookup handle helpers no longer select the content-name list. They emit
+  `lookup <category> __arrcontent __arridx`, `sensor __arrname __arrcontent
+  @name`, then `read`/`write <device> __arrname`. This is O(1) per access and
+  works for local and remote lookup arrays. Helper keys include category and
+  device so different devices do not share the wrong helper.
+- Cases: t252 (lookup handle uses lookup/sensor; no select chain), t253
+  (packed lookup struct, dynamic bitfield access), t254 (remote lookup packed
+  struct), nomem n15 (automatic packed lookup without memory), nomem n16
+  (multi-register struct falls back to divided); negative for explicit lookup
+  of a multi-register struct.

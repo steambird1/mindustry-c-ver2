@@ -257,13 +257,14 @@ int enc[4] = array("encoded", {1, 2, 3, 4});
 | `traditional` | 元素放在内存单元里（需要链接内存）。 |
 | `embedded` | 寄存器布局；具体用 divided 还是 lookup 由编译器选。 |
 | `embedded_divided` | 每个元素一个寄存器，读取用选择链；适合小数组。 |
-| `embedded_lookup` | 用 `lookup` + `sensor` 的表；需要 v150 和内容表。 |
+| `embedded_lookup` | 用 `lookup` + `sensor` 的表；需要 v150 和内容表。单 cell 元素或单寄存器 packed struct 可用。 |
 | `embedded_lookup_item` / `_liquid` / `_unit` / `_block` | 显式指定 lookup 表类别，跨处理器时尤其有用。 |
 | `encoded` | 整个常量数组编码成 base-57 字符串表；只适合常量、不可写。 |
 
 `array("...")` 必须给字符串字面量；`encoded` 必须同时给内容列表。具体布局也可能因为“内存不够/指令预算”回退或换用别的实现；`#pragma optimize(array)` 打开自动布局选择，显式 `array()` 请求优先。
 - `embedded_divided` 支持单 cell 元素、`byname` 指针元素和由单寄存器叶子（单 cell、`byname` 指针、位域 storage cell、嵌套 registry struct）组成的 flat struct 元素。struct 元素按 `<array>_<i>.<leaf>` 命名；位域字段共享 `<array>_<i>.__bitsN`，`byname` 成员是 `<array>_<i>.p`。
-- `embedded_lookup` / `encoded` 仍要求单 cell 数字/content 元素。普通指针（block/pos）、union、含数组或需要 memory 的 struct 元素使用 memory 布局；位域和 `byname` 成员可以留在寄存器布局。多寄存器 struct 元素支持常量下标，也支持动态下标（逐叶 select 读取、选中成员名字写入）；但作为非内联 open handle 传递暂不支持，需 memory 或内联调用。
+- `embedded_lookup` 支持单 cell 元素和**单寄存器 packed struct**（`registerElementLayoutOf(...).components === 1`，例如 9 个 5-bit 位域共 45 bit）。元素本身就是 content 名字寄存器，成员位域直接在它上面 extract。`encoded` 仍只支持单 cell。普通指针（block/pos）、union、含数组或需要 memory 的 struct 元素使用 memory 布局；多寄存器 struct 使用 `embedded_divided`，显式 lookup 会拒绝。多寄存器 struct 元素支持常量/动态下标；但作为非内联 open handle 传递暂不支持。
+- lookup 数组的 handle helper 使用 `lookup` + `sensor` + `read/write`，不会展开 select 名字链；本地和 remote lookup 都适用。
 - memory 布局的 struct 数组初始化按成员布局写入：位域成员打包进共享存储 cell，`byname` 指针成员只写目标名字，省略成员补零；标量成员外多余的 `{}` 会被展开。
 
 ### 7.3 开放数组与句柄

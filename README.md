@@ -79,7 +79,9 @@ For grammar introduction (about the features unique to Mindustry-C) and examples
   `lenof(s)` is its total element count. Register arrays also accept `byname`
   pointer elements and flat registry-struct elements (coordinates, bitfield
   storage cells and `byname` members included); ordinary pointers/aggregates
-  use memory. `remote` arrays may keep their shape or use a flat view; register
+  use memory. Lookup arrays accept single-cell elements and one-register packed
+  structs; multi-register structs fall back to the register layout. `remote`
+  arrays may keep their shape or use a flat view; register
   struct elements are addressed leaf by leaf, and `byname` members are
   owner-relative (`#pragma checkRemote` controls the runtime device check).
 - C99 compatibility headers: `stddef.h`, `stdint.h`, `limits.h`, `float.h`,

@@ -20,10 +20,10 @@ import { Instruction, InstructionBuilder, InstructionReferrer, MemoryBlock, Memo
  } from "./mindcGeneratorBase.js";
 import { findRecursiveFunctions } from "./mindcBase.js";
 
-import { ensureMemspHelper, remoteDeviceRegOf, remoteNameRegOf, RemotePointerRet, RemoteArrayRet, RemoteStoredPointerRet, RemoteStructRet, RemoteNamePointerRet, LookupArrayRet, NameStructPointerRet, NameStructDerefRet,
+import { ensureMemspHelper, remoteDeviceRegOf, remoteNameRegOf, RemotePointerRet, RemoteArrayRet, RemoteStoredPointerRet, RemoteStructRet, RemoteNamePointerRet, PackedStructRet, LookupArrayRet, NameStructPointerRet, NameStructDerefRet,
 	RemoteStructPointerRet,
 	NameArrayRet, ArrayHandleRet, ensureArrayHandle, arrayLengthOfType, componentCountOf, isFlatComponentType, CATEGORY_ALIASES, Globals, VariableRet, ImmediateRet, BasicRet, IntRet, BitfieldRet, BoolRet, FloatRet, ContentRet, packHandle, HANDLE_MASK, HANDLE_FIELD_BITS, HANDLE_LENGTH_MASK, HANDLE_LENGTH_SHIFT,
-	isNamePointerType, registerElementLayoutOf, structStorageLeafPathsOf,
+	isNamePointerType, registerElementLayoutOf, structStorageLeafPathsOf, packedStructLookupCompatible,
 	TraditionalArrayRet,
 	PointerRet, RefPointerRet, MemPointerRet, VolatilePointerRet, MemoryRefRet, StructRefRet,
 	symbolRef, ExportRet, valueClassOf, readThrough, writeThrough, pointerStep,
@@ -1581,14 +1581,20 @@ export class CodeGenerator extends ASTVisitor {
 	 * @remarks This should be used for most of the scenes (hardly is it necessary to write as well)
 	 */
 	visitAndRead(node, param = null) {
-		const value = this.visit(node, param);
+		let value = this.visit(node, param);
 		/*
-		A remote struct is a group of remote registers, not a local value.
-		Reading it means materializing every storage leaf into a temporary
-		struct (never using the device register as the struct base).
+		A remote or packed struct is a group of registers / one packed cell,
+		not a local struct value. Reading it materializes the storage leaves
+		into a temporary struct (never using the device or lookup name as the
+		struct base).
 		*/
-		return this.convertInstructionForReading(
-			value?.getAttribute?.('isRemoteStruct') ? value.get() : value,
+		for (let i = 0; i < 3 && value?.getAttribute?.('isPackedStructSlot'); i++) {
+			value = value.get();
+		}
+		if (value?.getAttribute?.('isRemoteStruct') || value?.getAttribute?.('isPackedStruct')) {
+			value = value.get();
+		}
+		return this.convertInstructionForReading(value,
 			node.dataType && node.dataType.isPointerImpl());
 		// Note: then it reads a ORIGINAL VALUE
 		// And besides: This won't dereference a pointer if it should appear to be one to the user (i.e. implementAsPointer)
@@ -3434,6 +3440,47 @@ export class CodeGenerator extends ASTVisitor {
 		return result;
 	}
 
+	/**
+	 * Initialize a lookup element whose struct is packed into one register.
+	 * The content-name register itself is the storage cell; there is no
+	 * `.__bits0` suffix.
+	 */
+	initializePackedStructTarget(register, type, initializer, clear = true) {
+		const result = new Instruction();
+		const intType = this.semantic.getTypeInfo('int');
+		if (clear) result.concat(InstructionBuilder.set(register, '0'));
+		if (!initializer || initializer.type !== 'InitializerList') return result;
+		const visible = (type.members ?? []).filter(m => m.isBitfieldStorage !== true);
+		const children = initializer.children ?? [];
+		for (let i = 0; i < visible.length; i++) {
+			const member = visible[i];
+			const child = children[i];
+			if (!child) continue;
+			if (member.isBitfield === true) {
+				const storage = new BasicRet(this.glob, [], register, intType, true);
+				const bitfield = new BitfieldRet(this.glob, storage, member.type,
+					member.bitOffset, member.bitWidth, member.isSigned);
+				const value = this.visitAndRead(
+					this.unwrapScalarInitializer(child, member.type));
+				result.concat(value);
+				result.concat(bitfield.set(ExportRet(this.glob, value,
+					child.dataType ?? member.type)));
+				continue;
+			}
+			if (member.type?.kind === 'struct' && child.type === 'InitializerList') {
+				result.concat(this.initializePackedStructTarget(register, member.type,
+					child, false));
+				continue;
+			}
+			const value = this.visitAndRead(
+				this.unwrapScalarInitializer(child, member.type));
+			result.concat(value);
+			result.concat(InstructionBuilder.set(register,
+				value.instructionReturn ?? '0'));
+		}
+		return result;
+	}
+
 	initializeEmbeddedArray(symbol, style, initializer) {
 		const dimensions = this.semantic?.arrayDimensionsOf
 			? this.semantic.arrayDimensionsOf(symbol.myType?.() ?? null)
@@ -3459,6 +3506,12 @@ export class CodeGenerator extends ASTVisitor {
 			const register = names ? names[i] : `${symbol.getAssemblySymbol()}_${i}`;
 			if (!register) break;
 			const item = items[i];
+			const packedLookup = names !== null && packedStructLookupCompatible(elementType);
+			if (packedLookup) {
+				result.concat(this.initializePackedStructTarget(register, elementType, item));
+				this.releaseTempVariable?.();
+				continue;
+			}
 			if (elementLayout?.kind === 'struct') {
 				result.concat(this.initializeRegisterStructTarget(register, elementType, item));
 				this.releaseTempVariable?.();
@@ -5699,7 +5752,10 @@ export class CodeGenerator extends ASTVisitor {
 			instructionBudget: this.instructionBudget(),
 			targetVersion: this.semantic.targetVersion ?? this.compiler?.config?.getAttribute('targetVersion') ?? 0,
 			requested,
-			lookupNames: lookup.names
+			lookupNames: lookup.names,
+			singleCell: elementLayout?.kind === 'cell',
+			lookupCapable: elementLayout?.kind === 'cell'
+				|| packedStructLookupCompatible(elementType)
 		});
 		symbol.chosenArrayStyle = style;
 		symbol.lookupCategory = lookup.category;
@@ -5880,6 +5936,17 @@ export class CodeGenerator extends ASTVisitor {
 		if (object instanceof RemoteStructRet) {
 			return object.member(node.children[1].name, node.dataType);
 		}
+		if (object instanceof PackedStructRet) {
+			return object.member(node.children[1].name, node.dataType);
+		}
+		/*
+		A dynamic lookup element or a handle slot that stores a packed struct:
+		wrap the raw cell in the packed struct view before resolving a member.
+		*/
+		if (object.getAttribute?.('isPackedStructSlot') === true
+			&& typeof object.packedRef === 'function') {
+			return object.packedRef().member(node.children[1].name, node.dataType);
+		}
 
 		// Registry struct: every member is a variable of its own, named `X.member`
 		if (object instanceof RegistryStructRet) {
@@ -6012,8 +6079,11 @@ export class CodeGenerator extends ASTVisitor {
 				A struct element is an LValue made of several member registers.
 				Return its structured reference, not the one-register slot, so a
 				following `.member` access takes the registry-struct path.
+				A packed lookup element is already the structured reference.
 				*/
-				if (registerElementLayoutOf(node.dataType)?.kind === 'struct') {
+				if (registerElementLayoutOf(node.dataType)?.kind === 'struct'
+					&& element.getAttribute?.('isPackedStruct') !== true
+					&& element.getAttribute?.('isPackedStructSlot') !== true) {
 					return element.get();
 				}
 				return element;

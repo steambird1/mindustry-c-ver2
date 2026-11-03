@@ -11,7 +11,7 @@ import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 // at run time is `MemoryBlockInfo`, and it is a type name, so nothing here
 // reads a binding from `mindcGeneratorBase.js` while this module's body runs.
 import { MemoryBlockInfo } from "./mindcGeneratorBase.js";
-import { widthOfType, normalizeImplementation, registerElementLayoutOf } from "./mindcInfrastructure.js";
+import { widthOfType, normalizeImplementation, registerElementLayoutOf, packedStructLookupCompatible } from "./mindcInfrastructure.js";
 
 export class VariableLinker {
 	/**
@@ -3324,12 +3324,22 @@ export class SemanticAnalyzer extends ASTVisitor {
 				declarator.initializer = null;
 				return;
 			}
-			const needsPlainCell = requested === 'encoded'
-				|| requested.startsWith('embedded_lookup');
-			if (needsPlainCell && layout.kind !== 'cell') {
+			const lookupRequested = requested.startsWith('embedded_lookup');
+			const lookupCapable = layout.kind === 'cell'
+				|| packedStructLookupCompatible(elementType);
+			if (requested === 'encoded' && layout.kind !== 'cell') {
 				this.addError(
 					`array("${requested}") can only hold single-cell number/content `
 					+ `elements: '${symbol.name}' has element type `
+					+ `'${this.typeToString(elementType)}'`,
+					initializer.location);
+				declarator.initializer = null;
+				return;
+			}
+			if (lookupRequested && !lookupCapable) {
+				this.addError(
+					`array("${requested}") needs single-cell or one-register packed `
+					+ `struct elements: '${symbol.name}' has element type `
 					+ `'${this.typeToString(elementType)}'`,
 					initializer.location);
 				declarator.initializer = null;
