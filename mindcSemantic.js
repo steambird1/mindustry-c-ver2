@@ -3692,6 +3692,22 @@ export class SemanticAnalyzer extends ASTVisitor {
 		}
 		let targetSymbol = this.lookupSymbol?.(inner.name) ?? this.currentScope?.lookup?.(inner.name) ?? null;
 		/*
+		`remote(@this, x)` needs a REAL local target. The declaration being
+		defined cannot be its own target: it only creates the binding, not the
+		storage. Without this guard the unresolved binding is queued for a
+		retry that can never succeed (and used to recurse until OOM).
+		*/
+		const targetsOwnDeclaration = selfDevice && inner.type === 'Identifier'
+			&& (targetSymbol === symbol || String(inner.name) === String(symbol?.name));
+		if (targetsOwnDeclaration) {
+			this.addError(
+				`remote(@this, '${inner.name}') cannot target the declaration being defined: `
+				+ `declare the owner variable separately, or use a string target`,
+				location);
+			declarator.initializer = null;
+			return;
+		}
+		/*
 		`remote int turn = remote(dev, turn)` names the variable `turn` OF THE
 		OTHER PROCESSOR -- the declaration being made here must not shadow it,
 		or it would look like "a remote variable reaching a remote variable".
@@ -6970,24 +6986,31 @@ export class SemanticAnalyzer extends ASTVisitor {
      * @returns {void}
      */
     finalizeRemoteLinks() {
-        const pending = this.pendingRemoteLinks ?? [];
+        let pending = this.pendingRemoteLinks ?? [];
         this.pendingRemoteLinks = [];
+        /*
+        Two snapshots preserve the old "retry once more" behaviour without
+        iterating an array that consumeRemoteDirective can append to again --
+        the old `for...of` retried self-targets forever and exhausted the heap.
+        */
+        for (let pass = 0; pass < 2 && pending.length > 0; pass++) {
+            for (const entry of pending) {
+                entry.declarator.initializer = entry.initializer;
+                this.consumeRemoteDirective(entry.declarator, entry.symbol, entry.finalType,
+                    entry.qualifiers, true);
+            }
+            pending = this.pendingRemoteLinks ?? [];
+            this.pendingRemoteLinks = [];
+        }
         for (const entry of pending) {
             entry.declarator.initializer = entry.initializer;
-            this.consumeRemoteDirective(entry.declarator, entry.symbol, entry.finalType,
-                entry.qualifiers, true);
+            const name = entry.symbol?.name ?? entry.declarator?.name ?? '<remote>';
+            this.addError(
+                `Remote binding '${name}' could not be resolved after the whole program `
+                + `was read; name an existing local variable or use a string target`,
+                entry.declarator?.location ?? null);
+            entry.declarator.initializer = null;
         }
-        for (const entry of (this.pendingRemoteLinks ?? [])) {
-            /*
-            Retrying with `deferred` set resolves it against a global symbol of
-            the required type -- which is enough unless the length of an array
-            is still unknown, the one thing a name alone cannot supply.
-            */
-            entry.declarator.initializer = entry.initializer;
-            this.consumeRemoteDirective(entry.declarator, entry.symbol, entry.finalType,
-                entry.qualifiers, true);
-        }
-        this.pendingRemoteLinks = [];
     }
 
     /**

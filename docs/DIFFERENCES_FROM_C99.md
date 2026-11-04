@@ -402,7 +402,7 @@ remote int *p = remote(processor1, qq);      // 指针本身在对端
 - `struct S local = remoteArr[i]` 会把 `byname` 成员按原始名字复制到本地；这种值只应在同一处理器上解释，跨处理器复制后解引用属于未定义语义。
 - `remote int *p` 声明“指针本身存储在别的处理器”；`remote int *p` 与 `int *remote p` 的含义不同：前者指针本地、指向远程 int；后者指针本身在远程。
 - `&remoteVar` 得到 1 字名字指针（处理器 + 名字），不是普通 block/offset。
-- 远程数组必须用 `remote(device, name[, layout])` 绑定；`array(...)` 只描述本地存储，不能提供远端 device/name。`remote int a[2] = array("embedded_lookup");` 现在会被拒绝。需要“只描述远端、不定义本地数组”时写：`remote int a[2] = remote(dev, "g:.a", "embedded_lookup_item");`。字符串目标必须显式给 layout，且两边要使用同一内容表。
+- 远程数组必须用 `remote(device, name[, layout])` 绑定；`array(...)` 只描述本地存储，不能提供远端 device/name。`remote int a[2] = array("embedded_lookup");` 现在会被拒绝。需要“只描述远端、不定义本地数组”时写：`remote int a[2] = remote(dev, "g:.a", "embedded_lookup_item");`。字符串目标必须显式给 layout，且两边要使用同一内容表。`remote(@this, name)` 必须指向一个另有的本地变量，不能把正在声明的绑定自身当作目标。
 - 远程数组的布局要与对端一致；跨处理器时用显式 layout 名最稳。
 - `remote()` 的元素访问需要元素名，也就是 embedded/lookup 表示；memory 数组可以导出 `_block` / `_pos` 供共享内存协议使用，但不能直接套用 `remote int r[]` 的元素名模型。远程 memory 数组未实现（栈地址随调用变化，全局内存编号也不是稳定的跨处理器 ABI）。
 - 多维 remote 数组的元素必须能落在 register 布局：单 cell 元素，或由单寄存器叶子组成的 struct（含位域 storage、`byname` 成员、嵌套 register struct）。普通指针、数组、union 和需要 memory 的 struct 不能作为 remote 元素，仍需要单独的远程 memory ABI。

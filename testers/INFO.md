@@ -13,8 +13,8 @@
 
 | 命令（从 `testers/unit_tests` 执行） | 读哪个目录 | 当前结果 | 判定标准 |
 |---|---|---|---|
-| `node ..\tools\check.mjs` | `check/` | **270 passed, 0 failed**（165 shape assertions, 1204 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
-| `node ..\tools\negative.mjs` | `negative/` | **103 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
+| `node ..\tools\check.mjs` | `check/` | **271 passed, 0 failed**（167 shape assertions, 1209 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
+| `node ..\tools\negative.mjs` | `negative/` | **104 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
 | `node ..\tools\nomem.mjs` | `nomem/` | **16 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
 | `node ..\tools\loadorder.mjs` | 仓库根的 `mindc*.js` | **12 passed, 0 failed, 2 exempt** | 每个入口单独起一个 `node` 进程导入，不得有循环依赖 |
 | `node ..\tools\runall.mjs` | 14 个目录：`suite/` `mem/` `arr/` `arr2/` `ptr2/` `stack/` `tests/` `uc/` `cases/` `exttests/` `hdr/` `t/` `big/` `u/` | **267/275**（8 个已知坏例以 KNOWN-GAP 如实上报，不算失败） | 能编译、能跑完不崩；带 `EXPECT:` 的还比对输出 |
@@ -60,7 +60,7 @@
 | `EXPECT: a b c` | `runall/` | 期望输出，与 `check.mjs` 同样的逐行比对；runall 目录里只有 6 个文件带它 |
 
 `check/` 的 pragma 不变性：每个用例都会被加上各种 `optimize(...)` 变体**重跑一遍**，
-输出必须完全一致。**任何 pragma 都不得改变程序输出。** 目前 270 个用例里只有
+输出必须完全一致。**任何 pragma 都不得改变程序输出。** 目前 271 个用例里只有
 t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `pointer` / `struct_pointer`
 这些变体本身要求 v150+。
 
@@ -70,13 +70,13 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 
 ## 目录地图
 
-`testers/unit_tests/` 下共 **675 个 `.c`，全部有 runner**（270 + 11 + 103 + 16 + 275 = 675）：
+`testers/unit_tests/` 下共 **677 个 `.c`，全部有 runner**（271 + 11 + 104 + 16 + 275 = 677）：
 
 | 目录 | 文件数 | 谁来跑 |
 |---|---|---|
-| `check/` | 270 | `check.mjs`（同时驱动 `check/peers/` 的 11 个对端，见下文） |
+| `check/` | 271 | `check.mjs`（同时驱动 `check/peers/` 的 11 个对端，见下文） |
 | `t/` | 98 | `runall.mjs`（早期按主题分的用例，`2dc683e` 起纳入） |
-| `negative/` | 103 | `negative.mjs` |
+| `negative/` | 104 | `negative.mjs` |
 | `suite/` | 50 | `runall.mjs` |
 | `mem/` | 25 | `runall.mjs` |
 | `tests/` | 25 | `runall.mjs`（另有手工的 `batch.mjs [baseline]`） |
@@ -98,7 +98,7 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 
 ## check/ 的编号约定
 
-`check/` 用 `tNN_主题.c` 命名，**编号 1–257 已用满，没有空号**，下一个用例是 `t258`。
+`check/` 用 `tNN_主题.c` 命名，**编号 1–258 已用满，没有空号**，下一个用例是 `t259`。
 另有 13 个不带编号的（`m1`–`m3`、`n1`–`n2`、`rw1`–`rw2`、`seq1`、`memsp2`–`memsp3`），
 它们早于编号制，保留原名。
 
@@ -259,6 +259,7 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 | `t255` | **§7.47**：`packed.h` 4/8/16-bit 数组——每 cell 13/6/3 个值、有符号读取、单 cell helper；输出 `0 9 1 19 2 109 4 -3 -5 -1000 200` |
 | `t256` | **§7.47**：`packed.h` 访问 lookup 数组——一个 content 名字对应 6 个 8-bit 值；输出 `200 -56` |
 | `t257` | **§7.48**：推荐的 remote 绑定——字符串目标 + layout，不生成 `r_0` 本地元素符号；输出 `7 7` |
+| `t258` | **§7.48**：同名 remote 绑定用真实其他设备——自动 `g:.safety_data`，不生成 `safety_data_0`；输出 `0` |
 
 设计背景见 `docs/PLAN_array_layout.md`。
 
