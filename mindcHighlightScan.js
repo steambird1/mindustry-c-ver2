@@ -20,7 +20,7 @@ WHY THIS FILE EXISTS
 因此合并时不会撞车（下面的 merge 仍做了防御性丢弃）。
 */
 
-import { TokenType } from './mindcLexer.js';
+import { TokenType, KEYWORDS, SPECIAL_INSTRUCTIONS, OPERATORS, PUNCTUATORS } from './mindcLexer.js';
 
 /** 伪 token 类型：注释 */
 export const DECOR_COMMENT = '__COMMENT__';
@@ -38,6 +38,45 @@ const CODE_INDEX = new Map(HIGHLIGHT_CODEBOOK.map((type, i) => [type, i]));
 /** @param {string} type @returns {number} */
 export function codeOf(type) {
 	return CODE_INDEX.has(type) ? CODE_INDEX.get(type) : 0;
+}
+
+/**
+ * Token type -> CSS class used by the editor's highlighter.
+ *
+ * The classes are derived from the lexer's own keyword/operator/punctuator/
+ * instruction tables. Previously main.html sliced `Object.values(TokenType)`
+ * with hard-coded indexes; adding a keyword shifted every later type, so
+ * `void` was classified as an operator and `volatile`, `while`, `bool`,
+ * `true`/`false`/`null` missed the keyword class too.
+ */
+export const TOKEN_CLASS_MAP = (() => {
+	const map = new Map();
+	// Real language keywords (the preprocessor names are handled below).
+	Object.values(KEYWORDS)
+		.filter(type => !type.startsWith('PREPROCESSOR_'))
+		.forEach(type => map.set(type, 'keyword'));
+	Object.values(SPECIAL_INSTRUCTIONS).forEach(type => map.set(type, 'special'));
+	Object.values(OPERATORS).forEach(type => map.set(type, 'operator'));
+	// `.` and `->` appear in both tables; punctuation wins, as before.
+	Object.values(PUNCTUATORS).forEach(type => map.set(type, 'punctuator'));
+
+	map.set(TokenType.IDENTIFIER, 'identifier');
+	map.set(TokenType.NUMBER, 'number');
+	map.set(TokenType.STRING, 'string');
+	map.set(TokenType.CHARACTER, 'string');
+	map.set(TokenType.PREDEFINED_CONSTANT, 'predefined');
+	Object.values(TokenType)
+		.filter(type => type.startsWith('PREPROCESSOR_'))
+		.forEach(type => map.set(type, 'directive'));
+
+	map.set(DECOR_COMMENT, 'comment');
+	map.set(DECOR_DIRECTIVE, 'directive');
+	return map;
+})();
+
+/** @param {string} type @returns {string} */
+export function tokenClassOf(type) {
+	return TOKEN_CLASS_MAP.get(type) || '';
 }
 
 /**

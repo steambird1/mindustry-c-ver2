@@ -472,14 +472,13 @@ void main() {
     
     <script type="module">
         // 等待DOM加载完成
-        import { TokenType, Token, KEYWORDS, SPECIAL_INSTRUCTIONS, OPERATORS,
-            PUNCTUATORS, Lexer
+        import { TokenType, Token, Lexer
         } from "./mindcLexer.js";
         import { MemoryBlock } from "./mindcGeneratorBase.js";
         import { Compiler } from "./mindc.js";
         // 注释 / 预处理指令的高亮扫描（编译器流水线不受影响，见文件内说明）
-        import { HIGHLIGHT_CODEBOOK, DECOR_COMMENT, DECOR_DIRECTIVE,
-            scanDecorations, mergeTokensWithDecorations
+        import { HIGHLIGHT_CODEBOOK,
+            scanDecorations, mergeTokensWithDecorations, tokenClassOf
         } from "./mindcHighlightScan.js";
 
         document.addEventListener('DOMContentLoaded', function() {
@@ -503,28 +502,9 @@ void main() {
             // 一次高亮会产生数千次 DOM 分配，这是卡顿的主要来源之一。
             const HTML_ESCAPE_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 
-            // 预先算好 token 类型 -> CSS 类的映射。
-            // 原代码对每个 token 都执行 4 次 Object.values(TokenType).slice(...).includes(...)，
-            // 每次都重新构造一个 100+ 元素的数组。
-            const TOKEN_CLASS_MAP = (() => {
-                const all = Object.values(TokenType);
-                const map = new Map();
-                // 关键字 / 运算符 / 标点符号 / 特殊指令（沿用原切分区间）
-                all.slice(4, 41).forEach(t => map.set(t, 'keyword'));
-                all.slice(41, 70).forEach(t => map.set(t, 'operator'));
-                all.slice(70, 87).forEach(t => map.set(t, 'punctuator'));
-                all.slice(87, 111).forEach(t => map.set(t, 'special'));
-                map.set(TokenType.IDENTIFIER, 'identifier');
-                map.set(TokenType.NUMBER, 'number');
-                map.set(TokenType.STRING, 'string');
-                map.set(TokenType.CHARACTER, 'string');
-                map.set(TokenType.PREDEFINED_CONSTANT, 'predefined');
-                if (TokenType.COMMENT) map.set(TokenType.COMMENT, 'comment');
-                // 高亮伪类型：注释与预处理指令（Lexer 不产生它们，由扫描模块补充）
-                map.set(DECOR_COMMENT, 'comment');
-                map.set(DECOR_DIRECTIVE, 'directive');
-                return map;
-            })();
+            // token 类型 -> CSS 类由 mindcHighlightScan.js 统一维护；这里不再
+            // 按 Object.values(TokenType) 的硬编码下标切分，避免新增关键字后
+            // `void` / `volatile` 等被分到错误类别。
 
             // 高亮防抖 + 单次生效（single-flight）：
             // 每敲一个字符都跑一遍完整的 Lexer.tokenize() 并重建整个高亮层，
@@ -834,7 +814,7 @@ void main() {
                 const book = payload.codebook;
                 if (book && book !== lastCodebook) {
                     lastCodebook = book;
-                    classByCode = book.map(type => TOKEN_CLASS_MAP.get(type) || '');
+                    classByCode = book.map(type => tokenClassOf(type));
                 }
                 if (!classByCode) classByCode = [];
                 return { n: payload.n, idx: payload.idx, len: payload.len, codes: payload.codes };
@@ -848,7 +828,7 @@ void main() {
                     localBook = { types: HIGHLIGHT_CODEBOOK, index };
                     if (!classByCode) {
                         lastCodebook = HIGHLIGHT_CODEBOOK;
-                        classByCode = HIGHLIGHT_CODEBOOK.map(type => TOKEN_CLASS_MAP.get(type) || '');
+                        classByCode = HIGHLIGHT_CODEBOOK.map(type => tokenClassOf(type));
                     }
                 }
                 return localBook;
