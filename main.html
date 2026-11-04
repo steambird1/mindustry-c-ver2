@@ -238,7 +238,7 @@
             border-left: 4px solid #ffc107;
         }
 
-        .error-output, .warning-output {
+        .error-output, .warning-output, .note-output {
             height: 200px;
             font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
             font-size: 13px;
@@ -246,6 +246,120 @@
             white-space: pre;
             overflow-wrap: normal;
             overflow-x: auto;
+        }
+
+        .note-output {
+            color: #055160;
+            background-color: #cff4fc;
+            border-left: 4px solid #0dcaf0;
+        }
+
+        /* 结构化诊断 */
+        .diagnostic-item {
+            padding: 6px 10px;
+            border-bottom: 1px solid rgba(0,0,0,0.1);
+            white-space: normal;
+            cursor: pointer;
+        }
+
+        .diagnostic-item:hover {
+            background: rgba(0,0,0,0.045);
+        }
+
+        .diagnostic-item:last-child {
+            border-bottom: none;
+        }
+
+        .diagnostic-header {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            align-items: center;
+        }
+
+        .diagnostic-severity {
+            padding: 0 5px;
+            border-radius: 3px;
+            font-size: 11px;
+            font-weight: bold;
+            line-height: 17px;
+        }
+
+        .severity-error {
+            background: #f8d7da;
+            color: #842029;
+        }
+
+        .severity-warning {
+            background: #fff3cd;
+            color: #664d03;
+        }
+
+        .severity-note {
+            background: #cff4fc;
+            color: #055160;
+        }
+
+        .diagnostic-stage,
+        .diagnostic-code,
+        .diagnostic-location,
+        .diagnostic-source {
+            font-size: 11px;
+            color: #6c757d;
+        }
+
+        .diagnostic-stage,
+        .diagnostic-code {
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            background: rgba(0,0,0,0.05);
+            border-radius: 3px;
+            padding: 0 4px;
+        }
+
+        .diagnostic-message {
+            margin-top: 4px;
+            white-space: pre-wrap;
+        }
+
+        .diagnostic-snippet {
+            margin: 5px 0 0;
+            padding: 4px 6px;
+            background: rgba(0,0,0,0.035);
+            border-radius: 3px;
+            white-space: pre;
+            overflow-x: auto;
+            font-size: 12px;
+            line-height: 1.3;
+        }
+
+        .diagnostic-related,
+        .diagnostic-hints {
+            margin: 5px 0 0 18px;
+            padding: 0;
+            font-size: 12px;
+        }
+
+        .diagnostic-related li,
+        .diagnostic-hints li {
+            margin: 2px 0;
+        }
+
+        .diagnostic-fix {
+            margin-top: 6px;
+            padding: 4px 6px;
+            background: rgba(13, 110, 253, 0.08);
+            border-radius: 3px;
+            font-size: 12px;
+        }
+
+        .diagnostic-fix code {
+            white-space: pre;
+        }
+
+        .diagnostic-fix .btn {
+            margin-left: 6px;
+            padding: 1px 7px;
+            font-size: 11px;
         }
 
         /* 错误和警告消息中的行号样式 */
@@ -433,6 +547,19 @@ void main() {
                     <div class="card-body p-0">
                         <div class="output-container warning-output" id="warning-output">
                             <div class="p-3 text-muted">暂无警告信息</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 编译提示显示 -->
+                <div class="card mt-3">
+                    <div class="card-header bg-info text-dark">
+                        编译提示
+                        <span class="badge bg-light text-info ms-2" id="note-count">0</span>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="output-container note-output" id="note-output">
+                            <div class="p-3 text-muted">暂无提示信息</div>
                         </div>
                     </div>
                 </div>
@@ -1011,82 +1138,324 @@ void main() {
 
                         // 修改位置：在JavaScript部分添加以下函数
 
-            // 函数：显示错误信息
-            function displayErrors(errors) {
-                const errorOutput = document.getElementById('error-output');
-                const errorCount = document.getElementById('error-count');
-                
-                if (!errors || errors.length === 0) {
-                    errorOutput.innerHTML = '<div class="p-3 text-muted">暂无错误信息</div>';
-                    errorCount.textContent = '0';
-                    return;
+            // ---------------- 结构化诊断 ----------------
+
+            const DIAGNOSTIC_CONFIG = {
+                error: {
+                    output: 'error-output',
+                    count: 'error-count',
+                    empty: '暂无错误信息',
+                    label: '错误'
+                },
+                warning: {
+                    output: 'warning-output',
+                    count: 'warning-count',
+                    empty: '暂无警告信息',
+                    label: '警告'
+                },
+                note: {
+                    output: 'note-output',
+                    count: 'note-count',
+                    empty: '暂无提示信息',
+                    label: '提示'
                 }
-                
-                errorCount.textContent = errors.length;
-                
-                let errorHTML = '';
-                errors.forEach((error, index) => {
-                    if (!error) return;
-                    errorHTML += `<div class="error-item">
-                        <span class="error-line">${index + 1}.</span>`;
-                    
-                    if (error.line && error.column) {
-                        errorHTML += `<span class="error-location">[行${error.line},列${error.column}]</span>`;
-                    }
-                    
-                    errorHTML += `<span>${escapeHtml(error.message || error)}</span>`;
-                    
-                    if (error.location) {
-                        errorHTML += `<div class="text-muted small ms-4">位置: 索引${error.location.index}</div>`;
-                    }
-                    
-                    errorHTML += `</div>`;
-                });
-                
-                errorOutput.innerHTML = errorHTML;
+            };
+
+            const diagnosticFixes = new Map();
+            let diagnosticFixSeq = 0;
+
+            function diagnosticPoint(point, fallback = null) {
+                const source = point ?? fallback ?? {};
+                const result = {
+                    line: Number.isFinite(Number(source.line)) ? Number(source.line) : 0,
+                    column: Number.isFinite(Number(source.column)) ? Number(source.column) : 0
+                };
+                if (Number.isFinite(Number(source.index))) {
+                    result.index = Number(source.index);
+                }
+                return result;
             }
 
-            // 函数：显示警告信息
-            function displayWarnings(warnings) {
-                const warningOutput = document.getElementById('warning-output');
-                const warningCount = document.getElementById('warning-count');
-                
-                if (!warnings || warnings.length === 0) {
-                    warningOutput.innerHTML = '<div class="p-3 text-muted">暂无警告信息</div>';
-                    warningCount.textContent = '0';
-                    return;
+            function diagnosticRangeOf(raw) {
+                const start = diagnosticPoint(
+                    raw?.range?.start,
+                    raw?.location ?? {
+                        line: raw?.line,
+                        column: raw?.column,
+                        index: raw?.location?.index ?? raw?.index
+                    }
+                );
+                const endFallback = {
+                    line: raw?.endLine ?? start.line,
+                    column: raw?.endColumn ?? start.column,
+                    index: raw?.endIndex ?? raw?.index
+                };
+                const end = diagnosticPoint(raw?.range?.end, endFallback);
+                if (!Number.isFinite(Number(end.line)) || end.line === 0) end.line = start.line;
+                if (!Number.isFinite(Number(end.column)) || end.column === 0) {
+                    end.column = start.column;
                 }
-                
-                warningCount.textContent = warnings.length;
-                
-                let warningHTML = '';
-                warnings.forEach((warning, index) => {
-                    if (!warning) return;
-                    warningHTML += `<div class="warning-item">
-                        <span class="warning-line">${index + 1}.</span>`;
-                    
-                    if (warning.line && warning.column) {
-                        warningHTML += `<span class="warning-location">[行${warning.line},列${warning.column}]</span>`;
-                    }
-                    
-                    warningHTML += `<span>${escapeHtml(warning.message || warning)}</span>`;
-                    
-                    if (warning.location) {
-                        warningHTML += `<div class="text-muted small ms-4">位置: 索引${warning.location.index}</div>`;
-                    }
-                    
-                    warningHTML += `</div>`;
-                });
-                
-                warningOutput.innerHTML = warningHTML;
+                if (!Number.isFinite(Number(end.index))) end.index = start.index;
+                return { start, end };
             }
 
-            // 函数：清空错误和警告显示
+            function normalizeRelatedDiagnostic(raw) {
+                if (!raw) return null;
+                if (typeof raw === 'string') {
+                    return {
+                        message: raw,
+                        range: null,
+                        source: '<main>'
+                    };
+                }
+                return {
+                    message: String(raw.message ?? raw),
+                    range: raw.range || raw.location || raw.line
+                        ? diagnosticRangeOf(raw) : null,
+                    source: raw.source ?? '<main>'
+                };
+            }
+
+            function normalizeDiagnostic(raw, fallbackSeverity = 'error') {
+                if (!raw) return null;
+                if (typeof raw === 'string') {
+                    return {
+                        severity: fallbackSeverity,
+                        stage: '',
+                        code: '',
+                        message: raw,
+                        range: null,
+                        source: '<main>',
+                        related: [],
+                        hints: [],
+                        fix: null
+                    };
+                }
+                const severity = String(raw.severity ?? fallbackSeverity).toLowerCase();
+                const hints = Array.isArray(raw.hints)
+                    ? raw.hints.map(hint => ({
+                        message: String(hint?.message ?? hint ?? '')
+                    })).filter(hint => hint.message.length > 0)
+                    : [];
+                const related = Array.isArray(raw.related)
+                    ? raw.related.map(normalizeRelatedDiagnostic).filter(Boolean)
+                    : [];
+                let fix = null;
+                if (raw.fix?.range) {
+                    const fixRange = diagnosticRangeOf(raw.fix);
+                    if (fixRange.start.line > 0) {
+                        fix = { range: fixRange, text: String(raw.fix.text ?? '') };
+                    }
+                }
+                return {
+                    severity: ['error', 'warning', 'note'].includes(severity)
+                        ? severity : fallbackSeverity,
+                    stage: String(raw.stage ?? ''),
+                    code: String(raw.code ?? ''),
+                    message: String(raw.message ?? raw),
+                    range: diagnosticRangeOf(raw),
+                    source: String(raw.source ?? '<main>'),
+                    related,
+                    hints,
+                    fix,
+                    sourceLine: raw.sourceLine !== undefined ? String(raw.sourceLine) : '',
+                    caret: raw.caret !== undefined ? String(raw.caret) : ''
+                };
+            }
+
+            function collectDiagnostics(result) {
+                if (Array.isArray(result?.diagnostics) && result.diagnostics.length > 0) {
+                    return result.diagnostics
+                        .map(diag => normalizeDiagnostic(diag, diag?.severity ?? 'error'))
+                        .filter(Boolean);
+                }
+                return [
+                    ...(Array.isArray(result?.errors) ? result.errors : [])
+                        .map(diag => normalizeDiagnostic(diag, 'error')),
+                    ...(Array.isArray(result?.warnings) ? result.warnings : [])
+                        .map(diag => normalizeDiagnostic(diag, 'warning'))
+                ].filter(Boolean);
+            }
+
+            function diagnosticLocationText(range) {
+                if (!range?.start || !range.start.line) return '';
+                return `[行${range.start.line},列${range.start.column}]`;
+            }
+
+            function renderDiagnosticItem(diagnostic) {
+                const severity = diagnostic.severity;
+                const config = DIAGNOSTIC_CONFIG[severity] ?? DIAGNOSTIC_CONFIG.error;
+                const range = diagnostic.range ?? diagnosticRangeOf(diagnostic);
+                const start = range.start ?? {};
+                const end = range.end ?? start;
+                const fixId = diagnostic.fix ? `fix-${diagnosticFixSeq++}` : null;
+                if (fixId) diagnosticFixes.set(fixId, diagnostic.fix);
+
+                let html = `<div class="diagnostic-item diagnostic-${severity}"
+                    data-start-index="${Number.isFinite(Number(start.index)) ? Number(start.index) : ''}"
+                    data-end-index="${Number.isFinite(Number(end.index)) ? Number(end.index) : ''}"
+                    data-line="${Number(start.line) || 0}"
+                    data-column="${Number(start.column) || 0}">`;
+
+                html += '<div class="diagnostic-header">';
+                html += `<span class="diagnostic-severity severity-${severity}">${config.label}</span>`;
+                if (diagnostic.stage) {
+                    html += `<span class="diagnostic-stage">${escapeHtml(diagnostic.stage)}</span>`;
+                }
+                if (diagnostic.code) {
+                    html += `<span class="diagnostic-code">${escapeHtml(diagnostic.code)}</span>`;
+                }
+                const location = diagnosticLocationText(range);
+                if (location) html += `<span class="diagnostic-location">${location}</span>`;
+                if (diagnostic.source && diagnostic.source !== '<main>') {
+                    html += `<span class="diagnostic-source">来源: ${escapeHtml(diagnostic.source)}</span>`;
+                }
+                html += '</div>';
+
+                html += `<div class="diagnostic-message">${escapeHtml(diagnostic.message)}</div>`;
+
+                if (diagnostic.sourceLine) {
+                    html += `<pre class="diagnostic-snippet">${escapeHtml(diagnostic.sourceLine)}`;
+                    if (diagnostic.caret) html += `\n${escapeHtml(diagnostic.caret)}`;
+                    html += '</pre>';
+                }
+
+                if (diagnostic.related.length > 0) {
+                    html += '<ul class="diagnostic-related">';
+                    for (const related of diagnostic.related) {
+                        const relatedLocation = diagnosticLocationText(related.range);
+                        html += `<li>${escapeHtml(related.message)}`;
+                        if (relatedLocation) html += ` ${relatedLocation}`;
+                        if (related.source && related.source !== '<main>') {
+                            html += ` (${escapeHtml(related.source)})`;
+                        }
+                        html += '</li>';
+                    }
+                    html += '</ul>';
+                }
+
+                if (diagnostic.hints.length > 0) {
+                    html += '<ul class="diagnostic-hints">';
+                    for (const hint of diagnostic.hints) {
+                        html += `<li>${escapeHtml(hint.message)}</li>`;
+                    }
+                    html += '</ul>';
+                }
+
+                if (fixId) {
+                    const fixText = diagnostic.fix.text.length > 0
+                        ? diagnostic.fix.text : '（删除）';
+                    html += `<div class="diagnostic-fix">修复建议：<code>${escapeHtml(fixText)}</code>`;
+                    html += `<button type="button" class="btn btn-sm btn-outline-primary diagnostic-fix-apply" data-fix-id="${fixId}">应用</button>`;
+                    html += '</div>';
+                }
+
+                html += '</div>';
+                return html;
+            }
+
+            function displayDiagnosticGroup(list, severity) {
+                const config = DIAGNOSTIC_CONFIG[severity] ?? DIAGNOSTIC_CONFIG.error;
+                const output = document.getElementById(config.output);
+                const count = document.getElementById(config.count);
+                if (!output || !count) return;
+
+                if (!list || list.length === 0) {
+                    output.innerHTML = `<div class="p-3 text-muted">${config.empty}</div>`;
+                    count.textContent = '0';
+                    return;
+                }
+
+                count.textContent = String(list.length);
+                output.innerHTML = list.map(diagnostic => renderDiagnosticItem(diagnostic)).join('');
+
+                if (!output._diagnosticClickBound) {
+                    output._diagnosticClickBound = true;
+                    output.addEventListener('click', handleDiagnosticClick);
+                }
+            }
+
+            function indexFromLineColumn(line, column) {
+                const text = codeInput.value;
+                const starts = getLineStarts(text);
+                const lineIndex = Math.max(0, Math.min(starts.length - 1, (Number(line) || 1) - 1));
+                const offset = Math.max(0, (Number(column) || 1) - 1);
+                return Math.min(text.length, starts[lineIndex] + offset);
+            }
+
+            function diagnosticStartIndex(item) {
+                const raw = item.dataset.startIndex;
+                const explicit = raw === '' ? NaN : Number(raw);
+                if (Number.isFinite(explicit) && explicit >= 0) return explicit;
+                return indexFromLineColumn(item.dataset.line, item.dataset.column);
+            }
+
+            function diagnosticEndIndex(item) {
+                const raw = item.dataset.endIndex;
+                const explicit = raw === '' ? NaN : Number(raw);
+                if (Number.isFinite(explicit) && explicit >= 0) return explicit;
+                return diagnosticStartIndex(item);
+            }
+
+            function jumpToDiagnostic(item) {
+                const textLength = codeInput.value.length;
+                const start = Math.min(diagnosticStartIndex(item), textLength);
+                const end = Math.min(Math.max(start, diagnosticEndIndex(item)), textLength);
+                codeInput.focus();
+                codeInput.setSelectionRange(start, end);
+                lineNumbers.scrollTop = codeInput.scrollTop;
+                codeHighlight.scrollTop = codeInput.scrollTop;
+                codeHighlight.scrollLeft = codeInput.scrollLeft;
+                scheduleViewportRefresh();
+            }
+
+            function applyDiagnosticFix(fixId, button) {
+                const fix = diagnosticFixes.get(fixId);
+                if (!fix) return;
+                const text = codeInput.value;
+                let start = Number(fix.range?.start?.index);
+                let end = Number(fix.range?.end?.index);
+                if (!Number.isFinite(start) || start < 0) {
+                    start = indexFromLineColumn(fix.range?.start?.line, fix.range?.start?.column);
+                }
+                if (!Number.isFinite(end) || end < start) end = start;
+                if (start < 0 || end > text.length) return;
+
+                codeInput.setRangeText(fix.text, start, end, 'end');
+                markPending();
+                updateLineNumbers();
+                scheduleHighlight();
+                codeInput.focus();
+                if (button) {
+                    button.textContent = '已应用';
+                    button.disabled = true;
+                }
+            }
+
+            function handleDiagnosticClick(event) {
+                const fixButton = event.target.closest?.('.diagnostic-fix-apply');
+                if (fixButton) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    applyDiagnosticFix(fixButton.dataset.fixId, fixButton);
+                    return;
+                }
+                const item = event.target.closest?.('.diagnostic-item');
+                if (item) {
+                    event.preventDefault();
+                    jumpToDiagnostic(item);
+                }
+            }
+
+            // 函数：清空错误、警告和提示显示
             function clearErrorWarnings() {
-                document.getElementById('error-output').innerHTML = '<div class="p-3 text-muted">暂无错误信息</div>';
-                document.getElementById('warning-output').innerHTML = '<div class="p-3 text-muted">暂无警告信息</div>';
-                document.getElementById('error-count').textContent = '0';
-                document.getElementById('warning-count').textContent = '0';
+                diagnosticFixes.clear();
+                for (const severity of ['error', 'warning', 'note']) {
+                    const config = DIAGNOSTIC_CONFIG[severity];
+                    document.getElementById(config.output).innerHTML =
+                        `<div class="p-3 text-muted">${config.empty}</div>`;
+                    document.getElementById(config.count).textContent = '0';
+                }
             }
 
             // 读取内存块配置（纯数据，便于跨线程传递）
@@ -1106,35 +1475,29 @@ void main() {
 
             // 用编译结果刷新界面（Worker 与主线程两条路径共用）
             function renderCompileResult(result) {
+                const diagnostics = collectDiagnostics(result);
+                const errors = diagnostics.filter(diag => diag.severity === 'error');
+                const warnings = diagnostics.filter(diag => diag.severity === 'warning');
+                const notes = diagnostics.filter(diag => diag.severity === 'note');
+
+                diagnosticFixes.clear();
+                displayDiagnosticGroup(errors, 'error');
+                displayDiagnosticGroup(warnings, 'warning');
+                displayDiagnosticGroup(notes, 'note');
+
+                const summary = [
+                    `${errors.length} 个错误`,
+                    `${warnings.length} 个警告`,
+                    `${notes.length} 个提示`
+                ].join('，');
+
                 if (result.success) {
-                    showCompileStatus('success', '成功', '编译成功完成');
+                    showCompileStatus('success', '成功', `编译成功完成（${summary}）`);
                     outputText.textContent = result.code || '编译成功，但未生成代码';
-
-                    if (result.errors && result.errors.length > 0) {
-                        displayErrors(result.errors);
-                    } else {
-                        clearErrorWarnings();
-                    }
-
-                    if (result.warnings && result.warnings.length > 0) {
-                        displayWarnings(result.warnings);
-                    } else {
-                        document.getElementById('warning-output').innerHTML = '<div class="p-3 text-muted">暂无警告信息</div>';
-                        document.getElementById('warning-count').textContent = '0';
-                    }
                 } else {
-                    showCompileStatus('error', '失败', '编译失败');
-                    outputText.textContent = '编译失败:\n' + (result.fatalError ? result.fatalError + '\n' : '');
-
-                    if (result.errors && result.errors.length > 0) {
-                        displayErrors(result.errors);
-                    } else {
-                        clearErrorWarnings();
-                    }
-
-                    if (result.warnings && result.warnings.length > 0) {
-                        displayWarnings(result.warnings);
-                    }
+                    showCompileStatus('error', '失败', `编译失败（${summary}）`);
+                    outputText.textContent = '编译失败:\n'
+                        + (result.fatalError ? result.fatalError + '\n' : '');
                 }
             }
 

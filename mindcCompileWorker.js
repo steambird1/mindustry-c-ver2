@@ -20,7 +20,8 @@ AST 节点对象）。放在主线程意味着：
                    | { id, ok: false, error, stack }
 
 `Compiler` 的返回值里含 Instruction / SymbolEntry 等带循环引用的对象，无法
-结构化克隆，所以 errors / warnings 在 worker 内先净化成纯数据。
+结构化克隆，所以 errors / warnings 在 Worker 内先净化成纯数据。诊断的
+severity/stage/code/range/related/hints/fix/sourceLine/caret 都会保留。
 */
 
 import { Compiler } from './mindc.js';
@@ -37,11 +38,29 @@ console.info = noop;
 console.warn = noop;
 
 /**
- * 把 errors / warnings 压成可克隆的 {message, line, column}。
- * 有些错误对象携带 AST 节点（含循环引用），直接 String() 或 postMessage 都会炸。
+ * Copy a source range without dragging along AST nodes.
+ * @param {any} range
+ * @returns {{start: object, end: object}?}
+ */
+function sanitizeRange(range) {
+	if (!range || !range.start) return null;
+	const point = value => {
+		const result = {};
+		if (value && value.line !== undefined) result.line = value.line;
+		if (value && value.column !== undefined) result.column = value.column;
+		if (value && value.index !== undefined) result.index = value.index;
+		return result;
+	};
+	return { start: point(range.start), end: point(range.end ?? range.start) };
+}
+
+/**
+ * Keep the structured diagnostic fields while stripping AST objects and
+ * cycles. The worker boundary is the only place that has to do this; the
+ * editor then gets plain data it can render directly.
  *
  * @param {any[]} list
- * @returns {{message: string, line: number?, column: number?}[]}
+ * @returns {object[]}
  */
 function sanitizeDiagnostics(list) {
 	if (!Array.isArray(list)) return [];
@@ -62,8 +81,37 @@ function sanitizeDiagnostics(list) {
 		} catch (error) {
 			entry.message = '（错误信息无法序列化）';
 		}
-		if (item.line !== undefined) entry.line = item.line;
-		if (item.column !== undefined) entry.column = item.column;
+		for (const key of ['severity', 'stage', 'code', 'line', 'column',
+			'endLine', 'endColumn', 'index', 'source', 'sourceLine', 'caret']) {
+			if (item[key] !== undefined && item[key] !== null) entry[key] = item[key];
+		}
+		const range = sanitizeRange(item.range);
+		if (range) entry.range = range;
+		if (Array.isArray(item.related)) {
+			entry.related = item.related.map(related => {
+				const copy = { message: String(related?.message ?? related ?? '') };
+				for (const key of ['line', 'column', 'endLine', 'endColumn', 'index']) {
+					if (related?.[key] !== undefined && related?.[key] !== null) {
+						copy[key] = related[key];
+					}
+				}
+				const relatedRange = sanitizeRange(related?.range);
+				if (relatedRange) copy.range = relatedRange;
+				if (related?.source !== undefined) copy.source = String(related.source);
+				return copy;
+			});
+		}
+		if (Array.isArray(item.hints)) {
+			entry.hints = item.hints.map(hint => ({
+				message: String(hint?.message ?? hint ?? '')
+			}));
+		}
+		if (item.fix) {
+			const fixRange = sanitizeRange(item.fix.range);
+			if (fixRange) {
+				entry.fix = { range: fixRange, text: String(item.fix.text ?? '') };
+			}
+		}
 		result.push(entry);
 	}
 	return result;
