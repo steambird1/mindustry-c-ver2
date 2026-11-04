@@ -3279,6 +3279,22 @@ export class SemanticAnalyzer extends ASTVisitor {
 		if (!initializer || initializer.type !== 'FunctionCall') return;
 		const callee = initializer.callee;
 		if (!callee || callee.name !== 'array') return;
+		/*
+		`array(...)` describes a LOCAL array's storage. A remote array is a
+		binding to another processor and needs `remote(device, name[, layout])`.
+		Without that binding the `remote` qualifier leaves only an uninitialised
+		handle (`g:.name`), which crashes at run time.
+		*/
+		const remoteQualified = symbol?.isRemote === true
+			|| this.typeHasRemoteQualifier?.(symbol?.myType?.() ?? null) === true;
+		if (remoteQualified) {
+			this.addError(
+				`A remote array needs a remote(device, name[, layout]) binding; `
+				+ `array("...") describes a local array and cannot provide the remote target`,
+				initializer.location);
+			declarator.initializer = null;
+			return;
+		}
 		const args = initializer.arguments ?? [];
 		if (args.length === 0) {
 			this.addError(`array() needs the name of an implementation`, initializer.location);

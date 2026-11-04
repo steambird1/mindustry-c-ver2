@@ -20,8 +20,8 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 269 passed, 0 failed (163 shape assertions, 1199 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 102 passed, 0 failed |
+| `node ../tools/check.mjs` | 270 passed, 0 failed (165 shape assertions, 1204 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 103 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 16 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
@@ -101,6 +101,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | persistent register-struct array zeroing (§7.45) | **done**; zero storage leaves directly instead of `copyStruct` from literal `0`, test t251 | §7.45 |
 | packed lookup structs + lookup handles (§7.46) | **done**; one-register packed structs use lookup, multi-register falls back to divided, lookup handles use lookup+sensor+read/write, tests t252–t254/n15/n16 + negative | §7.46 |
 | packed 4/8/16-bit header (§7.47) | **done**; `packed.h` cell accessors and declaration macros, tests t255/t256 | §7.47 |
+| remote array binding validation (§7.48) | **done**; reject `remote` arrays initialized by local `array(...)`, document `remote(dev, name, layout)`; tests t257 + negative | §7.48 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -835,21 +836,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 673 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 675 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 673 under `testers/unit_tests`, every one of
+bring the count to 675 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
-| `check.mjs` | 269 + 11 peers | `check/`, plus the 11 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 102 | `negative/` |
+| `check.mjs` | 270 + 11 peers | `check/`, plus the 11 `check/peers/*.c` it drives on their owners' behalf |
+| `negative.mjs` | 103 | `negative/` |
 | `nomem.mjs` | 16 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-269 + 11 + 102 + 16 + 275 = 673. The caveat that replaces "no runner" is weaker but real:
+270 + 11 + 103 + 16 + 275 = 675. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -2078,3 +2079,18 @@ called `f` even when `a` was false.
   width semantics. `sizeof`/`lenof` describe cells, not packed elements.
 - Cases: t255 (4/8/16-bit values, word counts, signed extraction, single-cell
   helpers), t256 (8-bit accessors over a lookup array).
+
+### 7.48 Remote array bindings need remote()
+
+- `array("...")` describes a LOCAL array's storage. It cannot provide the
+  device and target name a remote array needs, so a declaration such as
+  `remote int a[2] = array("embedded_lookup");` is now rejected. Previously it
+  compiled and left an uninitialised handle (`g:.a`), which trapped at run time.
+- The recommended form names both the target and the layout:
+  `remote int a[N] = remote(dev, "g:.a", "embedded_lookup_block");` or, when
+  the target is local, `remote int a[N] = remote(@this, target);`. The declaration
+  is only a description/binding; it creates no local element storage or element
+  registers. A string target additionally needs the explicit layout because the
+  two processors must agree on the content table.
+- Cases: t257 (string target + layout, no local `r_0` element symbols),
+  negative `remote_array_local_layout.c` (local `array()` on a remote array).

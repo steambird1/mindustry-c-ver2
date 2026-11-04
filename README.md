@@ -84,6 +84,8 @@ For grammar introduction (about the features unique to Mindustry-C) and examples
   arrays may keep their shape or use a flat view; register
   struct elements are addressed leaf by leaf, and `byname` members are
   owner-relative (`#pragma checkRemote` controls the runtime device check).
+  A remote array must be bound with `remote(device, name[, layout])`;
+  `array(...)` alone describes local storage and is rejected.
 - C99 compatibility headers: `stddef.h`, `stdint.h`, `limits.h`, `float.h`,
   `ctype.h`, `stdlib.h` (atoi/strtol/div/exit subset), `string.h` extensions,
   `inttypes.h`, `iso646.h`, `stdalign.h`, `stdnoreturn.h` and `errno.h`.
