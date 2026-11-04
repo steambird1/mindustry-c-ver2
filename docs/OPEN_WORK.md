@@ -20,10 +20,10 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 272 passed, 0 failed (170 shape assertions, 1211 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 274 passed, 0 failed (173 shape assertions, 1217 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 106 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 16 passed, 0 failed |
-| `node ../tools/loadorder.mjs` | 13 passed, 0 failed, 2 exempt |
+| `node ../tools/loadorder.mjs` | 14 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
 
 The two invariants any new work has to keep:
@@ -104,6 +104,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | remote array binding validation (§7.48) | **done**; reject `remote` arrays initialized by local `array(...)`, document `remote(dev, name, layout)`; tests t257/t258 + negatives | §7.48 |
 | structured diagnostics (§7.49) | **done**; stage/code/range/related/hints, human token names, parser placeholders, dedupe/sort, `runsim.diagnostics`, negative CODE/LINE checks, test `parser_error_structured.c` | §7.49 |
 | automatic array cost model (§7.50) | **done**; `#pragma optimize(array)` compares setup, constant/dynamic access and memory costs, `array()` still wins, test t259 | §7.50 |
+| product-level peepholes (§7.51) | **done**; `mindcMlog.js` runs before line numbering, folds encoded corrections and removes dead internal temporaries, test t260 | §7.51 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -2154,3 +2155,33 @@ called `f` even when `a` was false.
 - Cases: t259 (a written-and-runtime-indexed array chooses the register layout
   and leaves no `_block`/`_pos` pair; an explicit `array("traditional")` still
   keeps memory).
+
+### 7.51 Product-level peepholes before line numbering
+
+- `mindcMlog.js` is the first pass that looks at the generated mlog rather than
+  the AST. It runs inside `Compiler.compile()` after code generation and
+  BEFORE `Instruction.output()`, while jump targets are still
+  `InstructionReferrer` objects. That ordering is what makes instruction
+  removal safe: line numbers and switch-table digits are registered again
+  afterwards.
+- The pass flattens ordinary groups but keeps `noLineCount` groups opaque. It
+  records each numeric group-relative referrer, applies the peepholes, then
+  rewrites those numbers against the final line layout.
+- It only optimises barrier-free straight-line runs. Side effects, jumps,
+  unresolved `{placeholders}`, `@counter` writes/reads, and unknown opcodes
+  stop a run.
+- B4: an encoded access ends with `op sub t t <offset>`. When the next
+  instruction is `op add/sub r t <constant>` and `t` has no other reader, the
+  correction is folded into that constant and the `sub` disappears.
+- B3 (conservative): pure writes to generated `__...` / `__tempsym...`
+  temporaries that nothing in the whole program reads are removed. User
+  variables, memory cells, `@` registers and referrer targets are never
+  removed.
+- CSE is limited to deterministic `op` / `select` / `lookup` / `getlink`
+  expressions. `read` and `sensor` are deliberately excluded: another
+  processor can change memory or a sensor's subject between two instructions.
+- Cases: t260 asserts that the encoded correction is folded
+  (`op add ... -34`) and no `op sub ... 35` remains; t261 asserts that an
+  inlined call's now-unused name-pointer temporary is not emitted. t118 keeps
+  `use` out of line because that construction is exactly what the
+  dead-temporary pass removes.

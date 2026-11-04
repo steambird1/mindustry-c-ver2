@@ -16,7 +16,12 @@
    `&x` is ONE word and stores a NAME (`"g:..x__rdev"`), while `&a` on a
    memory array is its real address, a two-word block/offset pair. The EMITs
    pin the difference in the SAME program, `widthof` agrees (1 vs 2), and the
-   write through `q[0][2]` proves the pair actually reaches the elements. */
+   write through `q[0][2]` proves the pair actually reaches the elements.
+
+   `use` is kept out of line so the name-pointer argument construction is still
+   visible in the emitted program; an inlined call with no runtime effect is
+   removed by the product-level dead-temporary pass. */
+#pragma noinline
 auto device message1;
 extern int c;
 typedef int rarr[4];

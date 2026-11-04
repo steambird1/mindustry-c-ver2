@@ -32,6 +32,7 @@ import { Instruction, SingleInstruction, InstructionBuilder, MemoryBlock, Memory
 import { ContentIdTable } from "./mindcContent.js";
 
 import { CodeGenerator } from "./mindcGenerator.js";
+import { optimizeMlog } from "./mindcMlog.js";
 
 // 符号表条目
 /**
@@ -603,9 +604,16 @@ export class Compiler {
 				}
 			}
             const targetCode = this.codeGenerator.generate(optimizedAst.ast);
+			/*
+			Product-level peepholes run before `output()` resolves line numbers.
+			If generation failed, leave the tree alone: errors are reported from
+			the generator and a half-generated tree may not be well formed.
+			*/
+			const finalCode = targetCode.errors.length === 0
+				? optimizeMlog(targetCode.result) : targetCode.result;
             return {
                 success: targetCode.errors.length == 0,
-                code: targetCode.result.output().join('\n'),
+                code: finalCode.output().join('\n'),
                 errors: this.getAllErrors(),
                 warnings: this.getAllWarnings()
             };
