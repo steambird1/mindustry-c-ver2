@@ -1,6 +1,8 @@
 
 // 词法分析器
 // Token类型枚举
+import { makeDiagnostic } from './mindcDiagnostics.js';
+
 export const TokenType = {
     // 标识符和字面量
     IDENTIFIER: 'IDENTIFIER',
@@ -1743,11 +1745,12 @@ export class Lexer {
 
     addError(message, location = null) {
         const errorLocation = location || this.getLocation();
-        this.errors.push({
+        this.errors.push(makeDiagnostic({
+            severity: 'error',
+            stage: 'lexer',
+            code: 'E_LEXER',
             message,
-            line: errorLocation.line,
-            column: errorLocation.column,
-            index: errorLocation.index
-        });
+            location: errorLocation
+        }));
     }
 }

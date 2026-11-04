@@ -622,15 +622,39 @@ export class Compiler {
     
     getAllErrors() {
         // 收集所有阶段的错误
-		return [ ...this.lexer.errors, ...this.parser.errors, ...this.semanticAnalyzer.errors,
+		const all = [ ...this.lexer.errors, ...this.parser.errors, ...this.semanticAnalyzer.errors,
 			...this.optimizer.errors, ...this.codeGenerator.errors
-		]
+		];
+		const seen = new Set();
+		const unique = [];
+		for (const error of all) {
+			const key = `${error.stage ?? ''}|${error.code ?? ''}|${error.line ?? 0}|${error.column ?? 0}|${error.message ?? ''}`;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			unique.push(error);
+		}
+		const position = value => (value && value.line ? value.line : Number.MAX_SAFE_INTEGER);
+		unique.sort((a, b) => position(a) - position(b)
+			|| (a.column ?? 0) - (b.column ?? 0));
+		return unique;
     }
     
     getAllWarnings() {
         // 收集所有阶段的警告
-		return [ ...this.semanticAnalyzer.warnings,
+		const all = [ ...this.semanticAnalyzer.warnings,
 			...this.optimizer.warnings, ...this.codeGenerator.warnings
-		]
+		];
+		const seen = new Set();
+		const unique = [];
+		for (const warning of all) {
+			const key = `${warning.stage ?? ''}|${warning.code ?? ''}|${warning.line ?? 0}|${warning.column ?? 0}|${warning.message ?? ''}`;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			unique.push(warning);
+		}
+		const position = value => (value && value.line ? value.line : Number.MAX_SAFE_INTEGER);
+		unique.sort((a, b) => position(a) - position(b)
+			|| (a.column ?? 0) - (b.column ?? 0));
+		return unique;
     }
 }

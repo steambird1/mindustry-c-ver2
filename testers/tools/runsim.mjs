@@ -89,7 +89,9 @@ export async function simulate(pathOrSource, memoryBlocks, extraAttributes = {},
 		Number((source.match(/\/\/\s*RUNS:\s*(\d+)/i) || [])[1]) || 1));
 	const { result, memoryBlocks: blocks } = await compileAndRun(source, memoryBlocks, extraAttributes);
 	if (!result.success) {
-		return { success: false, errors: (result.errors ?? []).map(e => e.message ?? String(e)), output: '', warnings: [] };
+		return { success: false, errors: (result.errors ?? []).map(e => e.message ?? String(e)),
+			diagnostics: result.errors ?? [],
+			output: '', warnings: [] };
 	}
 	// Bind `auto device NAME` declarations to real devices
 	const devices = {};
@@ -250,6 +252,7 @@ export async function simulate(pathOrSource, memoryBlocks, extraAttributes = {},
 		return {
 			success: true,
 			errors: [],
+			diagnostics: result.errors ?? [],
 			warnings: (result.warnings ?? []).map(w => w.message ?? String(w)),
 			output: world.output,
 			outputs: world.outputs,
@@ -266,6 +269,7 @@ export async function simulate(pathOrSource, memoryBlocks, extraAttributes = {},
 	return {
 		success: true,
 		errors: [],
+		diagnostics: result.errors ?? [],
 		warnings: (result.warnings ?? []).map(w => w.message ?? String(w)),
 		output: proc.output(),
 		trap: proc.trap,

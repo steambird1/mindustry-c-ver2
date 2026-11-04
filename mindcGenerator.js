@@ -19,6 +19,7 @@ import { Instruction, InstructionBuilder, InstructionReferrer, MemoryBlock, Memo
     MemoryManager, FunctionRegisterer, BuildingLinker, SingleInstruction, EmptyInstruction
  } from "./mindcGeneratorBase.js";
 import { findRecursiveFunctions } from "./mindcBase.js";
+import { makeDiagnostic } from "./mindcDiagnostics.js";
 
 import { ensureMemspHelper, remoteDeviceRegOf, remoteNameRegOf, RemotePointerRet, RemoteArrayRet, RemoteStoredPointerRet, RemoteStructRet, RemoteNamePointerRet, PackedStructRet, LookupArrayRet, NameStructPointerRet, NameStructDerefRet,
 	RemoteStructPointerRet,
@@ -50,43 +51,30 @@ export class InternalGenerationFailure {
 
 // 代码生成器
 
-/**
- * The `{line, column}` of a diagnostic, whatever the caller handed over.
- *
- * @param {any} where A location, a node that has one, a number, or null
- * @returns {{line: number, column: number}}
- */
-function locationOfDiagnostic(where) {
-	if (where === null || where === undefined) return { line: 0, column: 0 };
-	if (typeof where === 'number') return { line: where, column: 0 };
-	// A location was handed over directly
-	if (typeof where.line === 'number') {
-		return { line: where.line, column: (typeof where.column === 'number') ? where.column : 0 };
-	}
-	// Otherwise it is a node: take its own location, or the attribute one
-	const candidate = (typeof where.location === 'object' && where.location)
-		? where.location
-		: (typeof where.getAttribute === 'function' ? where.getAttribute('location') : null);
-	if (!candidate) return { line: 0, column: 0 };
-	return locationOfDiagnostic(candidate);
-}
-
 export class CodeGenerator extends ASTVisitor {
 	/**
 	 * Record a failure.
 	 *
-	 * The base class takes the second argument and stores it as `line` as it
-	 * is, but callers here pass a source LOCATION (and sometimes a node), so
-	 * the coordinates ended up nested inside `line` instead of sitting next to
-	 * `message` the way the semantic analyzer reports them. Normalize it, so
-	 * that every stage produces the same shape.
+	 * Locations may be passed as a location object, an AST node, or nothing.
+	 * `makeDiagnostic` preserves the old `line` / `column` fields and adds a
+	 * `range` suitable for a source viewer.
 	 *
 	 * @param {string} message
-	 * @param {any} [location] A location, a node carrying one, or nothing
+	 * @param {any} [location]
+	 * @param {object} [extra]
 	 */
-	addError(message, location = null) {
-		const at = locationOfDiagnostic(location);
-		this.errors.push({ message, line: at.line, column: at.column });
+	addError(message, location = null, extra = {}) {
+		this.errors.push(makeDiagnostic({
+			severity: 'error',
+			stage: 'codegen',
+			code: extra.code,
+			message,
+			location,
+			related: extra.related,
+			hints: extra.hints,
+			fix: extra.fix,
+			details: extra.details
+		}));
 	}
 
 	/**
@@ -94,10 +82,20 @@ export class CodeGenerator extends ASTVisitor {
 	 *
 	 * @param {string} message
 	 * @param {any} [location]
+	 * @param {object} [extra]
 	 */
-	addWarning(message, location = null) {
-		const at = locationOfDiagnostic(location);
-		this.warnings.push({ message, line: at.line, column: at.column });
+	addWarning(message, location = null, extra = {}) {
+		this.warnings.push(makeDiagnostic({
+			severity: 'warning',
+			stage: 'codegen',
+			code: extra.code,
+			message,
+			location,
+			related: extra.related,
+			hints: extra.hints,
+			fix: extra.fix,
+			details: extra.details
+		}));
 	}
 
 	/**
@@ -262,7 +260,12 @@ export class CodeGenerator extends ASTVisitor {
 			}
 		} catch (error) {
 			success = false;
-			this.addError(`Internal parser error: ${error.message}\n${error.stack ?? new Error().stack}`);
+			const known = error instanceof InternalGenerationFailure;
+			this.addError(
+				known ? error.message : `Internal compiler error: ${error.message}`,
+				error.node?.location ?? null,
+				known ? { code: 'E_GENERATION' }
+					: { code: 'E_CODEGEN_INTERNAL', details: { stack: error.stack ?? null } });
 		}
 		return {
 			success: success,

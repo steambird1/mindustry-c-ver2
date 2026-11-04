@@ -99,6 +99,30 @@ for (const f of files) {
 	}
 	if (failed) continue;
 
+	const diagnostics = r.diagnostics ?? [];
+	const wantedCodes = annotationWords(src, 'CODE');
+	for (const code of wantedCodes) {
+		if (!diagnostics.some(d => (d.code ?? '') === code)) {
+			console.log(`FAIL ${f}: no diagnostic has code '${code}'`);
+			fail++; failed = true;
+			break;
+		}
+	}
+	if (failed) continue;
+	const wantedLine = annotationWords(src, 'LINE')[0] ?? null;
+	if (wantedLine !== null && !diagnostics.some(d => Number(d.line) === Number(wantedLine))) {
+		console.log(`FAIL ${f}: no diagnostic is on line ${wantedLine}`);
+		fail++; failed = true;
+		continue;
+	}
+	const wantedColumn = annotationWords(src, 'COLUMN')[0] ?? null;
+	if (wantedColumn !== null && !diagnostics.some(d => Number(d.column) === Number(wantedColumn))) {
+		console.log(`FAIL ${f}: no diagnostic is at column ${wantedColumn}`);
+		console.log(`     actual: ${diagnostics.map(d => `${d.line}:${d.column}`).join(' ; ')}`);
+		fail++; failed = true;
+		continue;
+	}
+
 	const tag = wanted.length ? `  [${wanted.length} reason(s) checked]` : '';
 	console.log(`ok   ${f}  [${r.errors.map(e => e.split('\n')[0].slice(0, 90)).join(' ; ')}]${tag}`);
 	pass++;

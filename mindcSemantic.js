@@ -12,6 +12,7 @@ import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 // reads a binding from `mindcGeneratorBase.js` while this module's body runs.
 import { MemoryBlockInfo } from "./mindcGeneratorBase.js";
 import { widthOfType, normalizeImplementation, registerElementLayoutOf, packedStructLookupCompatible } from "./mindcInfrastructure.js";
+import { makeDiagnostic } from "./mindcDiagnostics.js";
 
 export class VariableLinker {
 	/**
@@ -2016,20 +2017,32 @@ export class SemanticAnalyzer extends ASTVisitor {
         }
     }
 
-    addError(message, location = null) {
-        this.errors.push({
+    addError(message, location = null, extra = {}) {
+        this.errors.push(makeDiagnostic({
+            severity: 'error',
+            stage: 'semantic',
+            code: extra.code,
             message,
-            line: location ? location.line : 0,
-            column: location ? location.column : 0
-        });
+            location,
+            related: extra.related,
+            hints: extra.hints,
+            fix: extra.fix,
+            details: extra.details
+        }));
     }
 
-    addWarning(message, location = null) {
-        this.warnings.push({
+    addWarning(message, location = null, extra = {}) {
+        this.warnings.push(makeDiagnostic({
+            severity: 'warning',
+            stage: 'semantic',
+            code: extra.code,
             message,
-            line: location ? location.line : 0,
-            column: location ? location.column : 0
-        });
+            location,
+            related: extra.related,
+            hints: extra.hints,
+            fix: extra.fix,
+            details: extra.details
+        }));
     }
 
     // =============== 访问者方法 ===============
@@ -3291,7 +3304,14 @@ export class SemanticAnalyzer extends ASTVisitor {
 			this.addError(
 				`A remote array needs a remote(device, name[, layout]) binding; `
 				+ `array("...") describes a local array and cannot provide the remote target`,
-				initializer.location);
+				initializer.location,
+				{
+					code: 'E_REMOTE_ARRAY_LOCAL_LAYOUT',
+					hints: [
+						{ message: `use remote(device, "g:.${declarator.name}", layout)` },
+						{ message: `or remote(@this, <local array>, layout)` }
+					]
+				});
 			declarator.initializer = null;
 			return;
 		}
@@ -3703,7 +3723,14 @@ export class SemanticAnalyzer extends ASTVisitor {
 			this.addError(
 				`remote(@this, '${inner.name}') cannot target the declaration being defined: `
 				+ `declare the owner variable separately, or use a string target`,
-				location);
+				location,
+				{
+					code: 'E_REMOTE_SELF_TARGET',
+					hints: [
+						{ message: `declare the owner first, then remote(@this, ${inner.name}, layout)` },
+						{ message: `or use remote(@this, "g:.${inner.name}", layout)` }
+					]
+				});
 			declarator.initializer = null;
 			return;
 		}
@@ -7008,7 +7035,11 @@ export class SemanticAnalyzer extends ASTVisitor {
             this.addError(
                 `Remote binding '${name}' could not be resolved after the whole program `
                 + `was read; name an existing local variable or use a string target`,
-                entry.declarator?.location ?? null);
+                entry.declarator?.location ?? null,
+                {
+                    code: 'E_REMOTE_UNRESOLVED',
+                    hints: [{ message: `use remote(dev, "g:.${name}", layout)` }]
+                });
             entry.declarator.initializer = null;
         }
     }

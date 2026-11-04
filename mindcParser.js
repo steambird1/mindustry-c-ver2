@@ -1,10 +1,42 @@
+import { makeDiagnostic } from "./mindcDiagnostics.js";
+
 import { AttributeClass, ASTNode,
     CastExpression, TypeSpecifierNode, 
     ASTBuilder, __convert, objectList,
 	liquidList, unitList, buildingList
  } from "./mindcBase.js";
 
-import { TokenType, Lexer } from "./mindcLexer.js";
+import { TokenType, Lexer, Token } from "./mindcLexer.js";
+
+const TOKEN_DISPLAY = {
+	[TokenType.SEMICOLON]: "';'",
+	[TokenType.COMMA]: "','",
+	[TokenType.DOT]: "'.'",
+	[TokenType.LEFT_PAREN]: "'('",
+	[TokenType.RIGHT_PAREN]: "')'",
+	[TokenType.LEFT_BRACE]: "'{'",
+	[TokenType.RIGHT_BRACE]: "'}'",
+	[TokenType.LEFT_BRACKET]: "'['",
+	[TokenType.RIGHT_BRACKET]: "']'",
+	[TokenType.COLON]: "':'",
+	[TokenType.EOF]: 'end of file'
+};
+
+function describeExpectedToken(type, value = null) {
+	if (value !== null && value !== undefined) return `'${value}'`;
+	return TOKEN_DISPLAY[type] ?? String(type);
+}
+
+function describeFoundToken(token) {
+	if (!token || token.type === TokenType.EOF) return 'end of file';
+	if (token.type === TokenType.IDENTIFIER) {
+		return token.value ? `identifier '${token.value}'` : 'an identifier';
+	}
+	if (token.type === TokenType.NUMBER) return `number '${token.value}'`;
+	if (token.type === TokenType.STRING) return `string '${token.value}'`;
+	if (token.type === TokenType.CHARACTER) return `character '${token.value}'`;
+	return TOKEN_DISPLAY[token.type] ?? `${token.type} '${token.value}'`;
+}
 
 export class Parser {
 	/**
@@ -48,7 +80,9 @@ export class Parser {
                 errors: this.errors
             };
         } catch (error) {
-            this.addError(`Internal parser error: ${error.message}\n${error.stack}`);
+            this.addError(`Internal parser error: ${error.message}`,
+                error.location ?? this.getCurrentToken()?.location ?? null,
+                { code: 'E_PARSE_INTERNAL', details: { stack: error.stack ?? null } });
             return {
                 success: false,
                 ast: null,
@@ -99,18 +133,41 @@ export class Parser {
             return token;
         }
         
-        const expected = expectedValue || expectedType;
-        this.addError(`Expected ${expected}, but found ${token.type} '${token.value}'`, token.location);
-        return null;
+        const expected = describeExpectedToken(expectedType, expectedValue);
+        const foundLocation = {
+            ...token.location,
+            length: String(token.raw || token.value || '').length
+        };
+        this.addError(
+            `Expected ${expected}, but found ${describeFoundToken(token)}`,
+            foundLocation,
+            {
+                code: 'E_PARSE_EXPECTED_TOKEN',
+                details: { expected: expectedValue ?? expectedType, found: token.type }
+            });
+        /*
+        Return a placeholder instead of null. Callers commonly read `.value`
+        immediately; returning null turned an ordinary syntax error into an
+        "Internal parser error" stack trace.
+        */
+        const missing = new Token(expectedType, expectedValue ?? '', token.location, '');
+        missing.isMissing = true;
+        return missing;
     }
 
-    addError(message, location = null) {
+    addError(message, location = null, extra = {}) {
         const token = this.getCurrentToken();
-        this.errors.push({
+        this.errors.push(makeDiagnostic({
+            severity: 'error',
+            stage: 'parser',
+            code: extra.code,
             message,
-            line: location ? location.line : token.location.line,
-            column: location ? location.column : token.location.column
-        });
+            location: location ?? token?.location ?? null,
+            related: extra.related,
+            hints: extra.hints,
+            fix: extra.fix,
+            details: extra.details
+        }));
     }
 
     // =============== 解析方法 ===============
@@ -2803,7 +2860,11 @@ export class Parser {
             }
             
             default:
-                this.addError(`Unexpected token in expression: ${token.type} '${token.value}'`);
+                this.addError(
+                    `Expected an expression, but found ${describeFoundToken(token)}`,
+                    token.location,
+                    { code: 'E_PARSE_EXPECTED_EXPRESSION',
+                        details: { found: token.type } });
                 this.consumeToken();
                 return null;
         }

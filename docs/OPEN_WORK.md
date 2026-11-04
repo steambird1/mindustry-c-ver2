@@ -21,9 +21,9 @@ Reproduce the baselines from `testers/unit_tests`:
 | runner | result |
 |---|---|
 | `node ../tools/check.mjs` | 271 passed, 0 failed (167 shape assertions, 1209 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 104 passed, 0 failed |
+| `node ../tools/negative.mjs` | 105 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 16 passed, 0 failed |
-| `node ../tools/loadorder.mjs` | 12 passed, 0 failed, 2 exempt |
+| `node ../tools/loadorder.mjs` | 13 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
 
 The two invariants any new work has to keep:
@@ -102,6 +102,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | packed lookup structs + lookup handles (§7.46) | **done**; one-register packed structs use lookup, multi-register falls back to divided, lookup handles use lookup+sensor+read/write, tests t252–t254/n15/n16 + negative | §7.46 |
 | packed 4/8/16-bit header (§7.47) | **done**; `packed.h` cell accessors and declaration macros, tests t255/t256 | §7.47 |
 | remote array binding validation (§7.48) | **done**; reject `remote` arrays initialized by local `array(...)`, document `remote(dev, name, layout)`; tests t257/t258 + negatives | §7.48 |
+| structured diagnostics (§7.49) | **done**; stage/code/range/related/hints, human token names, parser placeholders, dedupe/sort, `runsim.diagnostics`, negative CODE/LINE checks, test `parser_error_structured.c` | §7.49 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -836,21 +837,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 677 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 678 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 677 under `testers/unit_tests`, every one of
+bring the count to 678 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
 | `check.mjs` | 271 + 11 peers | `check/`, plus the 11 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 104 | `negative/` |
+| `negative.mjs` | 105 | `negative/` |
 | `nomem.mjs` | 16 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-271 + 11 + 104 + 16 + 275 = 677. The caveat that replaces "no runner" is weaker but real:
+271 + 11 + 105 + 16 + 275 = 678. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -2101,3 +2102,25 @@ called `f` even when `a` was false.
   iterates an array that the retry appends to (which exhausted the JS heap).
 - Cases: t258 (same-name target on a real other processor, synthesised
   `g:.safety_data`, no local element symbols), negative `remote_self_target.c`.
+
+### 7.49 Structured diagnostics
+
+- Every stage now emits the same diagnostic shape through
+  `mindcDiagnostics.makeDiagnostic`: `severity`, `stage`, `code`, `message`,
+  `range {start,end}`, `line`/`column` (compatibility), `endLine`/`endColumn`,
+  and optional `related`, `hints`, `fix`, `details`. Token `index`/`length` is
+  preserved where available.
+- Parser diagnostics use human token names (`Expected ';', but found 'print'`,
+  `end of file` instead of `EOF ''`). `expectToken` returns a missing-token
+  placeholder instead of null, so an ordinary syntax error no longer becomes
+  an internal parser stack trace. `Unexpected token in expression` became
+  `Expected an expression, but found ...`.
+- Semantic and codegen diagnostics normalize node/location input; known
+  generation failures are reported without leaking a JS stack. `getAllErrors`
+  sorts by position and removes duplicate stage/code/position/message entries.
+  `runsim.simulate` exposes raw `diagnostics` alongside the legacy message
+  strings.
+- The negative runner accepts optional `CODE:` and `LINE:`/`COLUMN:` annotations;
+  `parser_error_structured.c` checks the structured parser diagnostic.
+- This is the first step: parser recovery/code frames and broad `related`
+  locations are still follow-up work.
