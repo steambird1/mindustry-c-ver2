@@ -8479,7 +8479,13 @@ export class SemanticAnalyzer extends ASTVisitor {
         if (!shared && node.arguments.length !== expectedParams.length) {
             this.addError(
                 `Function '${readableFunctionName}' expects ${expectedParams.length} arguments, but ${node.arguments.length} were provided`,
-                node.location
+                node.location,
+                {
+                    code: 'E_SEMANTIC_ARGUMENT_COUNT',
+                    related: funcSymbol?.location
+                        ? [{ message: 'function declared here', location: funcSymbol.location }]
+                        : undefined
+                }
             );
             return;
         }
@@ -8524,7 +8530,13 @@ export class SemanticAnalyzer extends ASTVisitor {
             if (argType && expectedType && !compatible) {
                 this.addError(
                     `Argument ${index + 1} of '${node.callee.name}' expects '${expectedType}', but got '${argType}'`,
-                    arg.location
+                    arg.location,
+                    {
+                        code: 'E_SEMANTIC_ARGUMENT_TYPE',
+                        related: funcSymbol?.location
+                            ? [{ message: 'function declared here', location: funcSymbol.location }]
+                            : undefined
+                    }
                 );
             }
             /*

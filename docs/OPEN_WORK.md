@@ -2122,12 +2122,15 @@ called `f` even when `a` was false.
   `runsim.simulate` exposes raw `diagnostics` alongside the legacy message
   strings.
 - Parser expected-punctuation errors carry a `fix` (insert the missing
-  character) and a hint. Duplicate variables/functions/types and function
-  signature mismatches carry `related` locations pointing at the earlier
-  declaration.
+  character) and a hint. Repeated parser errors at the same token (for example
+  several "expected ... at end of file" messages after an unterminated string)
+  are collapsed to the first one.
+- Duplicate variables/functions/types, function signature mismatches and
+  function argument count/type errors carry `related` locations pointing at the
+  earlier declaration.
 - The negative runner accepts optional `CODE:`, `STAGE:`, `LINE:`, `COLUMN:`,
   `HINT:`, `RELATED:` and `FIX:` annotations. `parser_error_structured.c`
-  checks code/stage/line/fix; `duplicate_variable_related.c` checks the related
-  first-declaration note.
+  checks code/stage/line/fix; `duplicate_variable_related.c` and
+  `fn_arity_mismatch.c` check related declaration notes.
 - Still follow-up: parser error recovery/synchronization and broader `related`
   coverage for calls and member errors.

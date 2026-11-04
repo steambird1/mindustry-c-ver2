@@ -25,3 +25,6 @@ void main() {
 }
 /* MESSAGE: Function 'add' expects 2 arguments, but 3 were provided */
 /* MESSAGE: Function 'add' expects 2 arguments, but 1 were provided */
+/* CODE: E_SEMANTIC_ARGUMENT_COUNT */
+/* STAGE: semantic */
+/* RELATED: function declared here */

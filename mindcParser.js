@@ -179,7 +179,7 @@ export class Parser {
 
     addError(message, location = null, extra = {}) {
         const token = this.getCurrentToken();
-        this.errors.push(makeDiagnostic({
+        const diagnostic = makeDiagnostic({
             severity: 'error',
             stage: 'parser',
             code: extra.code,
@@ -189,7 +189,19 @@ export class Parser {
             hints: extra.hints,
             fix: extra.fix,
             details: extra.details
-        }));
+        });
+        /*
+        Once EOF is reached, a single missing delimiter tends to produce several
+        "expected ... at end of file" messages at the same token. Keep the
+        first; later ones are cascade noise.
+        */
+        const previous = this.errors[this.errors.length - 1];
+        if (previous && previous.stage === 'parser'
+            && previous.line === diagnostic.line
+            && previous.column === diagnostic.column) {
+            return;
+        }
+        this.errors.push(diagnostic);
     }
 
     // =============== 解析方法 ===============
