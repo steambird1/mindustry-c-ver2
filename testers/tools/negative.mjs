@@ -122,6 +122,40 @@ for (const f of files) {
 		fail++; failed = true;
 		continue;
 	}
+	const wantedStage = annotationWords(src, 'STAGE')[0] ?? null;
+	if (wantedStage !== null && !diagnostics.some(d => (d.stage ?? '') === wantedStage)) {
+		console.log(`FAIL ${f}: no diagnostic has stage '${wantedStage}'`);
+		fail++; failed = true;
+		continue;
+	}
+	for (const pattern of annotationWords(src, 'HINT')) {
+		const re = new RegExp(pattern);
+		const hit = diagnostics.some(d => (d.hints ?? []).some(h => re.test(h.message ?? '')));
+		if (!hit) {
+			console.log(`FAIL ${f}: no diagnostic hint matches /${pattern}/`);
+			fail++; failed = true;
+			break;
+		}
+	}
+	if (failed) continue;
+	for (const pattern of annotationWords(src, 'RELATED')) {
+		const re = new RegExp(pattern);
+		const hit = diagnostics.some(d => (d.related ?? []).some(r => re.test(r.message ?? '')));
+		if (!hit) {
+			console.log(`FAIL ${f}: no diagnostic related note matches /${pattern}/`);
+			fail++; failed = true;
+			break;
+		}
+	}
+	if (failed) continue;
+	for (const text of annotationWords(src, 'FIX')) {
+		if (!diagnostics.some(d => (d.fix?.text ?? '') === text)) {
+			console.log(`FAIL ${f}: no diagnostic has a fix with text '${text}'`);
+			fail++; failed = true;
+			break;
+		}
+	}
+	if (failed) continue;
 
 	const tag = wanted.length ? `  [${wanted.length} reason(s) checked]` : '';
 	console.log(`ok   ${f}  [${r.errors.map(e => e.split('\n')[0].slice(0, 90)).join(' ; ')}]${tag}`);

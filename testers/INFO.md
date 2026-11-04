@@ -14,7 +14,7 @@
 | 命令（从 `testers/unit_tests` 执行） | 读哪个目录 | 当前结果 | 判定标准 |
 |---|---|---|---|
 | `node ..\tools\check.mjs` | `check/` | **271 passed, 0 failed**（167 shape assertions, 1209 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
-| `node ..\tools\negative.mjs` | `negative/` | **105 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
+| `node ..\tools\negative.mjs` | `negative/` | **106 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
 | `node ..\tools\nomem.mjs` | `nomem/` | **16 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
 | `node ..\tools\loadorder.mjs` | 仓库根的 `mindc*.js` | **13 passed, 0 failed, 2 exempt** | 每个入口单独起一个 `node` 进程导入，不得有循环依赖 |
 | `node ..\tools\runall.mjs` | 14 个目录：`suite/` `mem/` `arr/` `arr2/` `ptr2/` `stack/` `tests/` `uc/` `cases/` `exttests/` `hdr/` `t/` `big/` `u/` | **267/275**（8 个已知坏例以 KNOWN-GAP 如实上报，不算失败） | 能编译、能跑完不崩；带 `EXPECT:` 的还比对输出 |
@@ -55,7 +55,11 @@
 | `MESSAGE: <正则>` | `negative/` | 错误信息**必须**匹配一条（每行一条） |
 | `NOT-MESSAGE: <正则>` | `negative/` | 错误信息**不得**匹配任何一条（每行一条）；用来断言「保持沉默」 |
 | `CODE: <错误码>` | `negative/` | 至少一条结构化诊断的 `code` 必须匹配 |
+| `STAGE: <阶段>` | `negative/` | 至少一条结构化诊断的 `stage` 必须匹配 |
 | `LINE: <n>` / `COLUMN: <n>` | `negative/` | 至少一条结构化诊断的行/列必须匹配 |
+| `HINT: <正则>` | `negative/` | 至少一条诊断的 `hints` 必须匹配 |
+| `RELATED: <正则>` | `negative/` | 至少一条诊断的 `related` 必须匹配 |
+| `FIX: <文本>` | `negative/` | 至少一条诊断的 `fix.text` 必须匹配 |
 | `NOMEM` | `negative/` | 这个用例在无内存块下编译 |
 | `VERSION: 140` | `check/`、`negative/`、`nomem/` | 用旧目标版本编译 |
 | `KNOWN-GAP: <理由>` | `negative/`、`runall/` | 今天达不到标准（`negative/` 是编译器接受它）；如实上报，不算通过。`runall.mjs` 还会在它开始通过时点名注解过期 |
@@ -72,13 +76,13 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 
 ## 目录地图
 
-`testers/unit_tests/` 下共 **678 个 `.c`，全部有 runner**（271 + 11 + 105 + 16 + 275 = 678）：
+`testers/unit_tests/` 下共 **679 个 `.c`，全部有 runner**（271 + 11 + 106 + 16 + 275 = 679）：
 
 | 目录 | 文件数 | 谁来跑 |
 |---|---|---|
 | `check/` | 271 | `check.mjs`（同时驱动 `check/peers/` 的 11 个对端，见下文） |
 | `t/` | 98 | `runall.mjs`（早期按主题分的用例，`2dc683e` 起纳入） |
-| `negative/` | 105 | `negative.mjs` |
+| `negative/` | 106 | `negative.mjs` |
 | `suite/` | 50 | `runall.mjs` |
 | `mem/` | 25 | `runall.mjs` |
 | `tests/` | 25 | `runall.mjs`（另有手工的 `batch.mjs [baseline]`） |

@@ -1,6 +1,8 @@
 /* MESSAGE: Expected ';' */
 /* CODE: E_PARSE_EXPECTED_TOKEN */
-/* LINE: 10 */
+/* STAGE: parser */
+/* LINE: 12 */
+/* FIX: ; */
 /*
 A parser diagnostic is a structured object: the code identifies the reason and
 the line/column place it even though the displayed message is only one line.

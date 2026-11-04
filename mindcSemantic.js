@@ -1876,7 +1876,13 @@ export class SemanticAnalyzer extends ASTVisitor {
 			return;
 		}
 		if (this.currentScope.lookupCurrent(name)) {
-			this.addError(`Type '${name}' is already declared in this scope`, location);
+			this.addError(`Type '${name}' is already declared in this scope`,
+				location,
+				{
+					code: 'E_SEMANTIC_DUPLICATE_TYPE',
+					related: [{ message: 'first declared here',
+						location: this.currentScope.lookupCurrent(name)?.location }]
+				});
 			return;
 		}
 		this.currentScope.addSymbol(new SymbolEntry(name, { type }, this.currentScope, 'type', location));
@@ -2121,7 +2127,12 @@ export class SemanticAnalyzer extends ASTVisitor {
         let reuse = false;
         if (existingSymbol) {
             if (existingSymbol.kind !== 'function') {
-                this.addError(`'${node.name}' is already declared and is not a function`, node.location);
+                this.addError(`'${node.name}' is already declared and is not a function`,
+                    node.location,
+                    {
+                        code: 'E_SEMANTIC_NOT_A_FUNCTION',
+                        related: [{ message: 'declared here', location: existingSymbol.location }]
+                    });
                 return;
             }
             /*
@@ -2134,7 +2145,12 @@ export class SemanticAnalyzer extends ASTVisitor {
                 return;
             }
             if (existingSymbol.isDefined === true) {
-                this.addError(`Function '${node.name}' is already defined`, node.location);
+                this.addError(`Function '${node.name}' is already defined`,
+                    node.location,
+                    {
+                        code: 'E_SEMANTIC_DUPLICATE_FUNCTION',
+                        related: [{ message: 'previous definition is here', location: existingSymbol.location }]
+                    });
                 return;
             }
             funcSymbol = existingSymbol;
@@ -2291,13 +2307,22 @@ export class SemanticAnalyzer extends ASTVisitor {
         const returnType = this.typeToString(this.getTypeNameFromTypeNode(node.returnType));
         if (existing.type?.returnType && returnType !== existing.type.returnType) {
             this.addError(`Function '${node.name}' is redeclared with return type `
-                + `'${returnType}', previously '${existing.type.returnType}'`, node.location);
+                + `'${returnType}', previously '${existing.type.returnType}'`,
+                node.location,
+                {
+                    code: 'E_SEMANTIC_RETURN_MISMATCH',
+                    related: [{ message: 'previous declaration is here', location: existing.location }]
+                });
         }
         const now = (node.parameters ?? []).map(p => String(this.getTypeNameFromTypeNode(p)));
         const before = (existing.type?.parameters ?? []).map(p => String(p?.type ?? p));
         if (before.length !== now.length || before.some((t, i) => t !== now[i])) {
             this.addError(`Function '${node.name}' is redeclared with a different parameter list`,
-                node.location);
+                node.location,
+                {
+                    code: 'E_SEMANTIC_PARAMETER_MISMATCH',
+                    related: [{ message: 'previous declaration is here', location: existing.location }]
+                });
         }
     }
 
@@ -2374,7 +2399,12 @@ export class SemanticAnalyzer extends ASTVisitor {
             // 检查变量是否已声明
             const existingSymbol = this.currentScope.lookupCurrent(declarator.name);
             if (existingSymbol) {
-                this.addError(`Variable '${declarator.name}' is already declared in this scope`, declarator.location);
+                this.addError(`Variable '${declarator.name}' is already declared in this scope`,
+                    declarator.location,
+                    {
+                        code: 'E_SEMANTIC_DUPLICATE_VARIABLE',
+                        related: [{ message: 'first declared here', location: existingSymbol.location }]
+                    });
                 return;
             }
 

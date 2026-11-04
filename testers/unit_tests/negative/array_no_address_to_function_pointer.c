@@ -1,4 +1,7 @@
 /* MESSAGE: Array 'reg' has no address, so it cannot be han */
+/* CODE: E_GENERATION */
+/* STAGE: codegen */
+/* LINE: 9 */
 auto device message1;
 int reg[4] = array("embedded_divided", {0, 0, 0, 0});
 typedef void (*cb)(int s[4]);

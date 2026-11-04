@@ -22,6 +22,16 @@ const TOKEN_DISPLAY = {
 	[TokenType.EOF]: 'end of file'
 };
 
+/** Punctuation that can be supplied by a simple insert fix. */
+const TOKEN_INSERT_TEXT = {
+	[TokenType.SEMICOLON]: ';',
+	[TokenType.COMMA]: ',',
+	[TokenType.RIGHT_PAREN]: ')',
+	[TokenType.RIGHT_BRACE]: '}',
+	[TokenType.RIGHT_BRACKET]: ']',
+	[TokenType.COLON]: ':'
+};
+
 function describeExpectedToken(type, value = null) {
 	if (value !== null && value !== undefined) return `'${value}'`;
 	return TOKEN_DISPLAY[type] ?? String(type);
@@ -138,13 +148,25 @@ export class Parser {
             ...token.location,
             length: String(token.raw || token.value || '').length
         };
+        const insert = TOKEN_INSERT_TEXT[expectedType] ?? null;
+        const extra = {
+            code: 'E_PARSE_EXPECTED_TOKEN',
+            details: { expected: expectedValue ?? expectedType, found: token.type }
+        };
+        if (insert && token.location) {
+            extra.hints = [{ message: `insert '${insert}' here` }];
+            extra.fix = {
+                range: {
+                    start: { ...token.location },
+                    end: { ...token.location }
+                },
+                text: insert
+            };
+        }
         this.addError(
             `Expected ${expected}, but found ${describeFoundToken(token)}`,
             foundLocation,
-            {
-                code: 'E_PARSE_EXPECTED_TOKEN',
-                details: { expected: expectedValue ?? expectedType, found: token.type }
-            });
+            extra);
         /*
         Return a placeholder instead of null. Callers commonly read `.value`
         immediately; returning null turned an ordinary syntax error into an

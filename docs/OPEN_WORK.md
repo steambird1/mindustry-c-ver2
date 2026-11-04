@@ -21,7 +21,7 @@ Reproduce the baselines from `testers/unit_tests`:
 | runner | result |
 |---|---|
 | `node ../tools/check.mjs` | 271 passed, 0 failed (167 shape assertions, 1209 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 105 passed, 0 failed |
+| `node ../tools/negative.mjs` | 106 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 16 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 13 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
@@ -837,21 +837,21 @@ their own line instead of failing the run (8 today). So `#pragma stackcheck` is 
 in all three forms: `so1.c` passes as it always did, and §3.3 fixed both overflow paths,
 so `so2.c` and `so3.c` pass too.
 
-### 4.3 "176 cases have no runner" �?stale; re-measured, all 678 are driven
+### 4.3 "176 cases have no runner" �?stale; re-measured, all 679 are driven
 
 The original measurement (518 `.c` files, 342 driven, **176** in nine directories no
 runner read) predates `2dc683e`. Re-measured at `245c163`: 521 `.c` files; the §3 and §7 cases
-bring the count to 678 under `testers/unit_tests`, every one of
+bring the count to 679 under `testers/unit_tests`, every one of
 them driven �?
 
 | runner | cases | covers |
 |---|---|---|
 | `check.mjs` | 271 + 11 peers | `check/`, plus the 11 `check/peers/*.c` it drives on their owners' behalf |
-| `negative.mjs` | 105 | `negative/` |
+| `negative.mjs` | 106 | `negative/` |
 | `nomem.mjs` | 16 | `nomem/` |
 | `runall.mjs` | 275 across 14 directories | the five original dirs plus `t/`, `hdr/`, `big/`, `u/`, `uc/`, `tests/`, `stack/`, `cases/`, `exttests/` |
 
-271 + 11 + 105 + 16 + 275 = 678. The caveat that replaces "no runner" is weaker but real:
+271 + 11 + 106 + 16 + 275 = 679. The caveat that replaces "no runner" is weaker but real:
 most of those directories are driven *by runall*, whose bar is "it ran" �?only six files
 in these directories carry an `EXPECT:` line; `suite/04_struct`, `mem/d1`,
 `ptr2/p1` and `tests/compound` are the four added most recently. Assertion density per directory is
@@ -2117,10 +2117,17 @@ called `f` even when `a` was false.
   `Expected an expression, but found ...`.
 - Semantic and codegen diagnostics normalize node/location input; known
   generation failures are reported without leaking a JS stack. `getAllErrors`
-  sorts by position and removes duplicate stage/code/position/message entries.
+  sorts by position and removes duplicate stage/code/position/message entries,
+  then attaches `sourceLine` and a caret from the lexer source.
   `runsim.simulate` exposes raw `diagnostics` alongside the legacy message
   strings.
-- The negative runner accepts optional `CODE:` and `LINE:`/`COLUMN:` annotations;
-  `parser_error_structured.c` checks the structured parser diagnostic.
-- This is the first step: parser recovery/code frames and broad `related`
-  locations are still follow-up work.
+- Parser expected-punctuation errors carry a `fix` (insert the missing
+  character) and a hint. Duplicate variables/functions/types and function
+  signature mismatches carry `related` locations pointing at the earlier
+  declaration.
+- The negative runner accepts optional `CODE:`, `STAGE:`, `LINE:`, `COLUMN:`,
+  `HINT:`, `RELATED:` and `FIX:` annotations. `parser_error_structured.c`
+  checks code/stage/line/fix; `duplicate_variable_related.c` checks the related
+  first-declaration note.
+- Still follow-up: parser error recovery/synchronization and broader `related`
+  coverage for calls and member errors.

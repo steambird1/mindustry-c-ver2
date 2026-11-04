@@ -263,7 +263,7 @@ export class CodeGenerator extends ASTVisitor {
 			const known = error instanceof InternalGenerationFailure;
 			this.addError(
 				known ? error.message : `Internal compiler error: ${error.message}`,
-				error.node?.location ?? null,
+				error.node ?? null,
 				known ? { code: 'E_GENERATION' }
 					: { code: 'E_CODEGEN_INTERNAL', details: { stack: error.stack ?? null } });
 		}

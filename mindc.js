@@ -636,7 +636,7 @@ export class Compiler {
 		const position = value => (value && value.line ? value.line : Number.MAX_SAFE_INTEGER);
 		unique.sort((a, b) => position(a) - position(b)
 			|| (a.column ?? 0) - (b.column ?? 0));
-		return unique;
+		return this.decorateDiagnostics(unique);
     }
     
     getAllWarnings() {
@@ -655,6 +655,33 @@ export class Compiler {
 		const position = value => (value && value.line ? value.line : Number.MAX_SAFE_INTEGER);
 		unique.sort((a, b) => position(a) - position(b)
 			|| (a.column ?? 0) - (b.column ?? 0));
-		return unique;
+		return this.decorateDiagnostics(unique);
     }
+
+	/**
+	 * Attach the source line and a simple caret to diagnostics that have a
+	 * usable line. This is presentation data; consumers that only want the
+	 * object can ignore it.
+	 *
+	 * @param {any[]} diagnostics
+	 * @returns {any[]}
+	 */
+	decorateDiagnostics(diagnostics) {
+		const lines = String(this.lexer?.sourceCode ?? '').split(/\r?\n/);
+		for (const diagnostic of diagnostics) {
+			const line = Number(diagnostic.line) || 0;
+			if (line <= 0 || line > lines.length) continue;
+			const text = lines[line - 1];
+			diagnostic.sourceLine = text;
+			const column = Math.max(0, (Number(diagnostic.column) || 0) - 1);
+			const prefix = text.slice(0, column).replace(/[^\t]/g, ' ');
+			let caret = `${prefix}^`;
+			if (diagnostic.endLine === diagnostic.line
+				&& Number(diagnostic.endColumn) > Number(diagnostic.column)) {
+				caret += '~'.repeat(Number(diagnostic.endColumn) - Number(diagnostic.column) - 1);
+			}
+			diagnostic.caret = caret;
+		}
+		return diagnostics;
+	}
 }

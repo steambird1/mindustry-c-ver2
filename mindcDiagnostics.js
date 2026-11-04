@@ -95,7 +95,12 @@ export function makeDiagnostic(info) {
 		endColumn: end.column ?? start.column ?? 0
 	};
 	if (typeof start.index === 'number') diagnostic.index = start.index;
-	if (info.related?.length) diagnostic.related = info.related;
+	if (info.related?.length) {
+		diagnostic.related = info.related.map(item => ({
+			...item,
+			range: item.range ?? diagnosticRange(item.location)
+		}));
+	}
 	if (info.hints?.length) diagnostic.hints = info.hints;
 	if (info.fix) diagnostic.fix = info.fix;
 	if (info.details !== undefined) diagnostic.details = info.details;

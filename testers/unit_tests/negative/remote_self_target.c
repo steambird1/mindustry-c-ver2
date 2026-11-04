@@ -1,4 +1,8 @@
 /* MESSAGE: cannot target the declaration being defined */
+/* CODE: E_REMOTE_SELF_TARGET */
+/* STAGE: semantic */
+/* LINE: 13 */
+/* HINT: declare the owner first */
 /*
 remote(@this, x) needs a separate local owner variable. The declaration being
 defined only creates the remote binding, so using its own name as the target
