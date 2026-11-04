@@ -160,6 +160,8 @@ export class CodeGenerator extends ASTVisitor {
 		// can look at the tree while bodies are being emitted.
 		this.ast = ast;
 		this._subscriptCounts = new Map();
+		this._arrayAccessCounts = new Map();
+		this._arrayEscapeCache = new Map();
         // 将AST转换为目标代码
         let result = new Instruction(), success = true;
 		try {
@@ -631,6 +633,20 @@ export class CodeGenerator extends ASTVisitor {
 						symbol.needMemoryAllocation = false;
 						break;
 					}
+					/*
+					With `#pragma optimize(array)`, the layout is chosen here,
+					before memory is handed out. A register layout has no cells
+					of its own, so asking the allocator for them would waste the
+					very resource the cost model just spent.
+					*/
+					if (this.automaticArraySelectionAllowed(symbol)
+						&& this.arrayStyleFor(symbol).type !== 'traditional') {
+						symbol.size = type ? type.size : symbol.size;
+						symbol.implementAsPointer = true;
+						symbol.needMemoryAllocation = false;
+						symbol.accessThroughPointer = false;
+						break;
+					}
 					symbol.size = type ? type.size : symbol.size;
 					symbol.implementAsPointer = true;
 					symbol.needMemoryAllocation = true;
@@ -733,6 +749,14 @@ export class CodeGenerator extends ASTVisitor {
 			symbol.implementAsPointer = false;
 			symbol.accessThroughPointer = false;
 			symbol.memoryLocation = null;
+			/*
+			An automatic choice made before allocation may have been
+			`traditional`. It is no longer valid now that there is no memory,
+			so forget it and let the cost model see the new fact.
+			*/
+			if (symbol.chosenArrayStyle?.reason === 'automatic cost model') {
+				delete symbol.chosenArrayStyle;
+			}
 			// Pick the register layout now, while "no memory" is still true
 			this.arrayStyleFor(symbol);
 			return;
@@ -5656,6 +5680,95 @@ export class CodeGenerator extends ASTVisitor {
 		return null;
 	}
 
+	/**
+	 * Whether `#pragma optimize(array)` is active.
+	 * @returns {boolean}
+	 */
+	autoArrayOptimize() {
+		const config = this.compiler?.extraConfig?.getAttribute('optimizeOption') ?? {};
+		return config.doArrayOptimize === true;
+	}
+
+	/**
+	 * Whether this array may be moved out of memory by the automatic cost
+	 * model.
+	 *
+	 * Being able to index it is not enough: the address must never escape and
+	 * the array must never be handed to another function, because both are
+	 * decided before the generator picks a layout and both expect a block /
+	 * offset pair. An explicit `array("...")` request is not checked here --
+	 * the program asked for that layout, and semantic analysis has already
+	 * refused the combinations that cannot work.
+	 *
+	 * @param {SymbolEntry} symbol
+	 * @returns {boolean}
+	 */
+	automaticArraySelectionAllowed(symbol) {
+		if (!this.autoArrayOptimize()) return false;
+		if (symbol.isAddressed === true) return false;
+		if (symbol.arrayEscapes === true) return false;
+		if (symbol.isExtern === true || symbol.isRemote === true) return false;
+		if (symbol.isUnboundHandle === true || symbol.isCompoundLiteral === true) return false;
+		/*
+		A parameter's representation is settled from its call sites, before
+		this pass runs. Picking a register layout here would disagree with the
+		caller -- and with a call through a function pointer there are no notes
+		to disagree with in the first place.
+		*/
+		if (symbol.kind === 'parameter') return false;
+		if (this.arrayValueEscapes(symbol.name)) return false;
+		return this.forcedTraditionalReason(symbol) === null;
+	}
+
+	/**
+	 * Whether a bare occurrence of the array's name hands it over as a value
+	 * (a pointer, a function argument, a return value).
+	 *
+	 * `arrayEscapes` records this for direct calls, but a call through a
+	 * function pointer has no function symbol to leave a note on. Scanning the
+	 * small set of expression positions where a bare name means "the array
+	 * itself" catches both without guessing at types.
+	 *
+	 * @param {string} name
+	 * @returns {boolean}
+	 */
+	arrayValueEscapes(name) {
+		if (!this._arrayEscapeCache) this._arrayEscapeCache = new Map();
+		if (this._arrayEscapeCache.has(name)) return this._arrayEscapeCache.get(name);
+		let escapes = false;
+		const seen = new Set();
+		const walk = (node, parent = null, key = null) => {
+			if (escapes || !node || typeof node !== 'object' || seen.has(node)) return;
+			seen.add(node);
+			if (Array.isArray(node)) { node.forEach(child => walk(child, parent, key)); return; }
+			if (node.type === 'Identifier' && node.name === name) {
+				const isArgument = parent
+					&& (parent.type === 'FunctionCall' || parent.type === 'BuiltinCall')
+					&& Array.isArray(parent.arguments) && parent.arguments.includes(node);
+				const isInitializer = parent && parent.type === 'VariableDeclarator'
+					&& parent.initializer === node;
+				const isAssigned = parent && parent.type === 'AssignmentExpression'
+					&& parent.right === node;
+				const isReturned = parent && parent.type === 'ReturnStatement';
+				if (isArgument || isInitializer || isAssigned || isReturned) {
+					escapes = true;
+					return;
+				}
+			}
+			for (const childKey of ['children', 'statements', 'body', 'consequent', 'alternate',
+				'test', 'update', 'init', 'expression', 'argument', 'left', 'right',
+				'initializer', 'declarators', 'arguments', 'callee', 'functions',
+				'globalDeclarations']) {
+				const child = node[childKey];
+				if (Array.isArray(child)) child.forEach(c => walk(c, node, childKey));
+				else if (child && typeof child === 'object') walk(child, node, childKey);
+			}
+		};
+		walk(this.ast);
+		this._arrayEscapeCache.set(name, escapes);
+		return escapes;
+	}
+
 	arrayStyleFor(symbol) {
 		/*
 		An inlined parameter has no style of its own: it borrows the caller's.
@@ -5747,6 +5860,10 @@ export class CodeGenerator extends ASTVisitor {
 			requested = 'embedded';
 			this.addWarning?.('lookup arrays are disabled by #pragma id; using the register layout instead');
 		}
+		const autoSelect = !requested && this.automaticArraySelectionAllowed(symbol);
+		const accesses = autoSelect
+			? this.countArrayAccesses(symbol.name)
+			: { constant: 0, dynamic: 0 };
 		const style = selectArrayImplementation({
 			length, size,
 			isConst: symbol.isConst === true,
@@ -5758,7 +5875,10 @@ export class CodeGenerator extends ASTVisitor {
 			lookupNames: lookup.names,
 			singleCell: elementLayout?.kind === 'cell',
 			lookupCapable: elementLayout?.kind === 'cell'
-				|| packedStructLookupCompatible(elementType)
+				|| packedStructLookupCompatible(elementType),
+			autoSelect,
+			accessCount: accesses.dynamic,
+			constantAccessCount: accesses.constant
 		});
 		symbol.chosenArrayStyle = style;
 		symbol.lookupCategory = lookup.category;
@@ -5830,6 +5950,86 @@ export class CodeGenerator extends ASTVisitor {
 			}
 		}
 		return ret;
+	}
+
+	/**
+	 * The root identifier of a subscript chain (`a[i][j]` -> `a`), or `null`.
+	 *
+	 * @param {any} node
+	 * @returns {string?}
+	 */
+	arrayBaseOfSubscript(node) {
+		let current = node;
+		let guard = 0;
+		while (current && guard++ < 16) {
+			const object = current.children?.[0] ?? current.object ?? null;
+			if (current.type !== 'MemberExpression' || !object) return null;
+			if (object.type === 'Identifier') return String(object.name);
+			current = object;
+		}
+		return null;
+	}
+
+	/**
+	 * Whether a subscript is a literal the code generator will not have to
+	 * compute. More complicated constant expressions are counted as dynamic:
+	 * overestimating the traditional cost is safer than underestimating it.
+	 *
+	 * @param {any} node
+	 * @returns {boolean}
+	 */
+	isLiteralSubscript(node) {
+		if (!node) return false;
+		if (node.type === 'NumericLiteral') return true;
+		if (node.type === 'UnaryExpression'
+			&& (node.operator === '-' || node.operator === '+')) {
+			return this.isLiteralSubscript(node.argument);
+		}
+		return false;
+	}
+
+	/**
+	 * Count constant and dynamic accesses to one array in the whole program.
+	 *
+	 * A multi-dimensional subscript is ONE access (`a[i][j]`), so the walker
+	 * counts the outer node and then only descends into its index.
+	 *
+	 * @param {string} name
+	 * @returns {{constant: number, dynamic: number}}
+	 */
+	countArrayAccesses(name) {
+		if (!this._arrayAccessCounts) this._arrayAccessCounts = new Map();
+		if (this._arrayAccessCounts.has(name)) return this._arrayAccessCounts.get(name);
+		const result = { constant: 0, dynamic: 0 };
+		const seen = new Set();
+		const walk = node => {
+			if (!node || typeof node !== 'object' || seen.has(node)) return;
+			seen.add(node);
+			if (Array.isArray(node)) { node.forEach(walk); return; }
+			let counted = false;
+			if (node.type === 'MemberExpression' && node.getAttribute?.('computed')
+				&& this.arrayBaseOfSubscript(node) === name) {
+				const subscript = node.children?.[1] ?? node.property ?? null;
+				if (this.isLiteralSubscript(subscript)) result.constant++;
+				else result.dynamic++;
+				// The base chain belongs to this same access; only the index may
+				// contain another array access (`a[b[i]]`).
+				if (subscript) walk(subscript);
+				counted = true;
+			}
+			if (counted) return;
+			for (const key of ['children', 'statements', 'body', 'consequent', 'alternate',
+				'test', 'update', 'init', 'expression', 'argument', 'left', 'right',
+				'initializer', 'declarators', 'arguments', 'callee', 'functions',
+				'globalDeclarations']) {
+				const c = node[key];
+				if (Array.isArray(c)) c.forEach(walk);
+				else if (c && typeof c === 'object') walk(c);
+			}
+		};
+		walk(this.ast);
+		this._arrayAccessCounts.set(name, result);
+		return result;
 	}
 
 	/**

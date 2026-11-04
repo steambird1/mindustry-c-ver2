@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 271 passed, 0 failed (167 shape assertions, 1209 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 272 passed, 0 failed (170 shape assertions, 1211 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 106 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 16 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 13 passed, 0 failed, 2 exempt |
@@ -103,6 +103,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | packed 4/8/16-bit header (§7.47) | **done**; `packed.h` cell accessors and declaration macros, tests t255/t256 | §7.47 |
 | remote array binding validation (§7.48) | **done**; reject `remote` arrays initialized by local `array(...)`, document `remote(dev, name, layout)`; tests t257/t258 + negatives | §7.48 |
 | structured diagnostics (§7.49) | **done**; stage/code/range/related/hints, human token names, parser placeholders, dedupe/sort, `runsim.diagnostics`, negative CODE/LINE checks, test `parser_error_structured.c` | §7.49 |
+| automatic array cost model (§7.50) | **done**; `#pragma optimize(array)` compares setup, constant/dynamic access and memory costs, `array()` still wins, test t259 | §7.50 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -2134,3 +2135,22 @@ called `f` even when `a` was false.
   `fn_arity_mismatch.c` check related declaration notes.
 - Still follow-up: parser error recovery/synchronization and broader `related`
   coverage for calls and member errors.
+
+### 7.50 Automatic array cost model
+
+- `#pragma optimize(array)` now actually selects a layout instead of always
+  taking `traditional` whenever memory fits. `selectArrayImplementation` prices
+  setup, constant accesses, dynamic accesses and the cells the traditional
+  layout occupies; an explicit `array("...")` request still wins.
+- The access counts come from a whole-program AST scan. Constant subscripts are
+  charged separately because a traditional access still forms an address,
+  while a register layout writes or reads one element register. The scan counts
+  a multi-dimensional subscript once, not once per dimension.
+- Automatic selection is deliberately conservative: arrays whose address is
+  taken, that decay into a pointer, that are passed as an argument, that are
+  `extern`/`remote`, or that are parameters keep the layout semantic analysis
+  already committed to. A register choice also skips memory allocation, which
+  is what makes the cost model more than an instruction-count exercise.
+- Cases: t259 (a written-and-runtime-indexed array chooses the register layout
+  and leaves no `_block`/`_pos` pair; an explicit `array("traditional")` still
+  keeps memory).

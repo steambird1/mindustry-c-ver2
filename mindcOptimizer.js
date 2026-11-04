@@ -2480,6 +2480,12 @@ export class Optimizer extends ASTVisitor {
 			|| (left.dataType && left.dataType.kind === 'pointer'));
 		if (!leftIsPointer) return;
 		const source = this.baseSymbolOf(right);
+		/*
+		`int *q = a;` decays the array to its address. A register layout has
+		no address, so this is exactly the same fact as `&a` for the purpose
+		of choosing a layout -- record it before the generator decides.
+		*/
+		if (source?.myType?.()?.kind === 'array') source.isAddressed = true;
 		if (this.isFoldableArray(source)) this.invalidateConstantArray(source);
 	}
 

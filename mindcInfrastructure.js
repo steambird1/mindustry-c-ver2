@@ -2825,11 +2825,61 @@ class EncodedSlotRet extends VariableRet {
  */
 export function accessCostOf(kind, length, digits = 1) {
 	switch (kind) {
-		case 'traditional': return 4;				// getlink + read/write + address
-		case 'embedded.divided': return Math.max(1, length);	// a `select` per element
+		/*
+		The traditional layout is not one instruction: a dynamic subscript
+		copies the block/offset pair, calls the pointer walker and then reads
+		or writes through memory. Seven is the measured steady-state cost of
+		one such access, after the fixed block/offset setup is paid.
+		*/
+		case 'traditional': return 7;
+		// `set` plus one `select` per remaining element
+		case 'embedded.divided': return Math.max(2, length + 2);
 		case 'embedded.lookup': return 3;			// lookup + sensor + read/write
 		case 'encoded': return digits <= 1 ? 2 : 3 * digits - 1;
 		default: return 4;
+	}
+}
+
+/**
+ * Cost of an access whose subscript is a compile-time constant.
+ *
+ * A constant subscript does not need the pointer walker, but the traditional
+ * layout still has to form an address and read/write a memory cell. The
+ * register layouts address the element directly, so they are much cheaper --
+ * which is why a program that writes every element of a small array at boot
+ * is better off with `embedded_divided`.
+ *
+ * @param {string} kind
+ * @returns {number}
+ */
+export function constantAccessCostOf(kind) {
+	switch (kind) {
+		case 'traditional': return 6;
+		case 'embedded.divided': return 2;
+		case 'embedded.lookup': return 2;
+		case 'encoded': return 2;
+		default: return 2;
+	}
+}
+
+/**
+ * Fixed cost of making one array usable in a layout.
+ *
+ * `traditional` pays for its block/offset pair and for every element written
+ * to memory. `embedded.divided` pays one `set` per initialized element.
+ * `lookup` and `encoded` are selected by the subscript itself, so they have
+ * no per-array setup of their own.
+ *
+ * @param {string} kind
+ * @param {number} initialized How many elements the initializer writes
+ * @returns {number}
+ */
+export function setupCostOf(kind, initialized = 0) {
+	const writes = Math.max(0, Number(initialized) || 0);
+	switch (kind) {
+		case 'traditional': return 1 + writes;
+		case 'embedded.divided': return writes;
+		default: return 0;
 	}
 }
 
@@ -4737,32 +4787,94 @@ export function selectArrayImplementation(info) {
 	const lookupNames = info.lookupNames ?? null;
 	const lookupCapable = info.lookupCapable !== false;
 	const singleCell = info.singleCell !== false;
+	const values = Array.isArray(info.values) ? info.values : null;
 
 	if (requested) return requested;
 
 	const cells = length * size;
-	if (cells <= memory) {
-		return { type: 'traditional', implement: null, reason: 'memory available' };
+	/*
+	The old, conservative path is kept for programs that did not ask for
+	automatic array optimisation. It is also what memory exhaustion used to
+	do, and existing programs depend on that choice.
+	*/
+	if (info.autoSelect !== true) {
+		if (cells <= memory) {
+			return { type: 'traditional', implement: null, reason: 'memory available' };
+		}
+		// No (or not enough) memory: consider the layouts that need none
+		const candidates = [];
+		if (version >= 150 && lookupCapable && lookupNames && lookupNames.length >= length) {
+			candidates.push({ type: 'embedded', implement: 'lookup',
+				cost: accessCostOf('embedded.lookup', length) });
+		}
+		if (isConst && singleCell) {
+			const mapping = buildEncodedMapping(values ?? new Array(length).fill(0));
+			candidates.push({ type: 'encoded', implement: null,
+				cost: accessCostOf('encoded', length, mapping.digits) });
+		}
+		candidates.push({ type: 'embedded', implement: 'divided',
+			cost: accessCostOf('embedded.divided', length) });
+		// Fewest instructions first
+		candidates.sort((x, y) => x.cost - y.cost);
+		const affordable = candidates.find(c => c.cost <= budget);
+		if (affordable) return { ...affordable, reason: 'out of memory' };
+		// Nothing fits the budget either: instructions matter more than memory
+		return { ...candidates[0], reason: 'budget exhausted, instructions take priority' };
 	}
-	// No (or not enough) memory: consider the layouts that need none
+
+	/*
+	`#pragma optimize(array)` asks for the cheapest total, not merely for a
+	layout that happens to fit. Setup, every dynamic access and the memory the
+	traditional layout occupies are all priced; the access count comes from a
+	whole-program scan, so `a[i]` inside a loop counts the same as it always
+	did (the loop weight is deliberately left out for now).
+	*/
+	const accessCount = Math.max(0, Number(info.accessCount) || 0);
+	const constantAccessCount = Math.max(0, Number(info.constantAccessCount) || 0);
+	const memoryWeight = Number.isFinite(info.memoryWeight)
+		? info.memoryWeight : 0.25;
+	const initialized = values ? Math.min(values.length, length) : 0;
 	const candidates = [];
-	if (version >= 150 && lookupCapable && lookupNames && lookupNames.length >= length) {
-		candidates.push({ type: 'embedded', implement: 'lookup',
-			cost: accessCostOf('embedded.lookup', length) });
+	const add = (type, implement, kind, extra = {}) => {
+		const cost = setupCostOf(kind, initialized)
+			+ accessCount * accessCostOf(kind, length, extra.digits)
+			+ constantAccessCount * constantAccessCostOf(kind)
+			+ ((kind === 'traditional') ? cells * memoryWeight : 0);
+		candidates.push({ type, implement, cost, ...extra });
+	};
+
+	if (cells <= memory && length > 0) add('traditional', null, 'traditional');
+	/*
+	Automatic lookup is only safe for a CONSTANT array whose initial values are
+	really content ids. A mutable lookup array stores content names, not
+	arbitrary numbers, so choosing it automatically would change what the
+	program means.
+	*/
+	const lookupValuesOk = !values || values.every(value => {
+		const number = Number(value);
+		return Number.isInteger(number) && number >= 0 && number < (lookupNames?.length ?? 0);
+	});
+	if (isConst && version >= 150 && lookupCapable && lookupNames
+		&& lookupNames.length >= length && lookupValuesOk) {
+		add('embedded', 'lookup', 'embedded.lookup');
 	}
 	if (isConst && singleCell) {
-		const mapping = buildEncodedMapping(info.values ?? new Array(length).fill(0));
-		candidates.push({ type: 'encoded', implement: null,
-			cost: accessCostOf('encoded', length, mapping.digits) });
+		const mapping = buildEncodedMapping(values ?? new Array(length).fill(0));
+		add('encoded', null, 'encoded', { digits: mapping.digits });
 	}
-	candidates.push({ type: 'embedded', implement: 'divided',
-		cost: accessCostOf('embedded.divided', length) });
-	// Fewest instructions first
+	if (length > 0) add('embedded', 'divided', 'embedded.divided');
+
+	if (candidates.length === 0) {
+		return { type: 'traditional', implement: null, reason: 'memory available' };
+	}
 	candidates.sort((x, y) => x.cost - y.cost);
-	const affordable = candidates.find(c => c.cost <= budget);
-	if (affordable) return { ...affordable, reason: 'out of memory' };
-	// Nothing fits the budget either: instructions matter more than memory
-	return { ...candidates[0], reason: 'budget exhausted, instructions take priority' };
+	const chosen = candidates[0];
+	return {
+		type: chosen.type,
+		implement: chosen.implement,
+		reason: 'automatic cost model',
+		cost: chosen.cost
+	};
 }
 
 /**
