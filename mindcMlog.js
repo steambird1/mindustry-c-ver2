@@ -212,6 +212,89 @@ function hasAnotherUseAfter(leaves, startPos, target) {
 }
 
 /**
+ * @param {string?} token
+ * @returns {boolean}
+ */
+function isIntegerText(token) {
+	return typeof token === 'string' && /^-?\d+$/.test(token);
+}
+
+/**
+ * Whether `token` is already known to hold an integer value.
+ *
+ * @param {string?} token
+ * @param {Set<string>} integral
+ * @returns {boolean}
+ */
+function isIntegralValue(token, integral) {
+	return isIntegerText(token) || (typeof token === 'string' && integral.has(token));
+}
+
+/**
+ * Remove a `floor`/`ceil`/`round` whose input is already integral.
+ *
+ * This is the product-level half of A3. The generator removes the floors it
+ * can prove redundant; this catches the ones introduced by a helper or an
+ * inlined expression after the generator's type facts were lost.
+ *
+ * @param {any[]} block
+ * @param {Set<any>} protectedNodes
+ * @returns {void}
+ */
+function foldRedundantFloors(block, protectedNodes) {
+	const integral = new Set();
+	for (const leaf of block) {
+		if (!leaf?.content) continue;
+		const tokens = tokenize(leaf.content);
+		const index = targetIndex(tokens);
+		if (index < 0) continue;
+		const target = tokens[index];
+		if (!target || target === '@counter') continue;
+
+		if (tokens[0] === 'op' && ['floor', 'ceil', 'round'].includes(tokens[1])
+			&& target === tokens[3] && isIntegralValue(tokens[3], integral)
+			&& !protectedNodes.has(leaf)) {
+			leaf.content = '';
+			continue;
+		}
+
+		let fact = false;
+		switch (tokens[0]) {
+			case 'set':
+				fact = isIntegralValue(tokens[2], integral);
+				break;
+			case 'select':
+				fact = tokens.length >= 7
+					&& isIntegralValue(tokens[5], integral)
+					&& isIntegralValue(tokens[6], integral);
+				break;
+			case 'op': {
+				const operation = tokens[1];
+				const operands = [tokens[3], tokens[4]].filter(value => value && value !== 'x');
+				if (['floor', 'ceil', 'round', 'and', 'or', 'xor', 'shl', 'shr',
+					'ushr', 'idiv', 'equal', 'notEqual', 'lessThan', 'lessThanEq',
+					'greaterThan', 'greaterThanEq', 'strictEqual'].includes(operation)) {
+					fact = true;
+				} else if (['add', 'sub', 'mul', 'mod', 'abs', 'min', 'max'].includes(operation)) {
+					fact = operands.every(value => isIntegralValue(value, integral));
+				}
+				break;
+			}
+			case 'lookup':
+			case 'getlink':
+				fact = true;
+				break;
+			case 'read':
+			case 'sensor':
+				fact = false;
+				break;
+		}
+		if (fact) integral.add(target);
+		else integral.delete(target);
+	}
+}
+
+/**
  * Optimise one straight-line run.
  *
  * @param {any[]} block
@@ -220,6 +303,7 @@ function hasAnotherUseAfter(leaves, startPos, target) {
  * @returns {void}
  */
 function optimizeBlock(block, protectedNodes, leaves) {
+	foldRedundantFloors(block, protectedNodes);
 	const versions = new Map();
 	const cse = new Map();
 	const versionOf = name => versions.get(name) ?? 0;

@@ -4160,28 +4160,102 @@ export class CodeGenerator extends ASTVisitor {
 	}
 
 	/**
-	 * Whether an expression returning a float-valued type is nevertheless
-	 * guaranteed to be integral, so converting it to `int` needs no `op floor`.
+	 * Whether an expression's value is guaranteed to be an integer, so an
+	 * implicit conversion to `int` needs no `op floor`.
 	 *
-	 * Only builtins whose result is integral for ALL inputs, or whose integer
-	 * arguments make the result integral, are listed. `sqrt`, `pow`, `rand`,
-	 * `sin` and friends are deliberately absent.
+	 * This is the generator's small integral lattice. Types settle the easy
+	 * cases; the rest follows arithmetic and bitwise operators, comparisons,
+	 * conditionals and casts. `sqrt`, `pow`, `rand`, `sin` and ordinary
+	 * division are deliberately absent.
 	 *
 	 * @param {ASTNode} node
 	 * @returns {boolean}
 	 */
 	isProvablyIntegralExpression(node) {
-		const name = node?.functionName ?? node?.callee?.name ?? null;
-		if (!name) return false;
-		if (['floor', 'ceil', 'round'].includes(name)) return true;
-		if (!['abs', 'min', 'max'].includes(name)) return false;
-		const args = node.arguments ?? [];
-		if (args.length === 0) return false;
-		return args.every(arg => {
-			const type = arg?.dataType;
-			if (!type) return false;
-			return this.semantic.isIntegerType(type.name) || type.name === 'bool';
-		});
+		return this.isIntegralExpression(node, new Set());
+	}
+
+	/**
+	 * @param {ASTNode} node
+	 * @param {Set<any>} seen
+	 * @returns {boolean}
+	 */
+	isIntegralExpression(node, seen) {
+		if (!node || typeof node !== 'object' || seen.has(node)) return false;
+		seen.add(node);
+		/*
+		`a / b` is an INT in C, but the VM's `div` is floating point. Trusting
+		the static type here would delete the floor and turn `7 / 2` into 3.5.
+		Only division by ±1 is exact; every other division is left alone.
+		*/
+		if (node.type === 'BinaryExpression' && node.operator === '/') {
+			const left = node.left ?? node.children?.[0] ?? null;
+			const right = node.right ?? node.children?.[1] ?? null;
+			return this.isIntegralExpression(left, seen)
+				&& this.isIntegralLiteral(right)
+				&& Math.abs(Number(right.value ?? right.raw)) === 1;
+		}
+		const type = node.dataType;
+		if (type && type.isTypeInfo
+			&& (this.semantic.isIntegerType(type.name) || type.name === 'bool')) {
+			return true;
+		}
+		if (node.type === 'NumericLiteral') {
+			const value = node.value ?? node.raw ?? node.name;
+			return Number.isInteger(Number(value));
+		}
+		if (node.type === 'CharacterLiteral') return true;
+		switch (node.type) {
+			case 'UnaryExpression':
+				if (node.operator === '!') return true;
+				if (['+', '-', '~'].includes(node.operator)) {
+					return this.isIntegralExpression(node.argument, seen);
+				}
+				return false;
+			case 'BinaryExpression': {
+				const left = node.left ?? node.children?.[0] ?? null;
+				const right = node.right ?? node.children?.[1] ?? null;
+				if (['+', '-', '*', '%', '&', '|', '^', '<<', '>>'].includes(node.operator)) {
+					return this.isIntegralExpression(left, seen)
+						&& this.isIntegralExpression(right, seen);
+				}
+				// Integer division by ±1 is exact; any other divisor can cut.
+				if (node.operator === '/' && this.isIntegralExpression(left, seen)
+					&& this.isIntegralLiteral(right) && Math.abs(Number(right.value ?? right.raw)) === 1) {
+					return true;
+				}
+				if (['==', '!=', '<', '<=', '>', '>=', '&&', '||'].includes(node.operator)) {
+					return true;
+				}
+				return false;
+			}
+			case 'ConditionalExpression':
+				return this.isIntegralExpression(node.consequent, seen)
+					&& this.isIntegralExpression(node.alternate, seen);
+			case 'CastExpression':
+				return this.isIntegralExpression(node.expression, seen);
+			case 'FunctionCall':
+			case 'BuiltinCall': {
+				const name = node.functionName ?? node.callee?.name ?? null;
+				if (!name) return false;
+				if (['floor', 'ceil', 'round'].includes(name)) return true;
+				if (!['abs', 'min', 'max'].includes(name)) return false;
+				const args = node.arguments ?? [];
+				if (args.length === 0) return false;
+				return args.every(arg => this.isIntegralExpression(arg, seen));
+			}
+			default:
+				return false;
+		}
+	}
+
+	/**
+	 * @param {ASTNode} node
+	 * @returns {boolean}
+	 */
+	isIntegralLiteral(node) {
+		if (!node || node.type !== 'NumericLiteral') return false;
+		return Number.isInteger(Number(node.value ?? node.raw ?? node.name));
 	}
 
 	/**
@@ -4607,7 +4681,7 @@ export class CodeGenerator extends ASTVisitor {
 		// The VM's `div` is a floating point division: integers need an explicit floor.
 		if (node.operator === '/' && node.dataType
 			&& this.semantic.isTypeCompatibleForAny(node.dataType, ['int', 'long', 'signed', 'unsigned', 'bool'], true)) {
-			result = this.applyFloor(result, node.dataType);
+			result = this.applyFloor(result, node.dataType, node);
 		}
 		return result;
 	}
@@ -4658,7 +4732,7 @@ export class CodeGenerator extends ASTVisitor {
 		}
 
 		let value = ExportRet(glob, this.visit(source), sourceType);
-		return this.convertCastValue(value, sourceType, target);
+		return this.convertCastValue(value, sourceType, target, source);
 	}
 
 	/**
@@ -4668,9 +4742,10 @@ export class CodeGenerator extends ASTVisitor {
 	 * @param {import('./mindcInfrastructure.js').VariableRet} value
 	 * @param {import('./mindcSemantic.js').TypeInfo?} sourceType
 	 * @param {import('./mindcSemantic.js').TypeInfo?} target
+	 * @param {ASTNode?} sourceNode The expression being converted
 	 * @returns {import('./mindcInfrastructure.js').VariableRet}
 	 */
-	convertCastValue(value, sourceType, target) {
+	convertCastValue(value, sourceType, target, sourceNode = null) {
 		if (!target || !sourceType || this.semantic.isSameType(target, sourceType)) {
 			return value.get();
 		}
@@ -4684,8 +4759,12 @@ export class CodeGenerator extends ASTVisitor {
 		if (this.semantic.isSameType(sourceType, intType) && target.kind === 'pointer') {
 			return value.convertTo(target);
 		}
-		// float -> integer : truncate
+		// float -> integer : truncate, unless the value is already integral
 		if (['float', 'double'].includes(sourceType.name)) {
+			if (this.semantic.isIntegerType(target.name)
+				&& this.isProvablyIntegralExpression(sourceNode)) {
+				return value.get();
+			}
 			return value.convertTo(target);
 		}
 		// -> bool
@@ -4726,7 +4805,7 @@ export class CodeGenerator extends ASTVisitor {
 			if (!child) return new ImmediateRet(glob, '0', target);
 			const sourceType = child.dataType ?? this.semantic.getExpressionType(child);
 			const value = ExportRet(glob, this.visit(child), sourceType);
-			return this.convertCastValue(value, sourceType, target);
+			return this.convertCastValue(value, sourceType, target, child);
 		}
 
 		const initialization = new Instruction();
@@ -4787,7 +4866,7 @@ export class CodeGenerator extends ASTVisitor {
 			let value = child
 				? ExportRet(glob, this.visit(child), sourceType)
 				: new ImmediateRet(glob, '0', target);
-			value = this.convertCastValue(value, sourceType, target);
+			value = this.convertCastValue(value, sourceType, target, child);
 			initialization.concat(this.writeSymbol(symbol, value));
 		}
 
@@ -5223,9 +5302,12 @@ export class CodeGenerator extends ASTVisitor {
 	 * 
 	 * @param {VariableRet} value 
 	 * @param {TypeInfo?} type 
+	 * @param {ASTNode?} sourceNode The expression that produced `value`
 	 * @returns {VariableRet}
 	 */
-	applyFloor(value, type = null) {
+	applyFloor(value, type = null, sourceNode = null) {
+		// An integer-valued expression needs no truncation.
+		if (sourceNode && this.isProvablyIntegralExpression(sourceNode)) return value;
 		const glob = this.glob;
 		const name = value.name;
 		const resultType = type ?? value.type;

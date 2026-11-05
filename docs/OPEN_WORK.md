@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 276 passed, 0 failed (179 shape assertions, 1223 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 278 passed, 0 failed (184 shape assertions, 1232 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 106 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 16 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 14 passed, 0 failed, 2 exempt |
@@ -106,6 +106,8 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | automatic array cost model (§7.50) | **done**; `#pragma optimize(array)` compares setup, constant/dynamic access and memory costs, `array()` still wins, test t259 | §7.50 |
 | product-level peepholes (§7.51) | **done**; `mindcMlog.js` runs before line numbering, folds encoded corrections and removes dead internal temporaries, test t260 | §7.51 |
 | arithmetic-progression const arrays (§7.52) | **done**; auto-selected encoded arrays become `base + i * step`, explicit `array("encoded")` still uses a table, test t262 | §7.52 |
+| quadratic / packed const arrays (§7.53) | **done**; degree-2 polynomials and ≤53-bit packed integers, test t264 | §7.53 |
+| integral facts remove redundant `floor` (§7.54) | **done**; generator lattice plus mlog fallback, test t265 | §7.54 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -2202,3 +2204,34 @@ called `f` even when `a` was false.
   the same distinction as `array("...")` winning over the cost model.
 - Case: t262 uses `{78..90}` (step 1) and `{2,5,8,11,14}` (base and step) and
   asserts no `read "...` table access remains.
+
+### 7.53 Quadratic and packed constant arrays
+
+- `polynomialArrayFormula` extends the same idea to degree-2 integer
+  sequences. With a constant second difference `2q`, values are
+  `base + i * (first - q) + q * i * i`; an odd second difference is rejected
+  because its closed form needs an inexact division.
+- `packedArrayConstant` stores `value - min` in `ceil(log2(max-min+1))` bits.
+  When `length * bits <= 53`, the whole array is one safe integer; a dynamic
+  read is `mul` (index * bits), `shr`, `and` and an optional `add min`.
+- `compactConstantArrayPlan` compares the estimated formula/bitmask cost with
+  the table cost and only replaces a compiler-chosen `encoded` layout when it
+  is cheaper. Explicit `array("encoded", ...)` still bypasses this path.
+- Case: t264 uses `{0,1,4,9,16}` (one `mul`) and five 8-bit values packed into
+  one integer, and checks the extracted value at index 4.
+
+### 7.54 Integral facts and redundant `floor`
+
+- The generator now has a small integral lattice in
+  `isIntegralExpression`: integer-typed expressions, integer literals, integer
+  arithmetic/bitwise operations, comparisons, conditionals, casts, and
+  `floor`/`ceil`/`round`/`abs`/`min`/`max` over integral arguments.
+- Ordinary division is deliberately outside the lattice because the VM's
+  `div` is floating point; only division by literal ±1 is exact. This keeps
+  `7 / 2` truncating to 3 instead of becoming 3.5.
+- `convertCastValue` and `applyFloor` consult the lattice, so an explicit cast
+  from an integral float-typed expression no longer emits `op floor`.
+- B5 also runs in `mindcMlog`: a block-local dataflow tracks integral registers
+  and removes `op floor/ceil/round t t null` when `t` is already integral.
+- Case: t265 checks `max(int,int) * 1.0` and division by 1 need no floor;
+  t10/t157 continue to protect ordinary integer division.
