@@ -5932,7 +5932,9 @@ export class CodeGenerator extends ASTVisitor {
 			baseName: symbol.getAssemblySymbol(),
 			category: symbol.lookupCategory ?? 'item',
 			names: this.lookupNamesOf(length, {}, symbol).names,
-			values: symbol.arrayInitialValues ?? new Array(length).fill(0)
+			values: symbol.arrayInitialValues ?? new Array(length).fill(0),
+			allowFormula: symbol.arrayImplementationAuto === true
+				|| style.reason === 'automatic cost model'
 		});
 		/*
 		For `embedded.divided` every access emits one `select` per element, so

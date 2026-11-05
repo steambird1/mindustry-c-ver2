@@ -5648,6 +5648,13 @@ export class Optimizer extends ASTVisitor {
 					*/
 					if (!symbol.requestedArrayImplementation) {
 						symbol.requestedArrayImplementation = 'encoded';
+						/*
+						This is the compiler's choice, not an `array("encoded")`
+						request. That distinction lets the generator use a
+						formula for an arithmetic progression while an explicit
+						request still has to produce a string table.
+						*/
+						symbol.arrayImplementationAuto = true;
 					}
 					symbol.isConst = true;
 				}

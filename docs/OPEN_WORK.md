@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 274 passed, 0 failed (173 shape assertions, 1217 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 275 passed, 0 failed (177 shape assertions, 1219 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 106 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 16 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 14 passed, 0 failed, 2 exempt |
@@ -105,6 +105,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | structured diagnostics (§7.49) | **done**; stage/code/range/related/hints, human token names, parser placeholders, dedupe/sort, `runsim.diagnostics`, negative CODE/LINE checks, test `parser_error_structured.c` | §7.49 |
 | automatic array cost model (§7.50) | **done**; `#pragma optimize(array)` compares setup, constant/dynamic access and memory costs, `array()` still wins, test t259 | §7.50 |
 | product-level peepholes (§7.51) | **done**; `mindcMlog.js` runs before line numbering, folds encoded corrections and removes dead internal temporaries, test t260 | §7.51 |
+| arithmetic-progression const arrays (§7.52) | **done**; auto-selected encoded arrays become `base + i * step`, explicit `array("encoded")` still uses a table, test t262 | §7.52 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -2185,3 +2186,18 @@ called `f` even when `a` was false.
   inlined call's now-unused name-pointer temporary is not emitted. t118 keeps
   `use` out of line because that construction is exactly what the
   dead-temporary pass removes.
+
+### 7.52 Arithmetic-progression constant arrays
+
+- `const int a[] = {78,79,80,...}` is `78 + i`, not a base-57 string table.
+  The optimizer marks the layout it chose automatically
+  (`arrayImplementationAuto`), and the generator checks the initial values with
+  `linearArrayFormula`.
+- The formula is exact for integer values: `step === 1` emits one `op add`,
+  `base === 0` emits one `op mul`, a constant/zero-step formula emits one
+  `set`, and the general case emits `mul` + `add`.
+- An explicit `array("encoded", ...)` is deliberately NOT rewritten: t30
+  asserts that a named encoded array really produces a string table. This is
+  the same distinction as `array("...")` winning over the cost model.
+- Case: t262 uses `{78..90}` (step 1) and `{2,5,8,11,14}` (base and step) and
+  asserts no `read "...` table access remains.

@@ -2812,6 +2812,93 @@ class EncodedSlotRet extends VariableRet {
 	}
 }
 
+/**
+ * Detect a constant array that is an arithmetic progression.
+ *
+ * `{78,79,80,...}` is `78 + i`, and `{2,5,8,...}` is `2 + 3*i`: two
+ * instructions at worst, versus a string table read and decode. Only integer
+ * values are accepted so the arithmetic is exact in every target version.
+ *
+ * @param {number[]} values
+ * @returns {{base: number, step: number}?}
+ */
+export function linearArrayFormula(values) {
+	if (!Array.isArray(values) || values.length === 0) return null;
+	const numbers = values.map(Number);
+	if (numbers.some(value => !Number.isInteger(value))) return null;
+	const base = numbers[0];
+	const step = numbers.length > 1 ? numbers[1] - base : 0;
+	if (!Number.isInteger(step)) return null;
+	for (let i = 0; i < numbers.length; i++) {
+		if (numbers[i] !== base + i * step) return null;
+	}
+	return { base, step };
+}
+
+/**
+ * A constant array held as `base + index * step`.
+ */
+export class FormulaArrayRet extends ArrayRet {
+
+	/**
+	 * @param {Globals} glob
+	 * @param {number[]} values
+	 * @param {TypeInfo?} type
+	 * @param {{base: number, step: number}} formula
+	 */
+	constructor(glob, values, type, formula) {
+		super(glob, [], '__formula', type, false, values.length);
+		this.values = values;
+		this.formula = formula;
+	}
+
+	/** @param {VariableRet | number | string} index */
+	element(index) {
+		const glob = this.glob;
+		const operand = operandOf(glob, index);
+		if (operand.constant) {
+			const value = this.values[operand.value];
+			if (value === undefined) throw new InfrastructureNotImplementedExpection('subscript out of range');
+			return new ImmediateRet(glob, String(value), this.elementTypeInfo);
+		}
+		return new FormulaSlotRet(glob, this, operand, this.elementTypeInfo);
+	}
+}
+
+/** One element of a `FormulaArrayRet`, computed from the index. */
+class FormulaSlotRet extends VariableRet {
+
+	constructor(glob, array, operand, type) {
+		super(glob, operand.instructions, array.name, type, false);
+		this.array = array;
+		this.operand = operand;
+	}
+
+	get() {
+		const glob = this.glob;
+		const { base, step } = this.array.formula;
+		const target = glob.tmp(this.type);
+		const parts = [this.instructions];
+		if (step === 0) {
+			parts.push(InstructionBuilder.set(target, String(base)));
+		} else if (step === 1) {
+			parts.push(InstructionBuilder.op('add', target, this.operand.name, String(base)));
+		} else if (base === 0) {
+			parts.push(InstructionBuilder.op('mul', target, this.operand.name, String(step)));
+		} else {
+			const scaled = glob.tmp(null);
+			parts.push(InstructionBuilder.op('mul', scaled, this.operand.name, String(step)));
+			parts.push(InstructionBuilder.op('add', target, scaled, String(base)));
+		}
+		return valueClassOf(glob, this.type).create(glob, parts, target, this.type, true);
+	}
+
+	set(other) {
+		throw new InfrastructureNotImplementedExpection(
+			'a formula array is constant and cannot be written to');
+	}
+}
+
 /* ------------------------------------------------------------------ *
  * Choosing a representation
  * ------------------------------------------------------------------ */
@@ -4931,9 +5018,19 @@ export function arrayRetOf(glob, style, options = {}) {
 		return new TraditionalArrayRet(glob, options.pointer, type, length);
 	}
 	if (style.type === 'encoded') {
+		const values = options.values ?? new Array(length).fill(0);
+		/*
+		When the compiler chose `encoded`, an arithmetic progression is better
+		served by a formula. An explicit `array("encoded", ...)` keeps its
+		string table: that is what the program asked for (see t30).
+		*/
+		if (options.allowFormula === true) {
+			const formula = linearArrayFormula(values);
+			if (formula) return new FormulaArrayRet(glob, values, type, formula);
+		}
 		// `reason === 'requested'`: the program named this implementation, so the
 		// string table may not be replaced by a `select` chain
-		return new EncodedArrayRet(glob, options.values ?? new Array(length).fill(0), type,
+		return new EncodedArrayRet(glob, values, type,
 			null, style.reason === 'requested');
 	}
 	// style.type === 'embedded'
