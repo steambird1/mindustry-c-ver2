@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 275 passed, 0 failed (177 shape assertions, 1219 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 276 passed, 0 failed (179 shape assertions, 1223 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 106 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 16 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 14 passed, 0 failed, 2 exempt |
@@ -2172,7 +2172,8 @@ called `f` even when `a` was false.
   unresolved `{placeholders}`, `@counter` writes/reads, and unknown opcodes
   stop a run.
 - B4: an encoded access ends with `op sub t t <offset>`. When the next
-  instruction is `op add/sub r t <constant>` and `t` has no other reader, the
+  instruction is `op add/sub r t <constant>`, a comparison `op <cmp> r t C`,
+  or a direct `jump`/`select` comparison and `t` has no other reader, the
   correction is folded into that constant and the `sub` disappears.
 - B3 (conservative): pure writes to generated `__...` / `__tempsym...`
   temporaries that nothing in the whole program reads are removed. User
@@ -2181,11 +2182,11 @@ called `f` even when `a` was false.
 - CSE is limited to deterministic `op` / `select` / `lookup` / `getlink`
   expressions. `read` and `sensor` are deliberately excluded: another
   processor can change memory or a sensor's subject between two instructions.
-- Cases: t260 asserts that the encoded correction is folded
-  (`op add ... -34`) and no `op sub ... 35` remains; t261 asserts that an
-  inlined call's now-unused name-pointer temporary is not emitted. t118 keeps
-  `use` out of line because that construction is exactly what the
-  dead-temporary pass removes.
+- Cases: t260 asserts that the arithmetic encoded correction is folded
+  (`op add ... -34`); t263 asserts the comparison form (`op lessThan ... 44`);
+  t261 asserts that an inlined call's now-unused name-pointer temporary is not
+  emitted. t118 keeps `use` out of line because that construction is exactly
+  what the dead-temporary pass removes.
 
 ### 7.52 Arithmetic-progression constant arrays
 

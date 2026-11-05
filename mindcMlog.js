@@ -281,7 +281,8 @@ function optimizeBlock(block, protectedNodes, leaves) {
 		if (!next?.content || protectedNodes.has(next)) continue;
 		const nextTokens = tokenize(next.content);
 		if (nextTokens.length !== 5 || nextTokens[0] !== 'op'
-			|| !['add', 'sub'].includes(nextTokens[1])
+			|| !['add', 'sub', 'lessThan', 'lessThanEq', 'greaterThan',
+				'greaterThanEq', 'equal', 'notEqual', 'strictEqual'].includes(nextTokens[1])
 			|| nextTokens[3] !== target || !/^-?\d+$/.test(nextTokens[4])) continue;
 		/*
 		Is this the only read of the intermediate before it is overwritten?
@@ -292,13 +293,53 @@ function optimizeBlock(block, protectedNodes, leaves) {
 		if (nextPos < 0 || hasAnotherUseAfter(leaves, nextPos + 1, target)) continue;
 		/*
 		`corrected = raw - K`. Folding into `corrected + C` gives
-		`raw + (C - K)`; folding into `corrected - C` gives
-		`raw - (C + K)`.
+		`raw + (C - K)`; folding into `corrected - C` or any comparison gives
+		`raw ... (C + K)`.
 		*/
 		const constant = nextTokens[1] === 'add'
 			? Number(nextTokens[4]) - Number(correction)
 			: Number(nextTokens[4]) + Number(correction);
 		nextTokens[4] = String(constant);
+		next.content = nextTokens.join(' ');
+		leaf.content = '';
+	}
+}
+
+/**
+ * Fold `op sub t t <offset>` into the comparison of an immediately following
+ * jump or `select`.
+ *
+ * `t` is `raw - offset`, so `t < C` is `raw < C + offset` (and the same shift
+ * applies to every comparison and to equality). This is the branch half of the
+ * encoded-correction fold; the arithmetic half runs inside a block.
+ *
+ * @param {any[]} leaves
+ * @param {Set<any>} protectedNodes
+ * @returns {void}
+ */
+function foldCorrectionsIntoBranches(leaves, protectedNodes) {
+	for (let i = 0; i < leaves.length - 1; i++) {
+		const leaf = leaves[i];
+		if (!leaf?.content || protectedNodes.has(leaf)) continue;
+		const tokens = tokenize(leaf.content);
+		if (tokens.length !== 5 || tokens[0] !== 'op' || tokens[1] !== 'sub') continue;
+		const [, , target, source, correction] = tokens;
+		if (target !== source || !/^-?\d+$/.test(correction)) continue;
+		const next = leaves[i + 1];
+		if (!next?.content || protectedNodes.has(next)) continue;
+		const nextTokens = tokenize(next.content);
+		let constantIndex = -1;
+		if (nextTokens[0] === 'jump' && nextTokens.length >= 5
+			&& nextTokens[3] === target && /^-?\d+$/.test(nextTokens[4])) {
+			constantIndex = 4;
+		} else if (nextTokens[0] === 'select' && nextTokens.length >= 5
+			&& nextTokens[3] === target && /^-?\d+$/.test(nextTokens[4])) {
+			constantIndex = 4;
+		}
+		if (constantIndex < 0) continue;
+		const nextPos = next.__mlogPos ?? -1;
+		if (nextPos < 0 || hasAnotherUseAfter(leaves, nextPos + 1, target)) continue;
+		nextTokens[constantIndex] = String(Number(nextTokens[constantIndex]) + Number(correction));
 		next.content = nextTokens.join(' ');
 		leaf.content = '';
 	}
@@ -359,6 +400,10 @@ export function optimizeMlog(root) {
 		}
 	}
 	flush(leaves.length);
+
+	// Branches are barriers for the block pass, so their correction fold runs
+	// over the flat sequence.
+	foldCorrectionsIntoBranches(leaves, protectedNodes);
 
 	// `optimizeBlock` may blank an instruction; a second global pass sees the
 	// reads that disappeared with it.
