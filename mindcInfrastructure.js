@@ -1337,7 +1337,8 @@ export class PointerRet extends VariableRet {
 		pointer through its own classes; a pointer VARIABLE's pair is the
 		pointer's own storage, which a block/offset pointer cannot describe.
 		*/
-		if (this.type && this.type.kind === 'array' && widthOfType(this.type) >= 2) {
+		if (this.type && ['array', 'struct', 'union'].includes(this.type.kind)
+			&& widthOfType(this.type) >= 2) {
 			return this;
 		}
 		throw new InfrastructureNotImplementedExpection('address of a pointer');
@@ -1395,11 +1396,14 @@ export class RefPointerRet extends PointerRet {
 		if (sharedTarget) {
 			alias = value.buildingAlias ?? null;
 			if (!alias && typeof value.name === 'string'
-				&& value.name.endsWith('.__pointer')) {
-				const base = value.name.slice(0, -'.__pointer'.length).split(':').pop();
+				&& (value.name.endsWith('.__pointer') || value.name.endsWith('_block'))) {
+				const suffix = value.name.endsWith('.__pointer') ? '.__pointer' : '_block';
+				const base = value.name.slice(0, -suffix.length)
+					.split(':').pop().replace(/^\./, '');
 				const symbol = glob.semantic?.globalScope?.lookup?.(base)
 					?? glob.generator?.currentScope?.lookup?.(base) ?? null;
-				if (symbol) alias = fixedStorageBuildingAlias(glob, symbol);
+				if (symbol) alias = fixedArrayStorageAlias(glob, symbol)
+					?? fixedStorageBuildingAlias(glob, symbol);
 			}
 			blockIsBuilding = !!alias || value.blockIsBuilding;
 			blockValue = alias ?? (value.blockIsBuilding ? `${value.name}_block` : null);
@@ -1521,8 +1525,11 @@ export class MemPointerRet extends PointerRet {
 		is null for a struct or union, which would make the address look like a
 		single word -- so build the pointer type explicitly.
 		*/
+		const kind = this.symbol?.myType?.()?.kind ?? null;
+		const alias = (kind === 'struct' || kind === 'union')
+			? fixedStorageBuildingAlias(this.glob, this.symbol) : null;
 		return new RefPointerRet(this.glob, this.instructions, this.name,
-			pointerTypeOf(this.glob, this.type), false);
+			pointerTypeOf(this.glob, this.type), false, alias, !!alias);
 	}
 }
 
@@ -1581,9 +1588,6 @@ export class MemoryRefRet extends VariableRet {
 	get() {
 		const glob = this.glob;
 		const width = this.width;
-		if (globalThis.process?.env?.MC_DEBUG) {
-			console.error(`MEMGET type=${this.type?.toString?.()} shared=${isSharedPointerType(this.type)} pointee=${JSON.stringify(this.type?.pointerTo?.qualifiers)}`);
-		}
 		if (isSharedPointerType(this.type)) {
 			/*
 			The slot stores a portable stable id. Read the two cells first,
@@ -1651,9 +1655,13 @@ export class MemoryRefRet extends VariableRet {
 				[this.instructions, this.fixedLocation.getAssignmentInstruction(target)],
 				target, this.type ? this.type.pointerTo : null, true);
 		}
+		const kind = this.symbol?.myType?.()?.kind ?? null;
+		const alias = (kind === 'struct' || kind === 'union')
+			? fixedStorageBuildingAlias(this.glob, this.symbol)
+			: (this.buildingAlias ?? null);
 		return new RefPointerRet(this.glob, this.instructions, this.name,
-			this.type ? this.type.pointerTo : null, false, this.buildingAlias,
-			this.blockIsBuilding);
+			this.type ? this.type.pointerTo : null, false, alias,
+			this.blockIsBuilding || !!alias);
 	}
 
 	/** Fetch the address as an integer. */
@@ -5516,6 +5524,21 @@ export function fixedStorageBuildingAlias(glob, symbol) {
 	return block.name;
 }
 
+/**
+ * A fixed array's block, regardless of element shape. This is the address
+ * alias used for `&a[i]` and shared-pointer serialization; the stricter
+ * native-block decision below additionally requires scalar elements.
+ *
+ * @param {Globals} glob
+ * @param {SymbolEntry} symbol
+ * @returns {string?}
+ */
+export function fixedArrayStorageAlias(glob, symbol) {
+	const type = symbol?.myType?.() ?? null;
+	if (!type || type.kind !== 'array') return null;
+	return fixedStorageBuildingAlias(glob, symbol);
+}
+
 export function fixedBuildingAliasOf(glob, symbol) {
 	const type = symbol?.myType?.() ?? null;
 	if (!type || type.kind !== 'array') return null;
@@ -5702,17 +5725,18 @@ export function symbolRef(glob, symbol) {
 			const fixed = symbol.memoryRef();
 			return new MemPointerRet(glob, [], `${assembly}.__pointer`, type, false, fixed, symbol);
 		}
-		const alias = fixedBuildingAliasOf(glob, symbol);
+		const alias = fixedArrayStorageAlias(glob, symbol);
+		const nativeAlias = fixedBuildingAliasOf(glob, symbol);
 		/*
 		If the array never escapes, its `_block` register can hold the
 		building itself. Escaping arrays keep the numeric ABI: a pointer
 		variable, a call argument or `&a` may be stored or passed where a
 		numeric block id is still expected.
 		*/
-		const nativeBlock = alias && !symbol.arrayEscapes
+		const nativeBlock = nativeAlias && !symbol.arrayEscapes
 			&& !symbol.isExtern && !symbol.nativeBlockUnsafe
 			&& glob.generator?.arrayValueEscapes?.(symbol.name) !== true
-			? alias : null;
+			? nativeAlias : null;
 		const ret = new RefPointerRet(glob, [], assembly, type, symbol.isVirtualSymbol,
 			alias, nativeBlock !== null || isSharedPointerType(type));
 		ret.setAttribute('isSymbolic', true);

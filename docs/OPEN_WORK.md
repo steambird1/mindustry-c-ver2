@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 284 passed, 0 failed (203 shape assertions, 1257 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 285 passed, 0 failed (206 shape assertions, 1262 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 106 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 16 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 14 passed, 0 failed, 2 exempt |
@@ -2310,12 +2310,12 @@ struct and union types:
 - `shared int *p = data` and `shared int *volatile slot = &data[i]` work:
   arrays decay with a known building alias, and the pointer slot uses a stable
   id.
-- `shared struct Big *p = &big` and `shared union U *p = &u` currently fail
-  with "a shared pointer needs a statically known building". The address of a
-  fixed aggregate is produced through a path that does not yet carry its
-  building alias; the pointer cannot be serialized.
-- `shared struct Big *p = &big_array[1]` also reports `address of a pointer`
-  during aggregate address formation, then the same missing alias error.
+- `shared struct Big *p = &big` and `shared union U *p = &u` now work: the
+  fixed aggregate's address carries its building alias, the pointer keeps that
+  building, and member access uses direct memory reads/writes. t272 covers both.
+- `shared struct Big *p = &big_array[1]` still fails at the aggregate-array
+  element declaration path; the array element address reaches the shared
+  pointer as a numeric block rather than a building.
 - `Big *byname p = byname(&big)` is correctly rejected: a name pointer can
   only name a single register, not a large memory aggregate.
 - `int *byname p = byname(&data[2])` is correctly rejected: byname needs the
