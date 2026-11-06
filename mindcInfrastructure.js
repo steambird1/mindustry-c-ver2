@@ -1634,9 +1634,35 @@ export class MemoryRefRet extends VariableRet {
 				this.name, this.type, true);
 		}
 		const converted = value.convertTo(this.type ?? other.type);
-		const valueBlock = (converted instanceof PointerRet && converted.blockIsBuilding)
-			? converted.storageBlockName() : null;
+		/*
+		A shared pointer slot stores the program-level stable id, never this
+		processor's local link index. `convertTo` may hand back the original
+		non-shared pointer unchanged (same width), so decide from the TARGET
+		type and serialize its building explicitly.
+		*/
+		let valueBlock = null;
+		const conversionInstructions = [];
+		if (isSharedPointerType(this.type)) {
+			if (!(converted instanceof PointerRet) || !converted.blockIsBuilding) {
+				throw new InfrastructureNotImplementedExpection(
+					'a shared pointer needs a building-backed value to serialize');
+			}
+			if (converted.buildingAlias) {
+				const id = stableIdOfBlock(glob, converted.buildingAlias);
+				if (id > 0) valueBlock = String(id);
+			}
+			if (!valueBlock) {
+				const idTarget = glob.tmp(glob.semantic.getTypeInfo('int'));
+				const idName = idTarget.name ?? idTarget;
+				conversionInstructions.push(buildingToStableId(glob,
+					converted.buildingAlias ?? `${converted.name}_block`, idName));
+				valueBlock = idName;
+			}
+		} else if (converted instanceof PointerRet && converted.blockIsBuilding) {
+			valueBlock = converted.storageBlockName();
+		}
 		const instructions = [this.instructions, converted.instructions,
+			...conversionInstructions,
 			referenceWrite(glob, this, converted.name, converted.width, valueBlock)];
 		// The value of an assignment expression is the value that has been stored --
 		// NOT our own name, which is the *address* of that value.
@@ -1790,6 +1816,14 @@ export class RegistryStructRet extends StructRefRet {
 		const member = isNamePointerType(type)
 			? new NamePointerRet(glob, this.instructions, name, type, false)
 			: valueClassOf(glob, type).create(glob, this.instructions, name, type, false);
+		/*
+		A `shared` pointer member keeps the BUILDING in `name_block`, not a
+		link id. Marking that here is what makes `*s.p` read through the
+		building directly instead of running the building through `getlink`.
+		*/
+		if (isSharedPointerType(type) && member instanceof PointerRet) {
+			member.blockIsBuilding = true;
+		}
 		member.setAttribute('isFromRegStruct', true);
 		member.setAttribute('isSymbolic', true);
 		/*
@@ -4696,7 +4730,7 @@ export class NamePointerPairRet extends PointerRet {
 			this.instructions,
 			InstructionBuilder.read(`${target}_block`, '@this', this.blockName),
 			InstructionBuilder.read(`${target}_pos`, '@this', this.posName)
-		], target, this.type, true);
+		], target, this.type, true, null, isSharedPointerType(this.type));
 	}
 
 	fetch(target) {
@@ -4714,14 +4748,29 @@ export class NamePointerPairRet extends PointerRet {
 	set(other) {
 		const glob = this.glob;
 		const value = other.get();
-		const block = value instanceof PointerRet && value.blockIsBuilding
-			? value.storageBlockName() : `${value.name}_block`;
+		const shared = isSharedPointerType(this.type);
+		let block;
+		if (shared) {
+			/*
+			A shared pointer stores its BUILDING in the packet. Using the
+			ordinary storage block here would write a local link id, which
+			means nothing even to another member on this processor.
+			*/
+			if (!(value instanceof PointerRet) || !value.blockIsBuilding) {
+				throw new InfrastructureNotImplementedExpection(
+					'a shared pointer member needs a building-backed value');
+			}
+			block = value.buildingAlias ?? `${value.name}_block`;
+		} else {
+			block = value instanceof PointerRet && value.blockIsBuilding
+				? value.storageBlockName() : `${value.name}_block`;
+		}
 		return new RefPointerRet(glob, [
 			this.instructions,
 			value.instructions,
 			InstructionBuilder.write(block, '@this', this.blockName),
 			InstructionBuilder.write(`${value.name}_pos`, '@this', this.posName)
-		], this.name, this.type, this.temporary);
+		], this.name, this.type, this.temporary, null, shared);
 	}
 
 	address() {

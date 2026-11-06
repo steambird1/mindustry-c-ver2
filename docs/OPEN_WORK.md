@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 289 passed, 0 failed (215 shape assertions, 1282 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 291 passed, 0 failed (219 shape assertions, 1287 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 107 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 16 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 14 passed, 0 failed, 2 exempt |
@@ -109,7 +109,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | quadratic / packed const arrays (§7.53) | **done**; degree-2 polynomials and ≤53-bit packed integers, test t264 | §7.53 |
 | integral facts remove redundant `floor` (§7.54) | **done**; generator lattice plus mlog fallback, test t265 | §7.54 |
 | pointer building alias (§7.55) | **done**; non-escaping single-block arrays keep the building in `_block` and read/write directly, test t266 | §7.55 |
-| shared pointer stable ids (§7.56) | **done**; `shared` address space, program-level stable ids, stable-id pointer slots, test t268 | §7.56 |
+| shared pointer stable ids (§7.56) | **done**; `shared` address space, program-level stable ids, stable-id pointer slots and shared struct members, tests t268/t277/t278 | §7.56 |
 | shared chain + two-processor handoff (§7.56) | **done**; stable neighbour registers, peer round-trip test t269, metadata test t270 | §7.56 |
 | qualifier/type matrix (§7.57) | **partial**; shared scalar/array decay works, shared large aggregates need target-address propagation | §7.57 |
 | unified byname name packets (§7.58) | **partial**; register structs (flat or nested, including device/string_t), ordinary/shared pointer members and `byname` pointer members use name packets, arrays still rejected | §7.58 |
@@ -2300,6 +2300,14 @@ called `f` even when `a` was false.
   handshake: the peer publishes `&shared_data[1]` through a shared pointer
   slot and the main processor resolves stable id 1 back to its own bank1 and
   prints 42. t270 checks the stable neighbour registers.
+- A `shared` pointer MEMBER is a building in registers and a stable id in
+  memory. `RegistryStructRet.member` marks it building-backed so `*s.p` reads
+  directly instead of running the building through `getlink`; `MemoryRefRet`
+  serializes a building-backed source with `stableIdOfBlock` /
+  `buildingToStableId`. t277 covers both forms locally.
+- t278 runs the cross-processor case: the peer writes `q->p = &shared_data[1]`
+  into a shared struct and the main processor resolves the member and prints
+  `42 7`. The write emits stable id 1, not the peer's local link index.
 
 ### 7.57 Qualifier / complex-type test matrix
 

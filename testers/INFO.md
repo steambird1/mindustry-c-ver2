@@ -13,7 +13,7 @@
 
 | 命令（从 `testers/unit_tests` 执行） | 读哪个目录 | 当前结果 | 判定标准 |
 |---|---|---|---|
-| `node ..\tools\check.mjs` | `check/` | **289 passed, 0 failed**（215 shape assertions, 1282 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
+| `node ..\tools\check.mjs` | `check/` | **291 passed, 0 failed**（219 shape assertions, 1287 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
 | `node ..\tools\negative.mjs` | `negative/` | **107 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
 | `node ..\tools\nomem.mjs` | `nomem/` | **16 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
 | `node ..\tools\loadorder.mjs` | 仓库根的 `mindc*.js` | **14 passed, 0 failed, 2 exempt** | 每个入口单独起一个 `node` 进程导入，不得有循环依赖 |
@@ -76,11 +76,11 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 
 ## 目录地图
 
-`testers/unit_tests/` 下共 **698 个 `.c`，全部有 runner**（289 + 11 + 107 + 16 + 275 = 698）：
+`testers/unit_tests/` 下共 **701 个 `.c`，全部有 runner**（291 + 12 + 107 + 16 + 275 = 701）：
 
 | 目录 | 文件数 | 谁来跑 |
 |---|---|---|
-| `check/` | 289 | `check.mjs`（同时驱动 `check/peers/` 的 11 个对端，见下文） |
+| `check/` | 291 | `check.mjs`（同时驱动 `check/peers/` 的 12 个对端，见下文） |
 | `t/` | 98 | `runall.mjs`（早期按主题分的用例，`2dc683e` 起纳入） |
 | `negative/` | 107 | `negative.mjs` |
 | `suite/` | 50 | `runall.mjs` |
@@ -90,7 +90,7 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 | `ptr2/` | 13 | `runall.mjs` |
 | `hdr/` | 12 | `runall.mjs`（另有手工的 `hdr.mjs` / `hdrsim.mjs`） |
 | `arr2/` | 11 | `runall.mjs` |
-| `peers/` | 11 | 不是独立用例：由 `check.mjs` 代它们的属主跑 |
+| `peers/` | 12 | 不是独立用例：由 `check.mjs` 代它们的属主跑 |
 | `big/` | 8 | `runall.mjs` |
 | `nomem/` | 16 | `nomem.mjs` |
 | `u/` | 6 | `runall.mjs` |
@@ -104,7 +104,7 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 
 ## check/ 的编号约定
 
-`check/` 用 `tNN_主题.c` 命名，**编号 1–276 已用满，没有空号**，下一个用例是 `t277`。
+`check/` 用 `tNN_主题.c` 命名，**编号 1–278 已用满，没有空号**，下一个用例是 `t279`。
 另有 13 个不带编号的（`m1`–`m3`、`n1`–`n2`、`rw1`–`rw2`、`seq1`、`memsp2`–`memsp3`），
 它们早于编号制，保留原名。
 
