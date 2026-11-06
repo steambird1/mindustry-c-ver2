@@ -356,7 +356,7 @@ export class CodeGenerator extends ASTVisitor {
 	 * @param {TypeInfo?} type The struct type
 	 * @returns {boolean}
 	 */
-	structNamePointerAllowed(type = null) {
+	structNamePointerAllowed(type = null, explicit = false) {
 		if (!type || !type.isTypeInfo) return false;
 		/*
 		Only a struct or a union has MEMBERS to carry by name. Without this a
@@ -369,17 +369,21 @@ export class CodeGenerator extends ASTVisitor {
 		const version = (this.semantic.targetVersion ?? this.compiler?.config?.getAttribute('targetVersion') ?? 0);
 		if (version < 150) return false;
 		const config = this.compiler?.extraConfig?.getAttribute('optimizeOption') ?? {};
-		if (config.doStructPointerOptimize !== true) return false;
+		if (!explicit && config.doStructPointerOptimize !== true) return false;
 		/*
 		Only a FLAT struct can be carried this way: a member that is itself a
-		struct has no single register name to store.
+		struct has no single register name to store. An explicitly requested
+		`byname` packet is restricted further to direct single-register leaves;
+		the pragma path keeps its existing broader flat check.
 		*/
-		if (!(type.members ?? []).every(m => isFlatComponentType(m.type ?? m.memberType))) return false;
+		const members = type.members ?? [];
+		if (!members.every(m => isFlatComponentType(m.type ?? m.memberType))) return false;
 		const count = componentCountOf(type);
 		/*
 		No number given: 4 registers when a memory block exists (so a big
 		struct still has somewhere to go), unbounded when none does.
 		*/
+		if (explicit) return true;
 		const given = config.structPointerThreshold;
 		const limit = (typeof given === 'number') ? given
 			: ((this.memory?.memoryBlocks?.length ?? 0) > 0 ? 4 : Infinity);

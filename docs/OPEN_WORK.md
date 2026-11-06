@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 285 passed, 0 failed (206 shape assertions, 1262 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 286 passed, 0 failed (209 shape assertions, 1267 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 106 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 16 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 14 passed, 0 failed, 2 exempt |
@@ -112,6 +112,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | shared pointer stable ids (§7.56) | **done**; `shared` address space, program-level stable ids, stable-id pointer slots, test t268 | §7.56 |
 | shared chain + two-processor handoff (§7.56) | **done**; stable neighbour registers, peer round-trip test t269, metadata test t270 | §7.56 |
 | qualifier/type matrix (§7.57) | **partial**; shared scalar/array decay works, shared large aggregates need target-address propagation | §7.57 |
+| unified byname name packets (§7.58) | **partial**; flat register structs (including device/string_t) use multi-name packet, larger aggregates still rejected | §7.58 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -2324,4 +2325,24 @@ struct and union types:
 The next fix is to carry the fixed-storage building alias through aggregate
 address formation (`&big`, `&array[i]` of a large struct) so shared pointers to
 complex types can reuse the same stable-id slot path. t271 covers the working
-array-decay case.
+array-decay case. `shared struct Big *p = &big` and `shared union U *p = &u`
+now work via t272; large struct ARRAY elements still take the numeric path.
+
+### 7.58 `byname` is the user-facing name packet
+
+- `byname` stays one language concept. The representation is chosen from the
+  pointee:
+  - single register -> one-name `NamePointerRet`;
+  - flat register struct -> one name per member, `NameStructPointerRet`;
+  - non-flat/memory aggregate -> rejected.
+- The optimizer's name-pointer analysis now classifies a flat aggregate address
+  as `aggregate`, allows it only for an explicit `byname` request, and does not
+  disqualify `p->member` for that case.
+- The generator's `structNamePointerAllowed` takes an `explicit` flag: an
+  explicit `byname` bypasses the `#pragma optimize(struct_pointer)` requirement
+  but still requires the flat/nameable shape. The pragma path is unchanged.
+- Case: t273 uses `struct S { device d; string_t s; int n; }` through
+  `S *byname p = byname(&x)` and writes/reads all three leaf kinds.
+- Still limited: nested/memory aggregates and fixed arrays inside the struct do
+  not form a name packet; they are rejected and should use an ordinary/shared
+  pointer instead.

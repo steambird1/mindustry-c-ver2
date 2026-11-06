@@ -5692,7 +5692,9 @@ export function symbolRef(glob, symbol) {
 		return ret;
 	}
 
-	if (type && type.kind === 'pointer' && glob.generator?.structNamePointerAllowed?.(type.pointerTo)
+	const explicitStructName = isNamePointerType(type) || symbol.forcedNamePointer === true;
+	if (type && type.kind === 'pointer'
+		&& glob.generator?.structNamePointerAllowed?.(type.pointerTo, explicitStructName)
 		&& (symbol.usesNamePointer === true || symbol.forcedNamePointer === true
 			|| symbol.addressedByName === true)) {
 		const ret = new NameStructPointerRet(glob, [], assembly, type, symbol.isVirtualSymbol);

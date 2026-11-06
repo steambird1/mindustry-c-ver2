@@ -751,6 +751,27 @@ export class Optimizer extends ASTVisitor {
 			}
 		};
 
+		/**
+		 * A flat register struct whose direct members are all single-register
+		 * values. These are the aggregates a `byname` pointer can name with one
+		 * name per member; arrays, nested structs and memory aggregates are not
+		 * part of this first name-packet form.
+		 *
+		 * @param {any} type
+		 * @returns {boolean}
+		 */
+		const isNameableAggregate = (type) => {
+			if (!type || type.kind !== 'struct') return false;
+			const members = type.members ?? [];
+			if (members.length === 0) return false;
+			return members.every(member => {
+				const memberType = member?.type ?? member?.memberType ?? null;
+				return memberType && memberType.isTypeInfo
+					&& ['basic', 'device', 'null', 'null_t'].includes(memberType.kind)
+					&& widthOfType(memberType) === 1;
+			});
+		};
+
 		const keyOf = symbol => symbol?.getAssemblySymbol?.() ?? symbol?.name ?? null;
 
 		/**
@@ -902,6 +923,9 @@ export class Optimizer extends ASTVisitor {
 				if (symbol.isVolatile || nameable || symbol.isStatic || symbol.isPersistent) {
 					return { kind: 'invalid', target: null, targetSymbol: symbol };
 				}
+				if (isNameableAggregate(typeOfSymbol(symbol))) {
+					return { kind: 'aggregate', target: keyOf(symbol), targetSymbol: symbol };
+				}
 				if (!isSingleRegister(typeOfSymbol(symbol))) {
 					return { kind: 'invalid', target: null, targetSymbol: symbol };
 				}
@@ -964,7 +988,7 @@ export class Optimizer extends ASTVisitor {
 				const argument = expr.arguments?.[0] ?? null;
 				const inner = classifyAddress(argument?.type === 'UnaryExpression'
 					&& argument.operator === '&' ? argument.argument : null, scope);
-				if (inner.kind !== 'register') {
+				if (inner.kind !== 'register' && inner.kind !== 'aggregate') {
 					return {
 						kind: 'invalid', target: null, targetSymbol: inner.targetSymbol,
 						explicit: true, byname: true
@@ -1022,6 +1046,10 @@ export class Optimizer extends ASTVisitor {
 			entry.sources.add(info.kind);
 			if (info.kind === 'pointer' && info.target) {
 				entry.peers.add(info.target);
+			} else if (info.kind === 'aggregate') {
+				if (info.byname !== true) {
+					disqualify(entry, describeBadTarget(info.targetSymbol));
+				}
 			} else if (info.kind !== 'register') {
 				if (info.byname === true) {
 					disqualify(entry, describeBadByName(info.targetSymbol));
@@ -1031,12 +1059,13 @@ export class Optimizer extends ASTVisitor {
 					disqualify(entry, 'what is stored into it is not the address of a plain register variable');
 				}
 			}
-			if (info.kind === 'register' && info.target) {
+			if ((info.kind === 'register' || info.kind === 'aggregate') && info.target) {
 				if (!addressTaken.has(info.target)) addressTaken.set(info.target, new Set());
 				addressTaken.get(info.target).add(entry.key);
 				if (info.targetSymbol) targetOf.set(info.target, info.targetSymbol);
 			}
-			if (info.kind === 'register' && info.targetSymbol && this.isRecursiveSymbol?.(info.targetSymbol)) {
+			if ((info.kind === 'register' || info.kind === 'aggregate') && info.targetSymbol
+				&& this.isRecursiveSymbol?.(info.targetSymbol)) {
 				// The target itself lives in a recursive function: not a register
 				disqualify(entry, `it points at '${info.targetSymbol.name}', a local of a recursive function`);
 			}
@@ -1182,7 +1211,12 @@ export class Optimizer extends ASTVisitor {
 						if (isPointerSymbol(symbol)) {
 							const entry = register(symbol);
 							entry.used = true;
-							disqualify(entry, 'it is indexed or dereferenced with `->`, which needs a real address');
+							const pointee = typeOfSymbol(symbol)?.pointerTo ?? null;
+							const aggregateMember = !node.getAttribute?.('computed')
+								&& isNameableAggregate(pointee) && entry.requested;
+							if (!aggregateMember) {
+								disqualify(entry, 'it is indexed or dereferenced with `->`, which needs a real address');
+							}
 						}
 					}
 					break;
@@ -1289,7 +1323,11 @@ export class Optimizer extends ASTVisitor {
 					}
 					if (!entry || entry.bad) { ok = false; break; }
 					for (const source of entry.sources) {
-						if (source !== 'register' && source !== 'pointer') { ok = false; break; }
+						if (source === 'aggregate') {
+							if (entry.requested !== true) { ok = false; break; }
+						} else if (source !== 'register' && source !== 'pointer') {
+							ok = false; break;
+						}
 					}
 					if (!ok) break;
 					for (const peer of entry.peers) {
