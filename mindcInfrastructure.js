@@ -448,7 +448,8 @@ export function readThrough(glob, pointer, target, width = 1, isNear = false, bu
  * @param {boolean} isNear
  * @returns {Instruction}
  */
-export function writeThrough(glob, pointer, value, width = 1, isNear = false, buildingAlias = null) {
+export function writeThrough(glob, pointer, value, width = 1, isNear = false,
+	buildingAlias = null, valueBlock = null) {
 	if (width <= 1) {
 		if (buildingAlias) {
 			return InstructionBuilder.write(value, buildingAlias, `${pointer}_pos`);
@@ -456,7 +457,7 @@ export function writeThrough(glob, pointer, value, width = 1, isNear = false, bu
 		return glob.memory.outputPointerStorageOf(pointer, value);
 	}
 	return new Instruction([
-		glob.memory.outputPointerStorageOf(pointer, `${value}_block`),
+		glob.memory.outputPointerStorageOf(pointer, valueBlock ?? `${value}_block`),
 		peekNext(glob, pointer, isNear),
 		InstructionBuilder.writes(`${value}_pos`, '__ptrblock', '__ptrpos')
 	]);
@@ -492,18 +493,18 @@ function referenceRead(glob, ref, target, width) {
  * @param {number} width
  * @returns {Instruction}
  */
-function referenceWrite(glob, ref, value, width) {
+function referenceWrite(glob, ref, value, width, valueBlock = null) {
 	if (ref.fixedLocation) {
 		if (width >= 2) {
 			return new Instruction([
-				glob.memory.outputStorageOf(ref.fixedLocation, `${value}_block`),
+				glob.memory.outputStorageOf(ref.fixedLocation, valueBlock ?? `${value}_block`),
 				glob.memory.outputStorageOf(ref.fixedLocation.duplicate().forwarding(1), `${value}_pos`)
 			]);
 		}
 		return glob.memory.outputStorageOf(ref.fixedLocation, value);
 	}
 	return writeThrough(glob, ref.name, value, width, ref.isNear,
-		ref.buildingAlias ?? ref.blockAlias ?? null);
+		ref.buildingAlias ?? ref.blockAlias ?? null, valueBlock);
 }
 
 /**
@@ -1135,6 +1136,25 @@ export class PointerRet extends VariableRet {
 	}
 
 	/**
+	 * The block-half operand suitable for writing this pointer into memory.
+	 *
+	 * A numeric pointer already is that operand. A building-backed pointer is
+	 * converted to the corresponding `bank_id` cell. Only fixed arrays that
+	 * lie in a known memory block can carry a building; for them the id
+	 * register exists.
+	 *
+	 * @returns {string}
+	 */
+	storageBlockName() {
+		if (!this.blockIsBuilding) return `${this.name}_block`;
+		if (!this.buildingAlias) {
+			throw new InfrastructureNotImplementedExpection(
+				'a building pointer without a serializable block id');
+		}
+		return `${this.buildingAlias}_id`;
+	}
+
+	/**
 	 * Read what the pointer points at.
 	 * @param {string|SymbolEntry} target Where to store the result.
 	 * @returns {VariableRet}
@@ -1171,10 +1191,12 @@ export class PointerRet extends VariableRet {
 		const glob = this.glob;
 		const inner = (this.type && this.type.pointerTo) ? this.type.pointerTo : null;
 		const value = other.get().convertTo(inner ?? other.type);
+		const valueBlock = (value instanceof PointerRet && value.blockIsBuilding)
+			? value.storageBlockName() : null;
 		return valueClassOf(glob, inner).create(glob,
 			[this.instructions, value.instructions,
 				writeThrough(glob, this.name, value.name, value.width, this.isNear,
-					this.buildingAlias ?? this.blockAlias ?? null)],
+					this.buildingAlias ?? this.blockAlias ?? null, valueBlock)],
 			this.name, inner, false);
 	}
 
@@ -1291,7 +1313,7 @@ export class RefPointerRet extends PointerRet {
 		}
 		return new RefPointerRet(glob, [
 			this.instructions, value.instructions,
-			InstructionBuilder.set(`${this.instructionReturn}_block`, `${value.name}_block`),
+			InstructionBuilder.set(`${this.instructionReturn}_block`, value.storageBlockName()),
 			InstructionBuilder.set(`${this.instructionReturn}_pos`, `${value.name}_pos`)
 		], this.instructionReturn, this.type, this.temporary);
 	}
@@ -1469,8 +1491,10 @@ export class MemoryRefRet extends VariableRet {
 				this.name, this.type, true);
 		}
 		const converted = value.convertTo(this.type ?? other.type);
+		const valueBlock = (converted instanceof PointerRet && converted.blockIsBuilding)
+			? converted.storageBlockName() : null;
 		const instructions = [this.instructions, converted.instructions,
-			referenceWrite(glob, this, converted.name, converted.width)];
+			referenceWrite(glob, this, converted.name, converted.width, valueBlock)];
 		// The value of an assignment expression is the value that has been stored --
 		// NOT our own name, which is the *address* of that value.
 		return valueClassOf(glob, this.type).create(glob, instructions, converted.name, this.type, true);
