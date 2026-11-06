@@ -2973,6 +2973,12 @@ export class SemanticAnalyzer extends ASTVisitor {
 		symbol.type = (wrapper && typeof wrapper === 'object' && 'type' in wrapper)
 			? { ...wrapper, type: initType } : initType;
 		symbol.arrayAliasOf = target;
+		/*
+		An alias makes the target reachable through the handle ABI, where the
+		block half is still a numeric id. Keep the target's `_block` in that
+		form.
+		*/
+		target.nativeBlockUnsafe = true;
 		symbol.isRemote = target.isRemote === true || this.typeHasRemoteQualifier(initType);
 	}
 
@@ -5498,6 +5504,12 @@ export class SemanticAnalyzer extends ASTVisitor {
         if (leftType?.kind !== 'array' || rightType?.kind !== 'array') return false;
         const left = this.symbolOfArrayExpression?.(node.left) ?? null;
         const right = this.symbolOfArrayExpression?.(node.right) ?? null;
+        /*
+        An array assignment copies elements through the block/offset ABI; the
+        fast "block is a building" form is only safe for plain indexed access.
+        */
+        if (left) left.nativeBlockUnsafe = true;
+        if (right) right.nativeBlockUnsafe = true;
         const nameOf = side => side?.name ?? 'an array';
         /*
         An array PARAMETER whose type has an OPEN dimension (`int s[]`) arrives
@@ -5749,7 +5761,9 @@ export class SemanticAnalyzer extends ASTVisitor {
         `veccpy` -- and the message has to say so, because a refusal that only
         said no would read as "remote arrays are unusable".
         */
-        if (this.arrayImplementationOf(this.symbolOfArrayExpression(source)) === 'remote'
+        const aliasSource = this.symbolOfArrayExpression(source);
+        if (aliasSource) aliasSource.nativeBlockUnsafe = true;
+        if (this.arrayImplementationOf(aliasSource) === 'remote'
             || this.typeHasRemoteQualifier(source.dataType)) {
             this.addError(
                 `Cannot bind a remote array by vecalias: a handle packs helper entry points `
@@ -5796,6 +5810,7 @@ export class SemanticAnalyzer extends ASTVisitor {
             return;
         }
         const destinationSymbol = this.symbolOfArrayExpression(destination);
+        if (destinationSymbol) destinationSymbol.nativeBlockUnsafe = true;
         const destinationImpl = this.arrayImplementationOf(destinationSymbol);
         if (destinationImpl === 'handle') {
             this.addError(
@@ -5825,6 +5840,7 @@ export class SemanticAnalyzer extends ASTVisitor {
         array's is the size it was written with.
         */
         const sourceSymbol = this.symbolOfArrayExpression(source);
+        if (sourceSymbol) sourceSymbol.nativeBlockUnsafe = true;
         const sourceLength = this.staticArrayLengthOf(sourceSymbol);
         if (sourceLength !== null && sourceLength > destinationLength) {
             this.addError(
@@ -6977,6 +6993,18 @@ export class SemanticAnalyzer extends ASTVisitor {
      * @returns {void}
      */
     noteArrayArguments(callNode, funcSymbol, expectedParams) {
+        /*
+        Any array handed to a call may be stepped/stored through the numeric
+        block ABI -- including a call through a function pointer, where there
+        is no `funcSymbol` and therefore no parameter note to record.
+        */
+        for (const arg of callNode.arguments ?? []) {
+            if (arg?.type !== 'Identifier') continue;
+            const argSymbol = this.currentScope.lookup(arg.name);
+            if (argSymbol?.myType?.()?.kind === 'array') {
+                argSymbol.nativeBlockUnsafe = true;
+            }
+        }
         if (!funcSymbol) return;
         const scope = funcSymbol.owningScope ?? null;
         if (!scope) return;

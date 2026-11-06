@@ -108,7 +108,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | arithmetic-progression const arrays (§7.52) | **done**; auto-selected encoded arrays become `base + i * step`, explicit `array("encoded")` still uses a table, test t262 | §7.52 |
 | quadratic / packed const arrays (§7.53) | **done**; degree-2 polynomials and ≤53-bit packed integers, test t264 | §7.53 |
 | integral facts remove redundant `floor` (§7.54) | **done**; generator lattice plus mlog fallback, test t265 | §7.54 |
-| pointer building alias (§7.55) | **done**; fixed single-block arrays read/write the known building directly, test t266 | §7.55 |
+| pointer building alias (§7.55) | **done**; non-escaping single-block arrays keep the building in `_block` and read/write directly, test t266 | §7.55 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -2251,7 +2251,13 @@ called `f` even when `a` was false.
   the array cannot cross into another block.
 - Arrays that cross blocks, stack arrays whose block is runtime-dependent, and
   pointer variables whose target is unknown keep the old `getlink` path.
-- This is stage 1 of the broader pointer work: register pointers can later hold
+- This was stage 1 of the broader pointer work: register pointers can later hold
   a building directly, with serialization only at memory/remote boundaries.
+- Stage 2 is now applied to the same safe set of arrays: `a_block` itself holds
+  the building (`set a_block bank1`), and stepping inside the array is a plain
+  offset add. The array is kept on the numeric ABI whenever it escapes:
+  address-taking, function arguments (including function-pointer calls),
+  `veccpy`/`vecalias`, array assignment, alias targets and extern arrays.
 - Case: t266 checks a four-element global array with a runtime subscript; the
-  emitted program contains direct `bank1` reads/writes and no `getlink __curb`.
+  emitted program contains `set a_block bank1`, direct `bank1` reads/writes and
+  no `getlink __curb`.

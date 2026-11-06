@@ -581,6 +581,14 @@ export function arithmetic(glob, op, left, right, type = null) {
 		}
 		const step = right.materialize();	// own temporary symbol: safe against calls
 		const target = glob.tmp(resultType, 'pointer');
+		if (base.blockIsBuilding) {
+			return new RefPointerRet(glob, [
+				base.instructions,
+				InstructionBuilder.set(`${target}_block`, `${base.name}_block`),
+				InstructionBuilder.set(`${target}_pos`, `${base.name}_pos`),
+				InstructionBuilder.op(op, `${target}_pos`, `${target}_pos`, step.name)
+			], target, resultType, true, base.buildingAlias, true);
+		}
 		return new RefPointerRet(glob, [
 			base.instructions,
 			InstructionBuilder.set(`${target}_block`, `${base.name}_block`),
@@ -1112,10 +1120,14 @@ export class PointerRet extends VariableRet {
 	 * @param {boolean} [temporary=false]
 	 * @param {string?} [buildingAlias=null] Statically known building for
 	 *        `name_block`; when set, direct `read/write` needs no `getlink`.
+	 * @param {boolean} [blockIsBuilding=false] `name_block` itself holds the
+	 *        building rather than a numeric block id.
 	 */
-	constructor(glob, instructions, name, type, temporary = false, buildingAlias = null) {
+	constructor(glob, instructions, name, type, temporary = false,
+		buildingAlias = null, blockIsBuilding = false) {
 		super(glob, instructions, name, type, temporary);
 		this.buildingAlias = buildingAlias;
+		this.blockIsBuilding = blockIsBuilding;
 	}
 
 	get width() {
@@ -1195,6 +1207,19 @@ export class PointerRet extends VariableRet {
 		re-written when the same base is stepped again (or by a nested call),
 		while the stepped copy is still being read through.
 		*/
+		if (this.blockIsBuilding) {
+			/*
+			The whole object is known to live inside one block, so stepping
+			within it is just an offset addition -- no block-chain walk and no
+			`getlink`.
+			*/
+			return new RefPointerRet(glob, [
+				this.instructions,
+				InstructionBuilder.set(`${target}_block`, `${this.name}_block`),
+				InstructionBuilder.set(`${target}_pos`, `${this.name}_pos`),
+				InstructionBuilder.op('add', `${target}_pos`, `${target}_pos`, step)
+			], target, this.type, true, this.buildingAlias, true);
+		}
 		return new RefPointerRet(glob, [
 			this.instructions,
 			InstructionBuilder.set(`${target}_block`, `${this.name}_block`),
@@ -1389,6 +1414,7 @@ export class MemoryRefRet extends VariableRet {
 		this.fixedLocation = fixedLocation;
 		this.symbol = symbol;
 		this.buildingAlias = null;
+		this.blockIsBuilding = false;
 		this.setAttribute('isPointerAccess', true);
 		this.setAttribute('pointerAccess', true);
 		this.setAttribute('disallowReplacement', true);
@@ -1463,7 +1489,8 @@ export class MemoryRefRet extends VariableRet {
 				target, this.type ? this.type.pointerTo : null, true);
 		}
 		return new RefPointerRet(this.glob, this.instructions, this.name,
-			this.type ? this.type.pointerTo : null, false);
+			this.type ? this.type.pointerTo : null, false, this.buildingAlias,
+			this.blockIsBuilding);
 	}
 
 	/** Fetch the address as an integer. */
@@ -5315,10 +5342,19 @@ export function valueClassOf(glob, type) {
  * @param {SymbolEntry} symbol
  * @returns {string?}
  */
-function fixedBuildingAliasOf(glob, symbol) {
+export function fixedBuildingAliasOf(glob, symbol) {
 	const type = symbol?.myType?.() ?? null;
 	if (!type || type.kind !== 'array') return null;
 	if (symbol.isRemote === true || symbol.arrayAliasOf) return null;
+	/*
+	Only single-cell scalar elements: a pointer element is read as two words
+	and must deserialize its block, and an aggregate element may contain one.
+	*/
+	const element = type.pointerTo ?? null;
+	if (!element || !['basic', 'device', 'null', 'null_t'].includes(element.kind)
+		|| (typeof element.isPointerImpl === 'function' && element.isPointerImpl())) {
+		return null;
+	}
 	const location = symbol.memoryLocation ?? null;
 	if (!location) return null;
 	const block = glob.memory?.memoryBlocks?.[location.block] ?? null;
@@ -5492,8 +5528,19 @@ export function symbolRef(glob, symbol) {
 			const fixed = symbol.memoryRef();
 			return new MemPointerRet(glob, [], `${assembly}.__pointer`, type, false, fixed, symbol);
 		}
+		const alias = fixedBuildingAliasOf(glob, symbol);
+		/*
+		If the array never escapes, its `_block` register can hold the
+		building itself. Escaping arrays keep the numeric ABI: a pointer
+		variable, a call argument or `&a` may be stored or passed where a
+		numeric block id is still expected.
+		*/
+		const nativeBlock = alias && !symbol.isAddressed && !symbol.arrayEscapes
+			&& !symbol.isExtern && !symbol.nativeBlockUnsafe
+			&& glob.generator?.arrayValueEscapes?.(symbol.name) !== true
+			? alias : null;
 		const ret = new RefPointerRet(glob, [], assembly, type, symbol.isVirtualSymbol,
-			fixedBuildingAliasOf(glob, symbol));
+			alias, nativeBlock !== null);
 		ret.setAttribute('isSymbolic', true);
 		ret.setAttribute('relevantSymbol', symbol);
 		ret.setAttribute('relevantSymbolRead', symbol);

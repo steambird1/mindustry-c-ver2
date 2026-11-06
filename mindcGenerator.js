@@ -30,7 +30,7 @@ import { ensureMemspHelper, remoteDeviceRegOf, remoteNameRegOf, RemotePointerRet
 	symbolRef, ExportRet, valueClassOf, readThrough, writeThrough, pointerStep,
 	RegistryStructRet, NamePointerRet, MemoryNamePointerRet,
 	arrayRetOf, selectArrayImplementation, accessCostOf,
-	pointerToValue, valueToPointer, contentTypeOf, SPECIAL_CONTENT_TYPES,
+	pointerToValue, valueToPointer, contentTypeOf, SPECIAL_CONTENT_TYPES, fixedBuildingAliasOf,
 	arithmetic, widthOfType, knownContentIdOf, memberTypeOf, InvalidCastException, InfrastructureNotImplementedExpection,
 	ENCODED_OFFSET, ENCODED_RADIX
  } from "./mindcInfrastructure.js";
@@ -3647,6 +3647,8 @@ export class CodeGenerator extends ASTVisitor {
 		const alreadyAddressed = this._addressedSymbols ?? (this._addressedSymbols = new Set());
 		const freshAddress = !alreadyAddressed.has(symbol);
 		if (freshAddress) alreadyAddressed.add(symbol);
+		const nativeArrayBlock = symbol.myType()?.kind === 'array'
+			&& !!this.arrayNativeBlockOf(symbol);
 		if (symbol.memoryLocation && freshAddress) {
 			if (symbol.extraMemoryLocation) {
 				finalize.concat(this.memory.outputStorageOf(symbol.extraMemoryLocation, `${this.memory.memoryBlocks[symbol.memoryLocation.block].name}_id`));
@@ -3668,13 +3670,15 @@ export class CodeGenerator extends ASTVisitor {
 				const isGlobal = symbol.scope === this.semantic?.globalScope;
 				const containerKind = symbol.myType()?.kind ?? null;
 				if (isGlobal && (containerKind === 'array' || containerKind === 'struct' || containerKind === 'union')) {
-					finalize.concat(symbol.memoryLocation.getAssignmentInstruction(symbol.getAssemblySymbol()));
+					finalize.concat(symbol.memoryLocation.getAssignmentInstruction(
+						symbol.getAssemblySymbol(), nativeArrayBlock));
 				}
 			} else {
 				if (symbol.accessThroughPointer) {
 					finalize.concat(symbol.memoryLocation.getAssignmentInstruction(`${symbol.getAssemblySymbol()}.__pointer`));
 				} else {
-					finalize.concat(symbol.memoryLocation.getAssignmentInstruction(symbol.getAssemblySymbol()));
+					finalize.concat(symbol.memoryLocation.getAssignmentInstruction(
+						symbol.getAssemblySymbol(), nativeArrayBlock));
 				}
 			}
 		}
@@ -4820,7 +4824,8 @@ export class CodeGenerator extends ASTVisitor {
 			const addressTarget = pointerSlot
 				? `${symbol.getAssemblySymbol()}.__pointer`
 				: symbol.getAssemblySymbol();
-			initialization.concat(symbol.memoryLocation.getAssignmentInstruction(addressTarget));
+			initialization.concat(symbol.memoryLocation.getAssignmentInstruction(
+				addressTarget, kind === 'array' && !!this.arrayNativeBlockOf(symbol)));
 		}
 		/*
 		A local object is given a stack slot by the function prologue, but an
@@ -5830,9 +5835,18 @@ export class CodeGenerator extends ASTVisitor {
 				const isInitializer = parent && parent.type === 'VariableDeclarator'
 					&& parent.initializer === node;
 				const isAssigned = parent && parent.type === 'AssignmentExpression'
-					&& parent.right === node;
+					&& (parent.left === node || parent.right === node);
 				const isReturned = parent && parent.type === 'ReturnStatement';
-				if (isArgument || isInitializer || isAssigned || isReturned) {
+				/*
+				A bare array in `a + 1`, `(int)a` or a conditional decays to a
+				pointer. That path can still expect the numeric block ABI.
+				*/
+				const isArithmetic = parent && ['BinaryExpression',
+					'ConditionalExpression', 'CastExpression'].includes(parent.type);
+				const isUnaryValue = parent && parent.type === 'UnaryExpression'
+					&& parent.operator !== '&';
+				if (isArgument || isInitializer || isAssigned || isReturned
+					|| isArithmetic || isUnaryValue) {
 					escapes = true;
 					return;
 				}
@@ -5973,6 +5987,23 @@ export class CodeGenerator extends ASTVisitor {
 	 * @param {PointerRet} pointer Address of the first element (traditional layout)
 	 * @returns {import('./mindcInfrastructure.js').ArrayRet}
 	 */
+	/**
+	 * The building a fixed array may keep directly in `_block`.
+	 *
+	 * Only arrays that do not escape may use it: a pointer variable, a call
+	 * argument or `&a` can still be stored where the numeric block id ABI is
+	 * expected.
+	 *
+	 * @param {SymbolEntry} symbol
+	 * @returns {string?}
+	 */
+	arrayNativeBlockOf(symbol) {
+		if (!symbol || symbol.isAddressed || symbol.arrayEscapes
+			|| symbol.isExtern || symbol.nativeBlockUnsafe) return null;
+		if (this.arrayValueEscapes(symbol.name)) return null;
+		return fixedBuildingAliasOf(this.glob, symbol);
+	}
+
 	arrayRetFor(symbol, pointer) {
 		const glob = this.glob;
 		/*
@@ -6459,7 +6490,7 @@ export class CodeGenerator extends ASTVisitor {
 		*/
 		if (this.deliversByReference(node.dataType && node.dataType.kind)) {
 			const byRef = new RefPointerRet(glob, instructions, address.name, node.dataType,
-				true, address.buildingAlias ?? null);
+				true, address.buildingAlias ?? null, address.blockIsBuilding === true);
 			byRef.setAttribute('isNearPointer', isNearPointerHere);
 			byRef.setAttribute('isFromRegStruct', false);
 			return byRef;
@@ -6467,6 +6498,7 @@ export class CodeGenerator extends ASTVisitor {
 		const reference = new MemoryRefRet(glob, instructions,
 			address.name, node.dataType, true);
 		reference.buildingAlias = address.buildingAlias ?? null;
+		reference.blockIsBuilding = address.blockIsBuilding === true;
 		reference.setAttribute('isNearPointer', isNearPointerHere);	// inherit the feature
 		reference.setAttribute('isFromRegStruct', false);
 		const bitfieldInfo = node.memberInfo ?? null;

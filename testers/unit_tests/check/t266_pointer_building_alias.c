@@ -5,6 +5,8 @@ number is still the stored pointer representation, so no pointer ABI changes
 are needed.
 */
 /* EXPECT: 3 9 */
+/* EMIT: set g:\.a_block bank1 */
+/* EMIT-NOT: set g:\.a_block bank1_id */
 /* EMIT: read [^ ]+ bank1 [^ ]+ */
 /* EMIT: write 9 bank1 [^ ]+ */
 /* EMIT-NOT: getlink __curb */

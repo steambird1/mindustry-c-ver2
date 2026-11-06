@@ -792,12 +792,14 @@ export class MemoryBlockInfo {
 		return this;
 	}
 
-	getAssignmentInstruction(varName) {
+	getAssignmentInstruction(varName, blockAsBuilding = false) {
 		if (!this.parent) {
 			throw new MemoryAllocationException();
 		}
+		const block = this.parent.memoryBlocks[this.block];
+		const blockValue = blockAsBuilding ? block.name : `${block.name}_id`;
 		return new Instruction([
-			InstructionBuilder.set(`${varName}_block`, `${this.parent.memoryBlocks[this.block].name}_id`),
+			InstructionBuilder.set(`${varName}_block`, blockValue),
 			InstructionBuilder.set(`${varName}_pos`, this.position)
 		]);
 	}
