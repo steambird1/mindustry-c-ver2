@@ -3847,6 +3847,13 @@ export class CodeGenerator extends ASTVisitor {
 							(isNamePacket || isRemotePointer) ? evaluation
 								: (evaluation.instructionReturn ?? 'null')));
 					}
+				} else if (evaluation instanceof PointerRet && evaluation.blockIsBuilding) {
+					/*
+					The pointer's source is a building-backed array. Store it
+					through the normal pointer assignment path, which serializes
+					`_block` to the numeric id used by pointer variables.
+					*/
+					finalize.concat(this.writeSymbol(symbol, evaluation));
 				} else {
 					finalize.concat(evaluation.replace_variable(symbol.getAssemblySymbol(), evaluation.instructionReturn));
 				}
@@ -3917,6 +3924,7 @@ export class CodeGenerator extends ASTVisitor {
 		hold the address even when the space is the variable's own.
 		*/
 		let valueHandedOff = false;
+		let nativeAssignedSpace = false;
 		
 		/**
 		 * @type {TypeInfo}
@@ -3927,6 +3935,7 @@ export class CodeGenerator extends ASTVisitor {
 				const manualSymbol = this.currentScope.lookup(node.parent.name);
 				const manualSpace = manualSymbol ? manualSymbol.memoryLocation : null;
 				valueHandedOff = manualSpace != null && manualSymbol.accessThroughPointer === true;
+				nativeAssignedSpace = manualSymbol ? !!this.arrayNativeBlockOf(manualSymbol) : false;
 				assignedSpace = manualSpace ?? assignedSpace;
 				if (manualSpace) {
 					// Actually, the preprocessing has been done in the variable declarator visitor.
@@ -4030,7 +4039,8 @@ export class CodeGenerator extends ASTVisitor {
 			the address and is the only place one is ever given to it.
 			*/
 			if (!spaceIsOwned || valueHandedOff) {
-				result.concat(assignedSpace.getAssignmentInstruction(tmpVar.getAssemblySymbol()));
+				result.concat(assignedSpace.getAssignmentInstruction(
+					tmpVar.getAssemblySymbol(), nativeAssignedSpace));
 			}
 			result.instructionReturn = tmpVar.getAssemblySymbol();
 			result.setAttribute('isPointer', true);
@@ -5998,7 +6008,7 @@ export class CodeGenerator extends ASTVisitor {
 	 * @returns {string?}
 	 */
 	arrayNativeBlockOf(symbol) {
-		if (!symbol || symbol.isAddressed || symbol.arrayEscapes
+		if (!symbol || symbol.arrayEscapes
 			|| symbol.isExtern || symbol.nativeBlockUnsafe) return null;
 		if (this.arrayValueEscapes(symbol.name)) return null;
 		return fixedBuildingAliasOf(this.glob, symbol);

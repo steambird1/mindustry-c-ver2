@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 279 passed, 0 failed (189 shape assertions, 1237 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 280 passed, 0 failed (193 shape assertions, 1242 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 106 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 16 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 14 passed, 0 failed, 2 exempt |
@@ -2256,8 +2256,15 @@ called `f` even when `a` was false.
 - Stage 2 is now applied to the same safe set of arrays: `a_block` itself holds
   the building (`set a_block bank1`), and stepping inside the array is a plain
   offset add. The array is kept on the numeric ABI whenever it escapes:
-  address-taking, function arguments (including function-pointer calls),
-  `veccpy`/`vecalias`, array assignment, alias targets and extern arrays.
+  function arguments (including function-pointer calls), `veccpy`/`vecalias`,
+  array assignment, alias targets and extern arrays.
+- Address-taking is now allowed: `&a[i]` is a building-backed temporary, and a
+  pointer declaration such as `int *p = &a[i];` serializes its block through
+  `bank1_id` when the value enters the numeric pointer-variable ABI. The
+  initializer scratch space is also given the building form, so it no longer
+  overwrites `a_block` with a numeric id.
 - Case: t266 checks a four-element global array with a runtime subscript; the
   emitted program contains `set a_block bank1`, direct `bank1` reads/writes and
-  no `getlink __curb`.
+  no `getlink __curb`. t267 checks `&a[1]` / `&a[0]` serialization: the array
+  keeps its building, while `p_block`/`q_block` receive `bank1_id` and pointer
+  dereferences still use `getlink`.

@@ -5559,7 +5559,7 @@ export function symbolRef(glob, symbol) {
 		variable, a call argument or `&a` may be stored or passed where a
 		numeric block id is still expected.
 		*/
-		const nativeBlock = alias && !symbol.isAddressed && !symbol.arrayEscapes
+		const nativeBlock = alias && !symbol.arrayEscapes
 			&& !symbol.isExtern && !symbol.nativeBlockUnsafe
 			&& glob.generator?.arrayValueEscapes?.(symbol.name) !== true
 			? alias : null;
