@@ -462,7 +462,8 @@ export class CodeGenerator extends ASTVisitor {
 		rather than leaving a struct in registers that has no address.
 		*/
 		if (symbol.addressedByName === true) {
-			if (isStructLike && !this.structNamePointerAllowed(type)) {
+			if (isStructLike && !this.structNamePointerAllowed(type,
+				symbol.forcedNamePointer === true)) {
 				symbol.addressedByName = false;
 			} else {
 				addressedByName = true;

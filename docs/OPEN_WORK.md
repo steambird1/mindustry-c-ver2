@@ -21,7 +21,7 @@ Reproduce the baselines from `testers/unit_tests`:
 | runner | result |
 |---|---|
 | `node ../tools/check.mjs` | 289 passed, 0 failed (215 shape assertions, 1282 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 106 passed, 0 failed |
+| `node ../tools/negative.mjs` | 107 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 16 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 14 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
@@ -112,7 +112,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | shared pointer stable ids (§7.56) | **done**; `shared` address space, program-level stable ids, stable-id pointer slots, test t268 | §7.56 |
 | shared chain + two-processor handoff (§7.56) | **done**; stable neighbour registers, peer round-trip test t269, metadata test t270 | §7.56 |
 | qualifier/type matrix (§7.57) | **partial**; shared scalar/array decay works, shared large aggregates need target-address propagation | §7.57 |
-| unified byname name packets (§7.58) | **partial**; register structs (flat or nested, including device/string_t), ordinary pointer members and `byname` pointer members use name packets, arrays still rejected | §7.58 |
+| unified byname name packets (§7.58) | **partial**; register structs (flat or nested, including device/string_t), ordinary/shared pointer members and `byname` pointer members use name packets, arrays still rejected | §7.58 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -2319,6 +2319,7 @@ struct and union types:
   pointer as a numeric block rather than a building.
 - `Big *byname p = byname(&big)` is correctly rejected: a name pointer can
   only name a single register, not a large memory aggregate.
+  `negative/byname_of_memory_struct.c` covers the diagnostic.
 - `int *byname p = byname(&data[2])` is correctly rejected: byname needs the
   address of a variable, not an array element.
 
@@ -2357,3 +2358,10 @@ now work via t272; large struct ARRAY elements still take the numeric path.
   Reading the slot reconstructs a name pointer, and writing it emits the
   literal name (`write "g:.v" @this q.p`) or copies a name held in a register.
   t276 covers `q->p = byname(&v)`, `*q->p` reads and `*q->p = 8`.
+- `byname(&s)` marks its struct target as `addressedByName` BEFORE the argument
+  is visited, so `markVariableAsAddressed` keeps it in registers. Without that
+  the struct was degraded to memory while the packet still named synthetic
+  `.__pointer` fields -- it worked only through the packet and `s.m` stayed
+  unchanged. t273-t276 now assert both the packet read and the direct struct
+  read; `negative/byname_of_memory_struct.c` rejects a target that genuinely
+  needs memory.

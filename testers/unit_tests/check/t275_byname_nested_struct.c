@@ -2,10 +2,10 @@
 A nested flat register struct expands into one name per scalar leaf:
 in.x, in.d, z. The packet still has no address arithmetic.
 */
-/* EXPECT: 3 4 5 */
-/* EMIT: set [^ ]*p\.in\.x "g:\.o\.__pointer\.in\.x" */
-/* EMIT: set [^ ]*p\.in\.d "g:\.o\.__pointer\.in\.d" */
-/* EMIT: set [^ ]*p\.z "g:\.o\.__pointer\.z" */
+/* EXPECT: 3 3 4 4 5 5 */
+/* EMIT: set [^ ]*p\.in\.x "g:\.o\.in\.x" */
+/* EMIT: set [^ ]*p\.in\.d "g:\.o\.in\.d" */
+/* EMIT: set [^ ]*p\.z "g:\.o\.z" */
 auto device message1;
 struct Inner { int x; device d; };
 struct Outer { Inner in; int z; };
@@ -17,9 +17,12 @@ void main() {
     p->in.d = @this;
     p->z = 4;
     print(p->in.x);
+    print(o.in.x);
     print(p->z);
+    print(o.z);
     p->in.x = 5;
     print(p->in.x);
+    print(o.in.x);
     printflush(message1);
     stop();
 }

@@ -11,7 +11,7 @@ import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 // at run time is `MemoryBlockInfo`, and it is a type name, so nothing here
 // reads a binding from `mindcGeneratorBase.js` while this module's body runs.
 import { MemoryBlockInfo } from "./mindcGeneratorBase.js";
-import { widthOfType, normalizeImplementation, registerElementLayoutOf, packedStructLookupCompatible } from "./mindcInfrastructure.js";
+import { widthOfType, normalizeImplementation, registerElementLayoutOf, packedStructLookupCompatible, isNameableRegisterStruct } from "./mindcInfrastructure.js";
 import { makeDiagnostic } from "./mindcDiagnostics.js";
 
 export class VariableLinker {
@@ -3981,6 +3981,35 @@ export class SemanticAnalyzer extends ASTVisitor {
 	}
 
 	/**
+	 * Mark a struct target of `byname(&s)` BEFORE the argument is visited.
+	 *
+	 * `markVariableAsAddressed` degrades a struct to its in-memory copy unless
+	 * the symbol already says "reached by name". Doing this here, before
+	 * `visit(&s)`, is what keeps the struct in registers and makes the packet
+	 * name the real storage instead of a synthetic `__pointer` address pair.
+	 *
+	 * @param {any} node The `byname(...)` call
+	 */
+	prepareByNameTarget(node) {
+		const inner = node.arguments?.[0];
+		if (!inner || inner.type !== 'UnaryExpression' || inner.operator !== '&'
+			|| inner.argument?.type !== 'Identifier') return;
+		const symbol = this.currentScope?.lookup?.(inner.argument.name) ?? null;
+		if (!symbol) return;
+		const type = symbol.myType?.() ?? null;
+		if (!type || !type.isTypeInfo || (type.kind !== 'struct' && type.kind !== 'union')) return;
+		/*
+		A memory aggregate has no register names to carry. Leave it to
+		`consumeByNameCall`, which reports the unsupported shape instead of
+		silently building a packet out of an address pair.
+		*/
+		if (type.isPointerImpl?.() || type.isStrictPointerImpl?.()) return;
+		if (!isNameableRegisterStruct(type)) return;
+		symbol.addressedByName = true;
+		symbol.forcedNamePointer = true;
+	}
+
+	/**
 	 * `int *s = byname(&c);`
 	 *
 	 * The same representation as an automatic name pointer, but asked for
@@ -4006,6 +4035,17 @@ export class SemanticAnalyzer extends ASTVisitor {
 			?? this.currentScope?.lookup?.(inner.argument.name) ?? null;
 		if (!symbol) {
 			this.addError(`'${inner.argument.name}' is not declared`, node.location);
+			return true;
+		}
+		const targetType = symbol.myType?.() ?? null;
+		if (targetType && targetType.isTypeInfo
+			&& (targetType.kind === 'struct' || targetType.kind === 'union')
+			&& (targetType.isPointerImpl?.() || targetType.isStrictPointerImpl?.()
+				|| !isNameableRegisterStruct(targetType))) {
+			this.addError(
+				`byname(&${inner.argument.name}) needs a register struct whose members are `
+				+ `single-register leaves; arrays and memory aggregates cannot be reached by name`,
+				node.location);
 			return true;
 		}
 		if (!symbol.isGlobal) {
@@ -8673,6 +8713,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 
 		// `byname(&c)`: handled here, because the parser makes it a builtin call
 		if (node.functionName === 'byname') {
+			this.prepareByNameTarget(node);
 			node.arguments.forEach(arg => this.visit(arg));
 			this.consumeByNameCall(node);
 			return;

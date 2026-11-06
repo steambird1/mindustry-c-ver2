@@ -1832,7 +1832,7 @@ export class RegistryStructRet extends StructRefRet {
 		representation is permitted for this struct.
 		*/
 		const gen = this.glob.generator;
-		if (gen?.structNamePointerAllowed?.(this.type)) {
+		if (gen?.structNamePointerAllowed?.(this.type, this.symbol?.forcedNamePointer === true)) {
 			const ret = new NameStructPointerRet(this.glob, this.instructions,
 				`${this.instructionReturn}__ptr`, this.type, true);
 			ret.sourceBase = this.instructionReturn;
