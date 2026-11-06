@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 278 passed, 0 failed (184 shape assertions, 1232 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 279 passed, 0 failed (187 shape assertions, 1237 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 106 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 16 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 14 passed, 0 failed, 2 exempt |
@@ -108,6 +108,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | arithmetic-progression const arrays (§7.52) | **done**; auto-selected encoded arrays become `base + i * step`, explicit `array("encoded")` still uses a table, test t262 | §7.52 |
 | quadratic / packed const arrays (§7.53) | **done**; degree-2 polynomials and ≤53-bit packed integers, test t264 | §7.53 |
 | integral facts remove redundant `floor` (§7.54) | **done**; generator lattice plus mlog fallback, test t265 | §7.54 |
+| pointer building alias (§7.55) | **done**; fixed single-block arrays read/write the known building directly, test t266 | §7.55 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -2235,3 +2236,22 @@ called `f` even when `a` was false.
   and removes `op floor/ceil/round t t null` when `t` is already integral.
 - Case: t265 checks `max(int,int) * 1.0` and division by 1 need no floor;
   t10/t157 continue to protect ordinary integer division.
+
+### 7.55 Known-building pointer reads
+
+- A global array whose whole allocation stays inside one memory block carries
+  an optional `buildingAlias` on its pointer (`RefPointerRet`). This is a
+  cached fact, not a change to the pointer ABI: `_block` is still the numeric
+  block id.
+- Scalar reads/writes with a valid alias emit `read target bank pos` /
+  `write value bank pos` directly, skipping `getlink __curb ...`.
+- The alias is propagated through pointer offsets and into the resulting
+  `MemoryRefRet`, so `a[i]` keeps the fast path. It is only assigned when
+  `memoryLocation.position + symbol.size <= block.size`, so stepping within
+  the array cannot cross into another block.
+- Arrays that cross blocks, stack arrays whose block is runtime-dependent, and
+  pointer variables whose target is unknown keep the old `getlink` path.
+- This is stage 1 of the broader pointer work: register pointers can later hold
+  a building directly, with serialization only at memory/remote boundaries.
+- Case: t266 checks a four-element global array with a runtime subscript; the
+  emitted program contains direct `bank1` reads/writes and no `getlink __curb`.

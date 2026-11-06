@@ -6458,13 +6458,15 @@ export class CodeGenerator extends ASTVisitor {
 		the pointer it was supposed to step from.
 		*/
 		if (this.deliversByReference(node.dataType && node.dataType.kind)) {
-			const byRef = new RefPointerRet(glob, instructions, address.name, node.dataType, true);
+			const byRef = new RefPointerRet(glob, instructions, address.name, node.dataType,
+				true, address.buildingAlias ?? null);
 			byRef.setAttribute('isNearPointer', isNearPointerHere);
 			byRef.setAttribute('isFromRegStruct', false);
 			return byRef;
 		}
 		const reference = new MemoryRefRet(glob, instructions,
 			address.name, node.dataType, true);
+		reference.buildingAlias = address.buildingAlias ?? null;
 		reference.setAttribute('isNearPointer', isNearPointerHere);	// inherit the feature
 		reference.setAttribute('isFromRegStruct', false);
 		const bitfieldInfo = node.memberInfo ?? null;

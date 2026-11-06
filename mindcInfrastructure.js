@@ -418,8 +418,16 @@ function peekNext(glob, pointer, isNear = false) {
 	return glob.memory.outputPointerForwardCall(1, pointer, glob.funcReg, false, false, isNear);
 }
 
-export function readThrough(glob, pointer, target, width = 1, isNear = false, blockName = null) {
+export function readThrough(glob, pointer, target, width = 1, isNear = false, buildingAlias = null) {
 	if (width <= 1) {
+		/*
+		When the pointer's block is statically known to be one building (a
+		global array that fits inside its block), read directly instead of
+		walking the block id through `getlink` first.
+		*/
+		if (buildingAlias) {
+			return InstructionBuilder.read(target, buildingAlias, `${pointer}_pos`);
+		}
 		// A stepped pointer keeps the block half of whatever it stepped from,
 		// so the block may be read straight from there instead of a copy.
 		return glob.memory.outputPointerFetchOf(pointer, target);
@@ -440,8 +448,11 @@ export function readThrough(glob, pointer, target, width = 1, isNear = false, bl
  * @param {boolean} isNear
  * @returns {Instruction}
  */
-export function writeThrough(glob, pointer, value, width = 1, isNear = false, blockName = null) {
+export function writeThrough(glob, pointer, value, width = 1, isNear = false, buildingAlias = null) {
 	if (width <= 1) {
+		if (buildingAlias) {
+			return InstructionBuilder.write(value, buildingAlias, `${pointer}_pos`);
+		}
 		return glob.memory.outputPointerStorageOf(pointer, value);
 	}
 	return new Instruction([
@@ -469,7 +480,8 @@ function referenceRead(glob, ref, target, width) {
 		}
 		return glob.memory.outputFetchOf(ref.fixedLocation, target);
 	}
-	return readThrough(glob, ref.name, target, width, ref.isNear, ref.blockAlias ?? null);
+	return readThrough(glob, ref.name, target, width, ref.isNear,
+		ref.buildingAlias ?? ref.blockAlias ?? null);
 }
 
 /**
@@ -490,7 +502,8 @@ function referenceWrite(glob, ref, value, width) {
 		}
 		return glob.memory.outputStorageOf(ref.fixedLocation, value);
 	}
-	return writeThrough(glob, ref.name, value, width, ref.isNear, ref.blockAlias ?? null);
+	return writeThrough(glob, ref.name, value, width, ref.isNear,
+		ref.buildingAlias ?? ref.blockAlias ?? null);
 }
 
 /**
@@ -1091,6 +1104,20 @@ export class NullRet extends BasicRet {
  */
 export class PointerRet extends VariableRet {
 
+	/**
+	 * @param {Globals} glob
+	 * @param {any} instructions
+	 * @param {string} name
+	 * @param {TypeInfo?} type
+	 * @param {boolean} [temporary=false]
+	 * @param {string?} [buildingAlias=null] Statically known building for
+	 *        `name_block`; when set, direct `read/write` needs no `getlink`.
+	 */
+	constructor(glob, instructions, name, type, temporary = false, buildingAlias = null) {
+		super(glob, instructions, name, type, temporary);
+		this.buildingAlias = buildingAlias;
+	}
+
 	get width() {
 		return 2;
 	}
@@ -1106,7 +1133,8 @@ export class PointerRet extends VariableRet {
 		const inner = (this.type && this.type.pointerTo) ? this.type.pointerTo : null;
 		const width = (inner && inner.isPointerImpl()) ? 2 : 1;
 		const instructions = [this.instructions,
-			readThrough(glob, this.name, name, width, this.isNear, this.blockAlias ?? null)];
+			readThrough(glob, this.name, name, width, this.isNear,
+				this.buildingAlias ?? this.blockAlias ?? null)];
 		if (width >= 2) {
 			return new RefPointerRet(glob, instructions, name, inner, this.temporary);
 		}
@@ -1133,7 +1161,8 @@ export class PointerRet extends VariableRet {
 		const value = other.get().convertTo(inner ?? other.type);
 		return valueClassOf(glob, inner).create(glob,
 			[this.instructions, value.instructions,
-				writeThrough(glob, this.name, value.name, value.width, this.isNear, this.blockAlias ?? null)],
+				writeThrough(glob, this.name, value.name, value.width, this.isNear,
+					this.buildingAlias ?? this.blockAlias ?? null)],
 			this.name, inner, false);
 	}
 
@@ -1171,7 +1200,7 @@ export class PointerRet extends VariableRet {
 			InstructionBuilder.set(`${target}_block`, `${this.name}_block`),
 			InstructionBuilder.set(`${target}_pos`, `${this.name}_pos`),
 			pointerStep(glob, target, step, this.isNear, backward)
-		], target, this.type, true);
+		], target, this.type, true, this.buildingAlias);
 	}
 
 	address() {
@@ -1359,6 +1388,7 @@ export class MemoryRefRet extends VariableRet {
 		super(glob, instructions, pointerName, type, temporary);
 		this.fixedLocation = fixedLocation;
 		this.symbol = symbol;
+		this.buildingAlias = null;
 		this.setAttribute('isPointerAccess', true);
 		this.setAttribute('pointerAccess', true);
 		this.setAttribute('disallowReplacement', true);
@@ -5273,6 +5303,31 @@ export function valueClassOf(glob, type) {
  * @param {SymbolEntry} symbol
  * @returns {VariableRet}
  */
+/**
+ * The building that owns a fixed memory array, when the whole array lies in
+ * one block.
+ *
+ * The normal pointer still carries the block *number*; this is an extra fact
+ * that lets a hot scalar access skip the `getlink` on every read/write. It is
+ * only safe when the allocation does not cross a block boundary.
+ *
+ * @param {Globals} glob
+ * @param {SymbolEntry} symbol
+ * @returns {string?}
+ */
+function fixedBuildingAliasOf(glob, symbol) {
+	const type = symbol?.myType?.() ?? null;
+	if (!type || type.kind !== 'array') return null;
+	if (symbol.isRemote === true || symbol.arrayAliasOf) return null;
+	const location = symbol.memoryLocation ?? null;
+	if (!location) return null;
+	const block = glob.memory?.memoryBlocks?.[location.block] ?? null;
+	if (!block) return null;
+	const size = Number(symbol.size ?? type.size) || 0;
+	if (size <= 0 || location.position + size > block.size) return null;
+	return block.name;
+}
+
 export function symbolRef(glob, symbol) {
 	const assembly = symbol.getAssemblySymbol();
 	const type = symbol.myType();
@@ -5437,7 +5492,8 @@ export function symbolRef(glob, symbol) {
 			const fixed = symbol.memoryRef();
 			return new MemPointerRet(glob, [], `${assembly}.__pointer`, type, false, fixed, symbol);
 		}
-		const ret = new RefPointerRet(glob, [], assembly, type, symbol.isVirtualSymbol, symbol);
+		const ret = new RefPointerRet(glob, [], assembly, type, symbol.isVirtualSymbol,
+			fixedBuildingAliasOf(glob, symbol));
 		ret.setAttribute('isSymbolic', true);
 		ret.setAttribute('relevantSymbol', symbol);
 		ret.setAttribute('relevantSymbolRead', symbol);
