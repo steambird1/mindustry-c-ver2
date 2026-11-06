@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 281 passed, 0 failed (197 shape assertions, 1247 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 283 passed, 0 failed (201 shape assertions, 1252 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 106 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 16 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 14 passed, 0 failed, 2 exempt |
@@ -110,6 +110,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | integral facts remove redundant `floor` (§7.54) | **done**; generator lattice plus mlog fallback, test t265 | §7.54 |
 | pointer building alias (§7.55) | **done**; non-escaping single-block arrays keep the building in `_block` and read/write directly, test t266 | §7.55 |
 | shared pointer stable ids (§7.56) | **done**; `shared` address space, program-level stable ids, stable-id pointer slots, test t268 | §7.56 |
+| shared chain + two-processor handoff (§7.56) | **done**; stable neighbour registers, peer round-trip test t269, metadata test t270 | §7.56 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -2289,3 +2290,11 @@ called `f` even when `a` was false.
 - Case: t268 stores `&data[2]` in a `shared int *volatile` slot and reads it
   back; the slot contains stable id 1 (not `bank1_id`), the reader selects
   `bank1`, and no `getlink __curb` remains.
+- The four block-chain cells are unchanged: slots 0/1 keep the local link ids
+  used by ordinary pointers. Program-level neighbour ids are kept in
+  `__mc_prevstable_N` / `__mc_nextstable_N` registers so the local chain does
+  not pay for shared ABI support and the four reserved cells stay compatible.
+- t269 runs two processors over the same memory block with an INTERLEAVE
+  handshake: the peer publishes `&shared_data[1]` through a shared pointer
+  slot and the main processor resolves stable id 1 back to its own bank1 and
+  prints 42. t270 checks the stable neighbour registers.

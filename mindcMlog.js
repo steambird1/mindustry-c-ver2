@@ -448,6 +448,7 @@ function eliminateDeadTemps(leaves, protectedNodes, reads) {
 		if (index < 0) continue;
 		const target = tokens[index];
 		if (!target || target.startsWith('@')) continue;
+		if (target.startsWith('__mc_')) continue;
 		if (!target.startsWith('__') && !target.includes('__tempsym')) continue;
 		if ((reads.get(target) ?? 0) > 0) continue;
 		leaf.content = '';

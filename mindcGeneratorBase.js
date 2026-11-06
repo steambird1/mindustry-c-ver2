@@ -985,6 +985,16 @@ export class MemoryManager {
 				content: 'write ' + baseAddress + ' ' + this.memoryBlocks[i].name + ' 3',
 				referrer: []
 			}));
+			/*
+			Stable-id neighbours for shared pointers. Keeping these in
+			registers avoids changing the four reserved cells of every block;
+			local pointer walking keeps using slots 0/1.
+			*/
+			result.concat(InstructionBuilder.set(`__mc_prevstable_${i}`,
+				String(i === 0 ? 0 : this.memoryBlocks[i - 1].stableId)));
+			result.concat(InstructionBuilder.set(`__mc_nextstable_${i}`,
+				String(i === this.memoryBlocks.length - 1 ? 0
+					: this.memoryBlocks[i + 1].stableId)));
 			baseAddress += this.memoryBlocks[i].size - this.reservedSize;
 		}
 		return result;
