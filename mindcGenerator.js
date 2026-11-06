@@ -30,7 +30,7 @@ import { ensureMemspHelper, remoteDeviceRegOf, remoteNameRegOf, RemotePointerRet
 	symbolRef, ExportRet, valueClassOf, readThrough, writeThrough, pointerStep,
 	RegistryStructRet, NamePointerRet, MemoryNamePointerRet,
 	arrayRetOf, selectArrayImplementation, accessCostOf,
-	pointerToValue, valueToPointer, contentTypeOf, SPECIAL_CONTENT_TYPES, fixedBuildingAliasOf, isSharedPointerType,
+	pointerToValue, valueToPointer, contentTypeOf, SPECIAL_CONTENT_TYPES, fixedBuildingAliasOf, isSharedPointerType, isNameableRegisterStruct,
 	arithmetic, widthOfType, knownContentIdOf, memberTypeOf, InvalidCastException, InfrastructureNotImplementedExpection,
 	ENCODED_OFFSET, ENCODED_RADIX
  } from "./mindcInfrastructure.js";
@@ -368,13 +368,12 @@ export class CodeGenerator extends ASTVisitor {
 		if (type.kind !== 'struct' && type.kind !== 'union') return false;
 		const version = (this.semantic.targetVersion ?? this.compiler?.config?.getAttribute('targetVersion') ?? 0);
 		if (version < 150) return false;
+		if (explicit) return isNameableRegisterStruct(type);
 		const config = this.compiler?.extraConfig?.getAttribute('optimizeOption') ?? {};
-		if (!explicit && config.doStructPointerOptimize !== true) return false;
+		if (config.doStructPointerOptimize !== true) return false;
 		/*
 		Only a FLAT struct can be carried this way: a member that is itself a
-		struct has no single register name to store. An explicitly requested
-		`byname` packet is restricted further to direct single-register leaves;
-		the pragma path keeps its existing broader flat check.
+		struct has no single register name to store.
 		*/
 		const members = type.members ?? [];
 		if (!members.every(m => isFlatComponentType(m.type ?? m.memberType))) return false;
@@ -383,7 +382,6 @@ export class CodeGenerator extends ASTVisitor {
 		No number given: 4 registers when a memory block exists (so a big
 		struct still has somewhere to go), unbounded when none does.
 		*/
-		if (explicit) return true;
 		const given = config.structPointerThreshold;
 		const limit = (typeof given === 'number') ? given
 			: ((this.memory?.memoryBlocks?.length ?? 0) > 0 ? 4 : Infinity);

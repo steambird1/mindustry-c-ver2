@@ -11,7 +11,7 @@ import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 import { InstructionBuilder } from "./mindcGeneratorBase.js";
 
 import { SymbolEntry, Scope, TypeInfo, MemberInfo, SemanticAnalyzer, VariableLinker } from "./mindcSemantic.js";
-import { widthOfType } from "./mindcInfrastructure.js";
+import { widthOfType, isNameableRegisterStruct } from "./mindcInfrastructure.js";
 
 // Auxiliary type to handle break/continue
 class BreakException {
@@ -761,16 +761,7 @@ export class Optimizer extends ASTVisitor {
 		 * @returns {boolean}
 		 */
 		const isNameableAggregate = (type) => {
-			if (!type || type.kind !== 'struct') return false;
-			const members = type.members ?? [];
-			if (members.length === 0) return false;
-			return members.every(member => {
-				const memberType = member?.type ?? member?.memberType ?? null;
-				if (!memberType || !memberType.isTypeInfo) return false;
-				if (memberType.kind === 'pointer') return true;
-				return ['basic', 'device', 'null', 'null_t'].includes(memberType.kind)
-					&& widthOfType(memberType) === 1;
-			});
+			return !!type && type.kind === 'struct' && isNameableRegisterStruct(type);
 		};
 
 		const keyOf = symbol => symbol?.getAssemblySymbol?.() ?? symbol?.name ?? null;

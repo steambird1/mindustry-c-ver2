@@ -4569,6 +4569,33 @@ export function isFlatComponentType(type) {
 	return type.kind !== 'struct' && type.kind !== 'union';
 }
 
+/**
+ * Whether a register struct can be represented by one name per scalar leaf.
+ * Nested register structs are allowed; arrays, unions and memory aggregates
+ * are not.
+ *
+ * @param {any} type
+ * @param {number} [depth=0]
+ * @returns {boolean}
+ */
+export function isNameableRegisterStruct(type, depth = 0) {
+	if (!type || !type.isTypeInfo || type.kind !== 'struct' || depth > 8) return false;
+	const members = type.members ?? [];
+	if (members.length === 0) return false;
+	for (const member of members) {
+		const memberType = member.type ?? member.memberType;
+		if (!memberType || !memberType.isTypeInfo) return false;
+		if (memberType.kind === 'pointer') continue;
+		if (memberType.kind === 'struct') {
+			if (!isNameableRegisterStruct(memberType, depth + 1)) return false;
+			continue;
+		}
+		if (!['basic', 'device', 'null', 'null_t'].includes(memberType.kind)) return false;
+		if (widthOfType(memberType) !== 1) return false;
+	}
+	return true;
+}
+
 export function componentCountOf(type, depth = 0) {
 	if (!type || !type.isTypeInfo) return 1;
 	if (depth > 8) return 1;
@@ -4721,6 +4748,10 @@ export class NameStructPointerRet extends PointerRet {
 	member(memberName, memberType = null) {
 		const glob = this.glob;
 		const type = memberType ?? memberTypeOf(glob, this.structType ?? this.type, memberName);
+		if (type?.kind === 'struct' && isNameableRegisterStruct(type)) {
+			return new NameStructPointerRet(glob, [], `${this.name}.${memberName}`,
+				pointerTypeOf(glob, type), false);
+		}
 		if (type?.kind === 'pointer' && !isNamePointerType(type)) {
 			return new NamePointerPairRet(glob, [],
 				`${this.name}.${memberName}_block`, `${this.name}.${memberName}_pos`,
@@ -4744,28 +4775,25 @@ export class NameStructPointerRet extends PointerRet {
 			const type = member.type ?? member.memberType;
 			return type?.kind === 'pointer' && !isNamePointerType(type);
 		};
-		const emitLiteral = (member, base) => {
+		const emitMember = (member, targetBase, sourceBase, literal) => {
 			const name = member.name ?? member.memberName;
-			if (isPair(member)) {
-				instructions.push(InstructionBuilder.set(`${this.name}.${name}_block`,
-					`"${base}.${name}_block"`));
-				instructions.push(InstructionBuilder.set(`${this.name}.${name}_pos`,
-					`"${base}.${name}_pos"`));
-			} else {
-				instructions.push(InstructionBuilder.set(`${this.name}.${name}`,
-					`"${base}.${name}"`));
+			const type = member.type ?? member.memberType;
+			const target = `${targetBase}.${name}`;
+			const source = `${sourceBase}.${name}`;
+			if (type?.kind === 'struct') {
+				for (const inner of type.members ?? []) {
+					emitMember(inner, target, source, literal);
+				}
+				return;
 			}
-		};
-		const emitCopy = (member, sourceBase) => {
-			const name = member.name ?? member.memberName;
 			if (isPair(member)) {
-				instructions.push(InstructionBuilder.set(`${this.name}.${name}_block`,
-					`${sourceBase}.${name}_block`));
-				instructions.push(InstructionBuilder.set(`${this.name}.${name}_pos`,
-					`${sourceBase}.${name}_pos`));
+				instructions.push(InstructionBuilder.set(`${target}_block`,
+					literal ? `"${source}_block"` : `${source}_block`));
+				instructions.push(InstructionBuilder.set(`${target}_pos`,
+					literal ? `"${source}_pos"` : `${source}_pos`));
 			} else {
-				instructions.push(InstructionBuilder.set(`${this.name}.${name}`,
-					`${sourceBase}.${name}`));
+				instructions.push(InstructionBuilder.set(target,
+					literal ? `"${source}"` : source));
 			}
 		};
 		/*
@@ -4775,7 +4803,7 @@ export class NameStructPointerRet extends PointerRet {
 		*/
 		const fromAddress = value.sourceBase ?? null;
 		if (fromAddress) {
-			for (const m of members) emitLiteral(m, fromAddress);
+			for (const m of members) emitMember(m, this.name, fromAddress, true);
 			return new NameStructPointerRet(glob, instructions, this.name, this.type, this.temporary);
 		}
 		if (value instanceof NameStructPointerRet) {
@@ -4784,7 +4812,7 @@ export class NameStructPointerRet extends PointerRet {
 			as a literal -- `q.a` has to hold what `p.a` holds, not the text
 			"p.a".
 			*/
-			for (const m of members) emitCopy(m, value.name);
+			for (const m of members) emitMember(m, this.name, value.name, false);
 			return new NameStructPointerRet(glob, instructions, this.name, this.type, this.temporary);
 		}
 		/*
@@ -4793,7 +4821,7 @@ export class NameStructPointerRet extends PointerRet {
 		*/
 		const base = value.instructionReturn ?? null;
 		if (!base) throw new InvalidCastException(other, this);
-		for (const m of members) emitLiteral(m, base);
+		for (const m of members) emitMember(m, this.name, base, true);
 		return new NameStructPointerRet(glob, instructions, this.name, this.type, this.temporary);
 	}
 
@@ -4864,6 +4892,10 @@ export class NameStructDerefRet extends StructRefRet {
 	member(memberName, memberType = null) {
 		const glob = this.glob;
 		const type = memberType ?? memberTypeOf(glob, this.structType, memberName);
+		if (type?.kind === 'struct' && isNameableRegisterStruct(type)) {
+			return new NameStructDerefRet(glob, [], `${this.name}.${memberName}`,
+				pointerTypeOf(glob, type), false);
+		}
 		if (type?.kind === 'pointer' && !isNamePointerType(type)) {
 			return new NamePointerPairRet(glob, [],
 				`${this.name}.${memberName}_block`, `${this.name}.${memberName}_pos`,
