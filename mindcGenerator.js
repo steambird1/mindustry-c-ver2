@@ -6317,20 +6317,14 @@ export class CodeGenerator extends ASTVisitor {
 		so `p->m` is one `read @this p.m` and needs no address at all.
 		*/
 		if (object instanceof NameStructPointerRet) {
-			const member = object.member(node.children[1].name, node.dataType);
 			/*
-			A member that itself carries a NAME: `p->m` reads the name out of
-			the struct, and what it reads IS the name -- one word, not a
-			block/offset pair. Left as a pointer it was dereferenced through
-			`_block` / `_pos`, which for a name are meaningless.
+			`NameSlotRet` already knows both halves of the member: `get()`
+			returns the value (including a NamePointerRet for a byname pointer
+			member), and `set()` writes through the member's name. Wrapping a
+			member that carries a name in a fresh NamePointerRet made reads work
+			but turned every assignment into a detached temporary.
 			*/
-			if (node.getAttribute?.('memberByname') === true
-				|| node.memberInfo?.namePointer === true) {
-				const read = member.get();
-				return new NamePointerRet(glob, read.instructions, read.instructionReturn,
-					node.dataType, true);
-			}
-			return member;
+			return object.member(node.children[1].name, node.dataType);
 		}
 		/*
 		`p->m` on a remote struct pointer: one `read`/`write` of the member name

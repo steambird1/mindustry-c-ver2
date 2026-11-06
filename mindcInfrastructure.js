@@ -2209,7 +2209,17 @@ export class NameSlotRet extends VariableRet {
 	}
 
 	get() {
-		return this.pointer.fetch(this.glob.tmp(this.type));
+		const read = this.pointer.fetch(this.glob.tmp(this.type));
+		/*
+		The cell of a `*byname` member holds a NAME. Reading it must stay a
+		name pointer; letting the read become an integer makes `*member`
+		treat the name as a block/offset pair and fetch garbage.
+		*/
+		if (isNamePointerType(this.type)) {
+			return new NamePointerRet(this.glob, read.instructions, read.name,
+				this.type, true, null);
+		}
+		return read;
 	}
 
 	/**
@@ -2217,6 +2227,29 @@ export class NameSlotRet extends VariableRet {
 	 * @returns {VariableRet}
 	 */
 	set(other) {
+		/*
+		A member whose own type is a BYNAME pointer stores a NAME, not a
+		block/offset pair. Converting the source to an integer address would
+		write the number into the member and destroy the name representation.
+		*/
+		if (isNamePointerType(this.type)) {
+			const glob = this.glob;
+			const value = other.get();
+			/*
+			A compile-time name (`byname(&v)`) has to be written as the
+			literal string `"g:.v"`. A name already held in a register is
+			copied as that register's value.
+			*/
+			const operand = value instanceof NamePointerRet
+				? (value.targetName ? `"${value.targetName}"` : value.name)
+				: value.name;
+			const source = this.pointer.targetName
+				? `"${this.pointer.targetName}"` : this.pointer.name;
+			return new NamePointerRet(glob, [
+				this.pointer.instructions, value.instructions,
+				InstructionBuilder.write(operand, '@this', source)
+			], value.name, this.type, this.temporary);
+		}
 		return this.pointer.pointedSet(other);
 	}
 }

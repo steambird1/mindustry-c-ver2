@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 288 passed, 0 failed (214 shape assertions, 1277 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 289 passed, 0 failed (215 shape assertions, 1282 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 106 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 16 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 14 passed, 0 failed, 2 exempt |
@@ -112,7 +112,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | shared pointer stable ids (§7.56) | **done**; `shared` address space, program-level stable ids, stable-id pointer slots, test t268 | §7.56 |
 | shared chain + two-processor handoff (§7.56) | **done**; stable neighbour registers, peer round-trip test t269, metadata test t270 | §7.56 |
 | qualifier/type matrix (§7.57) | **partial**; shared scalar/array decay works, shared large aggregates need target-address propagation | §7.57 |
-| unified byname name packets (§7.58) | **partial**; register structs (flat or nested, including device/string_t) and ordinary pointer members use multi-name packets, arrays still rejected | §7.58 |
+| unified byname name packets (§7.58) | **partial**; register structs (flat or nested, including device/string_t), ordinary pointer members and `byname` pointer members use name packets, arrays still rejected | §7.58 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -2352,5 +2352,8 @@ now work via t272; large struct ARRAY elements still take the numeric path.
   `*q->p`.
 - Still limited: memory aggregates and fixed arrays inside the struct do not
   form a name packet; they are rejected and should use an ordinary/shared
-  pointer instead. A `byname` pointer member still takes the single-name slot
-  path and is not part of this pointer-pair test.
+  pointer instead.
+- A `*byname` pointer member stores the target NAME in its single packet slot.
+  Reading the slot reconstructs a name pointer, and writing it emits the
+  literal name (`write "g:.v" @this q.p`) or copies a name held in a register.
+  t276 covers `q->p = byname(&v)`, `*q->p` reads and `*q->p = 8`.
