@@ -1928,7 +1928,8 @@ export class SemanticAnalyzer extends ASTVisitor {
 			return arr;
 		};
 		const checkQualifiers = ['const', 'volatile', 'near', 'extern', 'auto',
-			'static', 'persistent', 'register', 'remote', 'byname', 'byvaluename', 'restrict'];
+			'static', 'persistent', 'register', 'remote', 'byname', 'byvaluename',
+			'restrict', 'shared'];
 		const chunks = String(typeNameRaw).split(/\s+/).filter(c => c.length > 0);
 		if (chunks.length === 0) {
 			return null;

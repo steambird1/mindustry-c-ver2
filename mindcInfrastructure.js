@@ -418,6 +418,68 @@ function peekNext(glob, pointer, isNear = false) {
 	return glob.memory.outputPointerForwardCall(1, pointer, glob.funcReg, false, false, isNear);
 }
 
+/**
+ * Whether a pointer type points into shared memory.
+ *
+ * `shared` is an address-space qualifier on the pointee:
+ *   shared int *p;
+ *
+ * @param {TypeInfo?} type
+ * @returns {boolean}
+ */
+export function isSharedPointerType(type) {
+	return !!type && type.kind === 'pointer'
+		&& (type.pointerTo?.qualifiers ?? []).includes('shared');
+}
+
+/**
+ * The program-level stable id of a configured memory block, or 0.
+ * @param {Globals} glob
+ * @param {string} name
+ * @returns {number}
+ */
+export function stableIdOfBlock(glob, name) {
+	const block = (glob.memory?.memoryBlocks ?? [])
+		.find(candidate => candidate.name === name);
+	return block?.stableId ?? 0;
+}
+
+/**
+ * Emit `stableId -> building` for the configured memory blocks.
+ *
+ * The table is a select chain, not a memory lookup: the entries are building
+ * values and therefore have to live in registers/code.
+ *
+ * @param {Globals} glob
+ * @param {string} idOperand
+ * @param {string} target
+ * @returns {Instruction}
+ */
+export function stableIdToBuilding(glob, idOperand, target) {
+	const result = new Instruction([InstructionBuilder.set(target, 'null')]);
+	for (const block of glob.memory?.memoryBlocks ?? []) {
+		result.concat(InstructionBuilder.select(target, 'equal', idOperand,
+			String(block.stableId ?? 0), block.name, target));
+	}
+	return result;
+}
+
+/**
+ * Emit `building -> stableId` for the configured memory blocks.
+ * @param {Globals} glob
+ * @param {string} buildingOperand
+ * @param {string} target
+ * @returns {Instruction}
+ */
+export function buildingToStableId(glob, buildingOperand, target) {
+	const result = new Instruction([InstructionBuilder.set(target, '0')]);
+	for (const block of glob.memory?.memoryBlocks ?? []) {
+		result.concat(InstructionBuilder.select(target, 'equal', buildingOperand,
+			block.name, String(block.stableId ?? 0), target));
+	}
+	return result;
+}
+
 export function readThrough(glob, pointer, target, width = 1, isNear = false, buildingAlias = null) {
 	if (width <= 1) {
 		/*
@@ -481,8 +543,10 @@ function referenceRead(glob, ref, target, width) {
 		}
 		return glob.memory.outputFetchOf(ref.fixedLocation, target);
 	}
-	return readThrough(glob, ref.name, target, width, ref.isNear,
-		ref.buildingAlias ?? ref.blockAlias ?? null);
+	const building = ref.blockIsBuilding
+		? (ref.buildingAlias ?? `${ref.name}_block`)
+		: (ref.buildingAlias ?? ref.blockAlias ?? null);
+	return readThrough(glob, ref.name, target, width, ref.isNear, building);
 }
 
 /**
@@ -503,8 +567,10 @@ function referenceWrite(glob, ref, value, width, valueBlock = null) {
 		}
 		return glob.memory.outputStorageOf(ref.fixedLocation, value);
 	}
-	return writeThrough(glob, ref.name, value, width, ref.isNear,
-		ref.buildingAlias ?? ref.blockAlias ?? null, valueBlock);
+	const building = ref.blockIsBuilding
+		? (ref.buildingAlias ?? `${ref.name}_block`)
+		: (ref.buildingAlias ?? ref.blockAlias ?? null);
+	return writeThrough(glob, ref.name, value, width, ref.isNear, building, valueBlock);
 }
 
 /**
@@ -1146,6 +1212,14 @@ export class PointerRet extends VariableRet {
 	 * @returns {string}
 	 */
 	storageBlockName() {
+		if (isSharedPointerType(this.type)) {
+			if (this.blockIsBuilding && this.buildingAlias) {
+				const id = stableIdOfBlock(this.glob, this.buildingAlias);
+				if (id > 0) return String(id);
+			}
+			throw new InfrastructureNotImplementedExpection(
+				'a shared pointer needs a statically known building to serialize');
+		}
 		if (!this.blockIsBuilding) return `${this.name}_block`;
 		if (!this.buildingAlias) {
 			throw new InfrastructureNotImplementedExpection(
@@ -1164,9 +1238,11 @@ export class PointerRet extends VariableRet {
 		const name = nameOf(target);
 		const inner = (this.type && this.type.pointerTo) ? this.type.pointerTo : null;
 		const width = (inner && inner.isPointerImpl()) ? 2 : 1;
+		const blockForRead = this.blockIsBuilding
+			? (this.buildingAlias ?? `${this.name}_block`)
+			: (this.blockAlias ?? null);
 		const instructions = [this.instructions,
-			readThrough(glob, this.name, name, width, this.isNear,
-				this.buildingAlias ?? this.blockAlias ?? null)];
+			readThrough(glob, this.name, name, width, this.isNear, blockForRead)];
 		if (width >= 2) {
 			return new RefPointerRet(glob, instructions, name, inner, this.temporary);
 		}
@@ -1193,10 +1269,13 @@ export class PointerRet extends VariableRet {
 		const value = other.get().convertTo(inner ?? other.type);
 		const valueBlock = (value instanceof PointerRet && value.blockIsBuilding)
 			? value.storageBlockName() : null;
+		const blockForWrite = this.blockIsBuilding
+			? (this.buildingAlias ?? `${this.name}_block`)
+			: (this.blockAlias ?? null);
 		return valueClassOf(glob, inner).create(glob,
 			[this.instructions, value.instructions,
 				writeThrough(glob, this.name, value.name, value.width, this.isNear,
-					this.buildingAlias ?? this.blockAlias ?? null, valueBlock)],
+					blockForWrite, valueBlock)],
 			this.name, inner, false);
 	}
 
@@ -1311,11 +1390,16 @@ export class RefPointerRet extends PointerRet {
 				this.instructions, value.rename(this.instructionReturn).instructions
 			], this.instructionReturn, this.type, this.temporary);
 		}
+		const sharedTarget = isSharedPointerType(this.type);
+		const blockValue = sharedTarget && value.blockIsBuilding
+			? `${value.name}_block` : value.storageBlockName();
 		return new RefPointerRet(glob, [
 			this.instructions, value.instructions,
-			InstructionBuilder.set(`${this.instructionReturn}_block`, value.storageBlockName()),
+			InstructionBuilder.set(`${this.instructionReturn}_block`, blockValue),
 			InstructionBuilder.set(`${this.instructionReturn}_pos`, `${value.name}_pos`)
-		], this.instructionReturn, this.type, this.temporary);
+		], this.instructionReturn, this.type, this.temporary,
+			sharedTarget ? value.buildingAlias : null,
+			sharedTarget && value.blockIsBuilding);
 	}
 }
 
@@ -1357,9 +1441,18 @@ export class MemPointerRet extends PointerRet {
 	 * @returns {RefPointerRet}
 	 */
 	get() {
-		const target = this.glob.tmp(this.type, 'pointer');
-		return new RefPointerRet(this.glob,
-			[this.instructions, referenceRead(this.glob, this, target, 2)], target, this.type, true);
+		const glob = this.glob;
+		const target = glob.tmp(this.type, 'pointer');
+		if (isSharedPointerType(this.type)) {
+			const id = glob.tmp(glob.semantic.getTypeInfo('int'));
+			return new RefPointerRet(glob,
+				[this.instructions, referenceRead(glob, this, target, 2),
+					InstructionBuilder.set(id.name ?? id, `${target}_block`),
+					stableIdToBuilding(glob, id.name ?? id, `${target}_block`)],
+				target, this.type, true, null, true);
+		}
+		return new RefPointerRet(glob,
+			[this.instructions, referenceRead(glob, this, target, 2)], target, this.type, true);
 	}
 
 	/**
@@ -1377,8 +1470,19 @@ export class MemPointerRet extends PointerRet {
 			throw new InfrastructureNotImplementedExpection(
 				`cannot assign a value of type '${value.type?.toString?.() ?? 'unknown'}' to a pointer`);
 		}
+		let valueBlock = null;
+		if (isSharedPointerType(this.type) && value.blockIsBuilding) {
+			const id = value.buildingAlias
+				? stableIdOfBlock(glob, value.buildingAlias) : 0;
+			if (id <= 0) {
+				throw new InfrastructureNotImplementedExpection(
+					'a shared pointer needs a statically known building to serialize');
+			}
+			valueBlock = String(id);
+		}
 		return new RefPointerRet(glob,
-			[this.instructions, value.instructions, referenceWrite(glob, this, value.name, 2)],
+			[this.instructions, value.instructions,
+				referenceWrite(glob, this, value.name, 2, valueBlock)],
 			this.name, this.type, false);
 	}
 
@@ -1461,6 +1565,25 @@ export class MemoryRefRet extends VariableRet {
 	get() {
 		const glob = this.glob;
 		const width = this.width;
+		if (globalThis.process?.env?.MC_DEBUG) {
+			console.error(`MEMGET type=${this.type?.toString?.()} shared=${isSharedPointerType(this.type)} pointee=${JSON.stringify(this.type?.pointerTo?.qualifiers)}`);
+		}
+		if (isSharedPointerType(this.type)) {
+			/*
+			The slot stores a portable stable id. Read the two cells first,
+			then resolve the id against this processor's local table.
+			*/
+			const target = glob.tmp(this.type, 'pointer');
+			const id = glob.tmp(glob.semantic.getTypeInfo('int'));
+			const instructions = [
+				this.instructions,
+				referenceRead(glob, this, target, width),
+				InstructionBuilder.set(id.name ?? id, `${target}_block`),
+				stableIdToBuilding(glob, id.name ?? id, `${target}_block`)
+			];
+			return new RefPointerRet(glob, instructions, target, this.type, true,
+				null, true);
+		}
 		const target = glob.tmp(this.type, width >= 2 ? 'pointer' : null);
 		const instructions = [this.instructions, referenceRead(glob, this, target, width)];
 		return valueClassOf(glob, this.type).create(glob, instructions, target, this.type, true);
@@ -5564,7 +5687,7 @@ export function symbolRef(glob, symbol) {
 			&& glob.generator?.arrayValueEscapes?.(symbol.name) !== true
 			? alias : null;
 		const ret = new RefPointerRet(glob, [], assembly, type, symbol.isVirtualSymbol,
-			alias, nativeBlock !== null);
+			alias, nativeBlock !== null || isSharedPointerType(type));
 		ret.setAttribute('isSymbolic', true);
 		ret.setAttribute('relevantSymbol', symbol);
 		ret.setAttribute('relevantSymbolRead', symbol);
@@ -5638,7 +5761,13 @@ function buildRet(glob, inst, type, width, throughPointer, temporary, relevant) 
 			temporary, fixed, relevant ?? null);
 	}
 	if (width >= 2) {
-		return new RefPointerRet(glob, inst.instructions, inst.instructionReturn, type, temporary);
+		const ret = new RefPointerRet(glob, inst.instructions, inst.instructionReturn, type, temporary);
+		/*
+		A shared pointer normally keeps its building in `_block`, even when it
+		passes through the legacy Instruction path.
+		*/
+		if (isSharedPointerType(type)) ret.blockIsBuilding = true;
+		return ret;
 	}
 	if (type && type.isTypeInfo && ['struct', 'union'].includes(type.kind)) {
 		return new StructRefRet(glob, inst.instructions, inst.instructionReturn, type,

@@ -889,7 +889,12 @@ export class MemoryManager {
 		const hasMemory = this.memoryBlocks.length > 0;
 		this.memoryPositionStack = [new MemoryBlockInfo(0, this.reservedSize, !hasMemory, this)];
 		this.variableReference = new Map();
-		this.memoryBlocks.forEach(single => {
+		this.memoryBlocks.forEach((single, index) => {
+			/*
+			A program-level logical id: it is independent of the runtime
+			`@links` order, so it can be stored in shared memory.
+			*/
+			if (!single.stableId) single.stableId = index + 1;
 			for (let i = 0; i < 4; i++) {
 				single.occupation[i] = '__internal_reserve';
 			}

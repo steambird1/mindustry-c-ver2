@@ -35,7 +35,7 @@ export const TokenType = {
 	RESTRICT: 'RESTRICT',
 	REMOTE: 'REMOTE',
 	BYNAME: 'BYNAME',
-	REMOTE: 'REMOTE',
+	SHARED: 'SHARED',
     RETURN: 'RETURN',
     SHORT: 'SHORT',
     SIGNED: 'SIGNED',
@@ -204,7 +204,8 @@ export class Token {
             TokenType.IF, TokenType.INT, TokenType.LONG, TokenType.REGISTER, TokenType.RETURN,
             TokenType.SHORT, TokenType.SIGNED, TokenType.SIZEOF, TokenType.WIDTHOF, TokenType.STATIC, TokenType.STRUCT,
             TokenType.SWITCH, TokenType.TYPEDEF, TokenType.UNION, TokenType.UNSIGNED, TokenType.VOID,
-            TokenType.VOLATILE, TokenType.WHILE, TokenType.NULL, TokenType.PERSISTENT
+            TokenType.VOLATILE, TokenType.WHILE, TokenType.NULL, TokenType.PERSISTENT,
+            TokenType.SHARED
         ];
         return keywords.includes(this.type);
     }
@@ -217,6 +218,7 @@ export const KEYWORDS = {
 	'bool': TokenType.BOOL,
 	'byname': TokenType.BYNAME,
 	'remote': TokenType.REMOTE,
+	'shared': TokenType.SHARED,
     'case': TokenType.CASE,
     'char': TokenType.CHAR,
     'const': TokenType.CONST,

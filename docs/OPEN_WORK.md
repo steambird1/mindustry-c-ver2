@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 280 passed, 0 failed (193 shape assertions, 1242 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 281 passed, 0 failed (197 shape assertions, 1247 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 106 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 16 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 14 passed, 0 failed, 2 exempt |
@@ -109,6 +109,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | quadratic / packed const arrays (§7.53) | **done**; degree-2 polynomials and ≤53-bit packed integers, test t264 | §7.53 |
 | integral facts remove redundant `floor` (§7.54) | **done**; generator lattice plus mlog fallback, test t265 | §7.54 |
 | pointer building alias (§7.55) | **done**; non-escaping single-block arrays keep the building in `_block` and read/write directly, test t266 | §7.55 |
+| shared pointer stable ids (§7.56) | **done**; `shared` address space, program-level stable ids, stable-id pointer slots, test t268 | §7.56 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -2268,3 +2269,23 @@ called `f` even when `a` was false.
   no `getlink __curb`. t267 checks `&a[1]` / `&a[0]` serialization: the array
   keeps its building, while `p_block`/`q_block` receive `bank1_id` and pointer
   dereferences still use `getlink`.
+
+### 7.56 Shared pointers and program-level stable ids
+
+- `shared` is an address-space qualifier on the pointee:
+  `shared int *p` means the target lives in shared memory. It is orthogonal to
+  `remote` (which says where the pointer itself is stored).
+- Every configured memory block receives a compile-time `stableId` (declaration
+  order + 1). This id is independent of the runtime `@links` order.
+- Shared pointers keep a building in registers. When written to memory, the
+  block half is the stable id; when read, a local select table maps the id back
+  to this processor's building.
+- `stableIdToBuilding`/`buildingToStableId` are select chains over the memory
+  blocks, not memory tables. This is enough for the usual small number of
+  shared banks/cells; a large table can later move to a local metadata block.
+- `MemPointerRet` performs the shared serialization/deserialization for
+  pointer-valued memory slots. A shared pointer read resolves the id once and
+  then dereferences the local building directly, without `getlink`.
+- Case: t268 stores `&data[2]` in a `shared int *volatile` slot and reads it
+  back; the slot contains stable id 1 (not `bank1_id`), the reader selects
+  `bank1`, and no `getlink __curb` remains.

@@ -5511,8 +5511,12 @@ export class CodeGenerator extends ASTVisitor {
 				*/
 				const pointerValue = pointer.get();
 				const target = collector.getAssemblySymbol();
+				const block = pointerValue.blockIsBuilding
+					? (pointerValue.buildingAlias ?? `${pointerValue.name}_block`) : null;
 				const instructions = [pointerValue.instructions,
-					InstructionBuilder.reads(target, `${pointerValue.name}_block`, `${pointerValue.name}_pos`)];
+					block
+						? InstructionBuilder.read(target, block, `${pointerValue.name}_pos`)
+						: InstructionBuilder.reads(target, `${pointerValue.name}_block`, `${pointerValue.name}_pos`)];
 				return valueClassOf(this.glob, node.dataType).create(this.glob, instructions,
 					target, node.dataType, true);
 			}
@@ -6592,7 +6596,11 @@ export class CodeGenerator extends ASTVisitor {
 						this.addWarning(`Dereferencing a non-pointer value`, left.location);
 						return new MemoryRefRet(glob, pointer.instructions, pointer.name, left.dataType, false);
 					}
-					return new MemoryRefRet(glob, pointer.instructions, pointer.name, left.dataType, pointer.temporary);
+					const deref = new MemoryRefRet(glob, pointer.instructions, pointer.name,
+					left.dataType, pointer.temporary);
+				deref.buildingAlias = pointer.buildingAlias ?? null;
+				deref.blockIsBuilding = pointer.blockIsBuilding === true;
+				return deref;
 				}
 				// ++x / --x / +x ... -- the lvalue of the operand is the lvalue of the whole
 				return this.getLValue(left.argument);

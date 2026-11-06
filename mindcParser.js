@@ -884,7 +884,7 @@ export class Parser {
         while (this.matchTokenTypeAt(this.currentTokenIndex, [
             TokenType.CONST, TokenType.VOLATILE,
             TokenType.STATIC, TokenType.PERSISTENT, TokenType.EXTERN, TokenType.AUTO, TokenType.REGISTER,
-			TokenType.NEAR, TokenType.BYNAME, TokenType.RESTRICT
+			TokenType.NEAR, TokenType.BYNAME, TokenType.RESTRICT, TokenType.SHARED
         ])) {
 			const qualifierToken = this.consumeToken();
             qualifiers.push(qualifierToken.value);
