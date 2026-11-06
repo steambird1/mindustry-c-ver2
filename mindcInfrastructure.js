@@ -4612,6 +4612,68 @@ export function componentCountOf(type, depth = 0) {
  * `"g:.st.a"`. `p->a` is then simply `read out @this p.a` -- one instruction,
  * no memory, and no dependence on how buildings are linked.
  */
+
+/**
+ * A pointer member stored inside a name packet: its block and pos are named
+ * separately, and reading/writing them reconstructs a normal two-word pointer.
+ */
+export class NamePointerPairRet extends PointerRet {
+	constructor(glob, instructions, blockName, posName, type, temporary = false) {
+		super(glob, instructions, blockName, type, temporary);
+		this.blockName = blockName;
+		this.posName = posName;
+		this.setAttribute('isNamePointerPair', true);
+	}
+
+	get width() {
+		return 2;
+	}
+
+	get() {
+		const glob = this.glob;
+		const target = glob.tmp(this.type, 'pointer');
+		return new RefPointerRet(glob, [
+			this.instructions,
+			InstructionBuilder.read(`${target}_block`, '@this', this.blockName),
+			InstructionBuilder.read(`${target}_pos`, '@this', this.posName)
+		], target, this.type, true);
+	}
+
+	fetch(target) {
+		return this.get().fetch(target);
+	}
+
+	deref() {
+		return this.get().deref();
+	}
+
+	pointedSet(other) {
+		return this.get().pointedSet(other);
+	}
+
+	set(other) {
+		const glob = this.glob;
+		const value = other.get();
+		const block = value instanceof PointerRet && value.blockIsBuilding
+			? value.storageBlockName() : `${value.name}_block`;
+		return new RefPointerRet(glob, [
+			this.instructions,
+			value.instructions,
+			InstructionBuilder.write(block, '@this', this.blockName),
+			InstructionBuilder.write(`${value.name}_pos`, '@this', this.posName)
+		], this.name, this.type, this.temporary);
+	}
+
+	address() {
+		return this;
+	}
+
+	offset() {
+		throw new InfrastructureNotImplementedExpection(
+			'pointer arithmetic on a pointer member of a name packet');
+	}
+}
+
 export class NameStructPointerRet extends PointerRet {
 
 	/**
@@ -4659,6 +4721,11 @@ export class NameStructPointerRet extends PointerRet {
 	member(memberName, memberType = null) {
 		const glob = this.glob;
 		const type = memberType ?? memberTypeOf(glob, this.structType ?? this.type, memberName);
+		if (type?.kind === 'pointer' && !isNamePointerType(type)) {
+			return new NamePointerPairRet(glob, [],
+				`${this.name}.${memberName}_block`, `${this.name}.${memberName}_pos`,
+				type, false);
+		}
 		const holder = new NamePointerRet(glob, [], `${this.name}.${memberName}`, type, false);
 		return new NameSlotRet(glob, holder, type);
 	}
@@ -4671,8 +4738,36 @@ export class NameStructPointerRet extends PointerRet {
 	set(other) {
 		const glob = this.glob;
 		const value = other.get();
-		const members = (this.structType?.members ?? this.type?.members ?? []).map(m => m.name ?? m.memberName);
+		const members = this.structType?.members ?? this.type?.members ?? [];
 		const instructions = [this.instructions, value.instructions];
+		const isPair = member => {
+			const type = member.type ?? member.memberType;
+			return type?.kind === 'pointer' && !isNamePointerType(type);
+		};
+		const emitLiteral = (member, base) => {
+			const name = member.name ?? member.memberName;
+			if (isPair(member)) {
+				instructions.push(InstructionBuilder.set(`${this.name}.${name}_block`,
+					`"${base}.${name}_block"`));
+				instructions.push(InstructionBuilder.set(`${this.name}.${name}_pos`,
+					`"${base}.${name}_pos"`));
+			} else {
+				instructions.push(InstructionBuilder.set(`${this.name}.${name}`,
+					`"${base}.${name}"`));
+			}
+		};
+		const emitCopy = (member, sourceBase) => {
+			const name = member.name ?? member.memberName;
+			if (isPair(member)) {
+				instructions.push(InstructionBuilder.set(`${this.name}.${name}_block`,
+					`${sourceBase}.${name}_block`));
+				instructions.push(InstructionBuilder.set(`${this.name}.${name}_pos`,
+					`${sourceBase}.${name}_pos`));
+			} else {
+				instructions.push(InstructionBuilder.set(`${this.name}.${name}`,
+					`${sourceBase}.${name}`));
+			}
+		};
 		/*
 		`&st` first: it arrives as a packet too, but a freshly built one whose
 		`sourceBase` says which struct the names come from. Those names are
@@ -4680,9 +4775,7 @@ export class NameStructPointerRet extends PointerRet {
 		*/
 		const fromAddress = value.sourceBase ?? null;
 		if (fromAddress) {
-			for (const m of members) {
-				instructions.push(InstructionBuilder.set(`${this.name}.${m}`, `"${fromAddress}.${m}"`));
-			}
+			for (const m of members) emitLiteral(m, fromAddress);
 			return new NameStructPointerRet(glob, instructions, this.name, this.type, this.temporary);
 		}
 		if (value instanceof NameStructPointerRet) {
@@ -4691,9 +4784,7 @@ export class NameStructPointerRet extends PointerRet {
 			as a literal -- `q.a` has to hold what `p.a` holds, not the text
 			"p.a".
 			*/
-			for (const m of members) {
-				instructions.push(InstructionBuilder.set(`${this.name}.${m}`, `${value.name}.${m}`));
-			}
+			for (const m of members) emitCopy(m, value.name);
 			return new NameStructPointerRet(glob, instructions, this.name, this.type, this.temporary);
 		}
 		/*
@@ -4702,9 +4793,7 @@ export class NameStructPointerRet extends PointerRet {
 		*/
 		const base = value.instructionReturn ?? null;
 		if (!base) throw new InvalidCastException(other, this);
-		for (const m of members) {
-			instructions.push(InstructionBuilder.set(`${this.name}.${m}`, `"${base}.${m}"`));
-		}
+		for (const m of members) emitLiteral(m, base);
 		return new NameStructPointerRet(glob, instructions, this.name, this.type, this.temporary);
 	}
 
@@ -4775,6 +4864,11 @@ export class NameStructDerefRet extends StructRefRet {
 	member(memberName, memberType = null) {
 		const glob = this.glob;
 		const type = memberType ?? memberTypeOf(glob, this.structType, memberName);
+		if (type?.kind === 'pointer' && !isNamePointerType(type)) {
+			return new NamePointerPairRet(glob, [],
+				`${this.name}.${memberName}_block`, `${this.name}.${memberName}_pos`,
+				type, false);
+		}
 		const holder = new NamePointerRet(glob, [], `${this.name}.${memberName}`, type, false);
 		const member = new NameSlotRet(glob, holder, type);
 		member.setAttribute('isSymbolic', true);

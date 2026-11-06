@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 286 passed, 0 failed (209 shape assertions, 1267 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 287 passed, 0 failed (211 shape assertions, 1272 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 106 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 16 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 14 passed, 0 failed, 2 exempt |
@@ -112,7 +112,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | shared pointer stable ids (§7.56) | **done**; `shared` address space, program-level stable ids, stable-id pointer slots, test t268 | §7.56 |
 | shared chain + two-processor handoff (§7.56) | **done**; stable neighbour registers, peer round-trip test t269, metadata test t270 | §7.56 |
 | qualifier/type matrix (§7.57) | **partial**; shared scalar/array decay works, shared large aggregates need target-address propagation | §7.57 |
-| unified byname name packets (§7.58) | **partial**; flat register structs (including device/string_t) use multi-name packet, larger aggregates still rejected | §7.58 |
+| unified byname name packets (§7.58) | **partial**; flat register structs (including device/string_t) and ordinary pointer members use multi-name packets, arrays still rejected | §7.58 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -2343,6 +2343,11 @@ now work via t272; large struct ARRAY elements still take the numeric path.
   but still requires the flat/nameable shape. The pragma path is unchanged.
 - Case: t273 uses `struct S { device d; string_t s; int n; }` through
   `S *byname p = byname(&x)` and writes/reads all three leaf kinds.
+- Ordinary pointer members are two named registers (`member_block` /
+  `member_pos`), so `NamePointerPairRet` reconstructs a normal pointer from the
+  packet. t274 covers `struct S { int *p; int x; }` with `q->p = &v` and
+  `*q->p`.
 - Still limited: nested/memory aggregates and fixed arrays inside the struct do
   not form a name packet; they are rejected and should use an ordinary/shared
-  pointer instead.
+  pointer instead. A `byname` pointer member still takes the single-name slot
+  path and is not part of this pointer-pair test.

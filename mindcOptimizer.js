@@ -766,8 +766,9 @@ export class Optimizer extends ASTVisitor {
 			if (members.length === 0) return false;
 			return members.every(member => {
 				const memberType = member?.type ?? member?.memberType ?? null;
-				return memberType && memberType.isTypeInfo
-					&& ['basic', 'device', 'null', 'null_t'].includes(memberType.kind)
+				if (!memberType || !memberType.isTypeInfo) return false;
+				if (memberType.kind === 'pointer') return true;
+				return ['basic', 'device', 'null', 'null_t'].includes(memberType.kind)
 					&& widthOfType(memberType) === 1;
 			});
 		};
