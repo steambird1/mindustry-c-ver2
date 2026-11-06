@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 283 passed, 0 failed (201 shape assertions, 1252 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 284 passed, 0 failed (203 shape assertions, 1257 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 106 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 16 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 14 passed, 0 failed, 2 exempt |
@@ -111,6 +111,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | pointer building alias (§7.55) | **done**; non-escaping single-block arrays keep the building in `_block` and read/write directly, test t266 | §7.55 |
 | shared pointer stable ids (§7.56) | **done**; `shared` address space, program-level stable ids, stable-id pointer slots, test t268 | §7.56 |
 | shared chain + two-processor handoff (§7.56) | **done**; stable neighbour registers, peer round-trip test t269, metadata test t270 | §7.56 |
+| qualifier/type matrix (§7.57) | **partial**; shared scalar/array decay works, shared large aggregates need target-address propagation | §7.57 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -2298,3 +2299,29 @@ called `f` even when `a` was false.
   handshake: the peer publishes `&shared_data[1]` through a shared pointer
   slot and the main processor resolves stable id 1 back to its own bank1 and
   prints 42. t270 checks the stable neighbour registers.
+
+### 7.57 Qualifier / complex-type test matrix
+
+Tested combinations of `shared`, `remote` and `byname` with scalar, array,
+struct and union types:
+
+- `remote int *p` and `int *remote p` remain distinct; the existing t92/t104/t118
+  tests still pass.
+- `shared int *p = data` and `shared int *volatile slot = &data[i]` work:
+  arrays decay with a known building alias, and the pointer slot uses a stable
+  id.
+- `shared struct Big *p = &big` and `shared union U *p = &u` currently fail
+  with "a shared pointer needs a statically known building". The address of a
+  fixed aggregate is produced through a path that does not yet carry its
+  building alias; the pointer cannot be serialized.
+- `shared struct Big *p = &big_array[1]` also reports `address of a pointer`
+  during aggregate address formation, then the same missing alias error.
+- `Big *byname p = byname(&big)` is correctly rejected: a name pointer can
+  only name a single register, not a large memory aggregate.
+- `int *byname p = byname(&data[2])` is correctly rejected: byname needs the
+  address of a variable, not an array element.
+
+The next fix is to carry the fixed-storage building alias through aggregate
+address formation (`&big`, `&array[i]` of a large struct) so shared pointers to
+complex types can reuse the same stable-id slot path. t271 covers the working
+array-decay case.

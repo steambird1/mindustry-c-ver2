@@ -884,20 +884,11 @@ export class Parser {
         while (this.matchTokenTypeAt(this.currentTokenIndex, [
             TokenType.CONST, TokenType.VOLATILE,
             TokenType.STATIC, TokenType.PERSISTENT, TokenType.EXTERN, TokenType.AUTO, TokenType.REGISTER,
-			TokenType.NEAR, TokenType.BYNAME, TokenType.RESTRICT, TokenType.SHARED
+			TokenType.NEAR, TokenType.BYNAME, TokenType.RESTRICT, TokenType.SHARED, TokenType.REMOTE
         ])) {
 			const qualifierToken = this.consumeToken();
             qualifiers.push(qualifierToken.value);
         }
-		/*
-		`remote` is a reserved word, so `remote int x` needs no lookahead. It is
-		also the pseudo function `remote(dev, var)`, which is why expression
-		position hands it over as the identifier it looks like (see below).
-		*/
-		while (this.matchToken(TokenType.REMOTE)) {
-			this.consumeToken();
-			qualifiers.push('remote');
-		}
         return qualifiers;
     }
 

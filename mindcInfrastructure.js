@@ -1385,21 +1385,37 @@ export class RefPointerRet extends PointerRet {
 			throw new InfrastructureNotImplementedExpection(
 				`cannot assign a value of type '${value.type?.toString?.() ?? 'unknown'}' to a pointer`);
 		}
-		if (value.canRename) {
+		const sharedTarget = isSharedPointerType(this.type);
+		if (value.canRename && !sharedTarget) {
 			return new RefPointerRet(glob, [
 				this.instructions, value.rename(this.instructionReturn).instructions
 			], this.instructionReturn, this.type, this.temporary);
 		}
-		const sharedTarget = isSharedPointerType(this.type);
-		const blockValue = sharedTarget && value.blockIsBuilding
-			? `${value.name}_block` : value.storageBlockName();
+		let blockValue = null, blockIsBuilding = false, alias = null;
+		if (sharedTarget) {
+			alias = value.buildingAlias ?? null;
+			if (!alias && typeof value.name === 'string'
+				&& value.name.endsWith('.__pointer')) {
+				const base = value.name.slice(0, -'.__pointer'.length).split(':').pop();
+				const symbol = glob.semantic?.globalScope?.lookup?.(base)
+					?? glob.generator?.currentScope?.lookup?.(base) ?? null;
+				if (symbol) alias = fixedStorageBuildingAlias(glob, symbol);
+			}
+			blockIsBuilding = !!alias || value.blockIsBuilding;
+			blockValue = alias ?? (value.blockIsBuilding ? `${value.name}_block` : null);
+			if (!blockValue) {
+				throw new InfrastructureNotImplementedExpection(
+					'a shared pointer needs a statically known building');
+			}
+		} else {
+			blockValue = value.storageBlockName();
+		}
 		return new RefPointerRet(glob, [
 			this.instructions, value.instructions,
 			InstructionBuilder.set(`${this.instructionReturn}_block`, blockValue),
 			InstructionBuilder.set(`${this.instructionReturn}_pos`, `${value.name}_pos`)
 		], this.instructionReturn, this.type, this.temporary,
-			sharedTarget ? value.buildingAlias : null,
-			sharedTarget && value.blockIsBuilding);
+			alias, blockIsBuilding);
 	}
 }
 
@@ -1471,7 +1487,7 @@ export class MemPointerRet extends PointerRet {
 				`cannot assign a value of type '${value.type?.toString?.() ?? 'unknown'}' to a pointer`);
 		}
 		let valueBlock = null;
-		if (isSharedPointerType(this.type) && value.blockIsBuilding) {
+		if (isSharedPointerType(this.type) && (value.buildingAlias || value.blockIsBuilding)) {
 			const id = value.buildingAlias
 				? stableIdOfBlock(glob, value.buildingAlias) : 0;
 			if (id <= 0) {
@@ -5489,6 +5505,17 @@ export function valueClassOf(glob, type) {
  * @param {SymbolEntry} symbol
  * @returns {string?}
  */
+export function fixedStorageBuildingAlias(glob, symbol) {
+	const location = symbol?.memoryLocation ?? null;
+	if (!location) return null;
+	const block = glob.memory?.memoryBlocks?.[location.block] ?? null;
+	if (!block) return null;
+	const type = symbol?.myType?.() ?? null;
+	const size = Number(symbol.size ?? type?.size) || 0;
+	if (size <= 0 || location.position + size > block.size) return null;
+	return block.name;
+}
+
 export function fixedBuildingAliasOf(glob, symbol) {
 	const type = symbol?.myType?.() ?? null;
 	if (!type || type.kind !== 'array') return null;
@@ -5761,7 +5788,11 @@ function buildRet(glob, inst, type, width, throughPointer, temporary, relevant) 
 			temporary, fixed, relevant ?? null);
 	}
 	if (width >= 2) {
-		const ret = new RefPointerRet(glob, inst.instructions, inst.instructionReturn, type, temporary);
+		const sourceKind = relevant?.myType?.()?.kind ?? null;
+		const alias = (relevant && ['array', 'struct', 'union'].includes(sourceKind))
+			? fixedStorageBuildingAlias(glob, relevant) : null;
+		const ret = new RefPointerRet(glob, inst.instructions, inst.instructionReturn,
+			type, temporary, alias, false);
 		/*
 		A shared pointer normally keeps its building in `_block`, even when it
 		passes through the legacy Instruction path.

@@ -30,7 +30,7 @@ import { ensureMemspHelper, remoteDeviceRegOf, remoteNameRegOf, RemotePointerRet
 	symbolRef, ExportRet, valueClassOf, readThrough, writeThrough, pointerStep,
 	RegistryStructRet, NamePointerRet, MemoryNamePointerRet,
 	arrayRetOf, selectArrayImplementation, accessCostOf,
-	pointerToValue, valueToPointer, contentTypeOf, SPECIAL_CONTENT_TYPES, fixedBuildingAliasOf,
+	pointerToValue, valueToPointer, contentTypeOf, SPECIAL_CONTENT_TYPES, fixedBuildingAliasOf, isSharedPointerType,
 	arithmetic, widthOfType, knownContentIdOf, memberTypeOf, InvalidCastException, InfrastructureNotImplementedExpection,
 	ENCODED_OFFSET, ENCODED_RADIX
  } from "./mindcInfrastructure.js";
@@ -3843,8 +3843,9 @@ export class CodeGenerator extends ASTVisitor {
 						the bare register name would lose which struct the names
 						were built from.
 						*/
+						const sharedTarget = isSharedPointerType(symbol.myType?.());
 						finalize.concat(this.writeSymbol(symbol,
-							(isNamePacket || isRemotePointer) ? evaluation
+							(isNamePacket || isRemotePointer || sharedTarget) ? evaluation
 								: (evaluation.instructionReturn ?? 'null')));
 					}
 				} else if (evaluation instanceof PointerRet && evaluation.blockIsBuilding) {
