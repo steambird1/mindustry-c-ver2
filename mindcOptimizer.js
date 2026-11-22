@@ -6864,25 +6864,6 @@ export class Optimizer extends ASTVisitor {
 	// Has manual changes on 'isAddressed'
     inlineFunctions() {
 		this.recuriveInfo = this.findRecursiveFunctions(this.functionCallGraph);
-		/*
-		A local VLA in a recursive function needs the caller's dynamic frame
-		restored around each nested call. The current return protocol rolls the
-		frame back and lays the static prologue out again; that would drop the
-		VLA data. Refuse it for now instead of generating a program that traps.
-		(Parameter VLAs are fine: they are pointers, not frame allocations.)
-		*/
-		this.recuriveInfo?.forEach(funcName => {
-			const info = this.functionInfo.get(funcName);
-			const scope = info?.node?.scope ?? null;
-			const localVla = scope?.recursivelyGetAllSymbols?.().find(s =>
-				s && s.isVLA === true && s.kind !== 'parameter');
-			if (localVla) {
-				this.addError(
-					`Local VLA '${localVla.name}' in recursive function '${funcName}' `
-					+ `is not supported yet`,
-					localVla.location ?? info.node.location);
-			}
-		});
 		this.applyNoInlinePragmas();
 		// 收集适合内联的函数
 		const inlineCandidates = [];

@@ -20,8 +20,8 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 295 passed, 0 failed (225 shape assertions, 1307 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 109 passed, 0 failed |
+| `node ../tools/check.mjs` | 296 passed, 0 failed (225 shape assertions, 1312 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 108 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 16 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 14 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
@@ -113,7 +113,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | shared chain + two-processor handoff (§7.56) | **done**; stable neighbour registers, peer round-trip test t269, metadata test t270 | §7.56 |
 | qualifier/type matrix (§7.57) | **partial**; shared scalar/array decay works, shared large aggregates need target-address propagation | §7.57 |
 | unified byname name packets (§7.58) | **partial**; register structs (flat or nested, including device/string_t), ordinary/shared pointer members and `byname` pointer members use name packets, arrays still rejected | §7.58 |
-| C99 VLA (§7.59) | **partial**; parameter VLAs (including multidimensional runtime strides), function-scope local VLAs with runtime stack allocation, runtime `sizeof`/`lenof`; recursive local VLAs and block/loop VLAs rejected | §7.59 |
+| C99 VLA (§7.59) | **partial**; parameter and recursive function-scope VLAs, multidimensional runtime strides, runtime stack allocation, runtime `sizeof`/`lenof`; block/loop VLAs, VLA typedefs and `[*]` prototypes remain out of scope | §7.59 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -2394,13 +2394,16 @@ now work via t272; large struct ARRAY elements still take the numeric path.
   `length * elementCells`. `sizeof(a)`/`lenof(a)` use the runtime shape.
   t281 covers two VLAs in one function; t282 covers a two-dimensional local
   VLA.
-- Calling-convention preparation for recursive local VLAs: every local VLA is
-  now part of `stackSymbols` with a two-cell save slot, `needsSaveSlot` returns
-  true for it, and every stack symbol records its compile-time `stackOffset`
-  from the frame start. The hidden VLA length cells are ordinary one-cell
-  locals in the same layout. This is the state the future dynamic return path
-  needs to rebuild save-slot addresses from `frame start + offset`; the
-  recursive-local-VLA rejection remains until that path is wired up.
+- Recursive local VLAs: every local VLA is part of `stackSymbols` with a
+  two-cell save slot, `needsSaveSlot` returns true for it, and every stack
+  symbol records its compile-time `stackOffset` from the frame start. A
+  recursive return inside a dynamic-stack function does NOT replay the static
+  prologue: it saves the real top, reads the runtime total at top - 1, walks
+  back to the frame start, rebuilds each `X.__pointer` from
+  `frame start + stackOffset`, restores the registers (including VLA base
+  pointers and hidden lengths), and puts `__stackframe` back at the real top.
+  The VLA bytes stay where they are. t283 covers two VLAs across recursion,
+  the early-return path, and a VLA used after the recursive call.
 - Frame rollback: each dynamic allocation leaves a marker cell at the new top.
   The marker holds the runtime frame total including itself; the next VLA reads
   the previous marker, adds its cells and the new marker, and writes a new one.
@@ -2409,9 +2412,5 @@ now work via t272; large struct ARRAY elements still take the numeric path.
 - Limits: a VLA is only accepted in the function's top-level block. A VLA in
   a loop/nested block needs block lifetime and stack marks (negative/n06).
   A VLA cannot have an initializer (negative/local_vla_initializer.c).
-  A local VLA inside a recursive function is refused for now
-  (negative/recursive_local_vla.c): the existing recursive return protocol
-  rolls the caller frame back and lays the static prologue out again, which
-  would discard the VLA data; parameter VLAs are pointers and do recurse.
   VLA typedefs, `[*]` prototypes and call-site bound evaluation are still out
   of scope.

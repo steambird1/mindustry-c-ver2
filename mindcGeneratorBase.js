@@ -206,19 +206,28 @@ export class FunctionRegisterer {
 	 * @param {boolean} [removable=false] 
 	 * @remark These two symbols won't be analyzed, so they're safe
 	 */
+	/**
+	 * Recompute every stack symbol's frame offset after the symbol list
+	 * changes (temporaries are appended during body generation).
+	 * @param {any} func
+	 */
+	refreshStackOffsets(func) {
+		let offset = 0;
+		(func.stackSymbols ?? []).forEach(symbol => {
+			symbol.stackOffset = offset;
+			offset += stackFrameSizeOf(symbol);
+		});
+		func.stackTotal = offset;
+	}
+
 	addFunction(name, body, scope = null, givenStackSymbols = [], specialBuiltin = false, recursive = false, removable = false) {
 		if (recursive) {
 			specialBuiltin = false;
 		}
-		let stackTotal = 0;
 		let stackSymbols = [ ...givenStackSymbols ];
 		if (recursive) {
 			stackSymbols.push(new SymbolEntry('__stackpos', '__builtin_int', scope, 'variable', null, 1));
 		}
-		stackSymbols.forEach(element => {
-			element.stackOffset = stackTotal;
-			stackTotal += stackFrameSizeOf(element);
-		});
 		let preservedStack = null;
 		// Meaningless:
 		if (scope) {
@@ -226,16 +235,18 @@ export class FunctionRegisterer {
 			scope.addSymbol(preservedStack);
 			// Otherwise, you have to manually guarantee that you won't modify stackpos inside!
 		}
-		this.functionCollection.set(name, {
+		const info = {
 			body: body,
 			scope: scope,
 			preservedStack: preservedStack,
 			stackSymbols: stackSymbols,
-			stackTotal: stackTotal,
+			stackTotal: 0,
 			specialBuiltin: specialBuiltin,
 			recursive: recursive,
 			calls: removable ? 0 : 1
-		});
+		};
+		this.refreshStackOffsets(info);
+		this.functionCollection.set(name, info);
 	}
 
 	/**
@@ -391,32 +402,7 @@ export class FunctionRegisterer {
 			]);
 		};
 		const outResetStackpos = () => {
-			let temp = new Instruction();
-			if (func.preservedStack) {
-				temp.concat(this.memoryObject.outputPointerFetchOf(`${stackPositionPointer}.__pointer`, func.preservedStack.getAssemblySymbol()));
-			} else {
-				temp.concat(this.memoryObject.outputPointerFetchOf(`${stackPositionPointer}.__pointer`, '__internal_stackpos'));
-			}
-			// Requires something more for resetting
-			refFunction.stackSymbols.forEach(symb => {
-				if (symb.name === '__stackpos') return;	// Already considered
-				if (!needsSaveSlot(symb)) return;		// Re-derived from the frame
-				const name = symb.getAssemblySymbol();
-				if (symb.implementAsPointer) {
-					/*
-					Two words, matching what `getFunctionStackStorage` wrote:
-					`X_block` at `X.__pointer`, `X_pos` one cell further on. This
-					is true for a pointer stored in memory as well, whose value is
-					also the pair `X_block` / `X_pos`.
-					*/
-					temp.concat(this.memoryObject.outputPointerFetchOf(`${name}.__pointer`, `${name}_block`));
-					temp.concat(this.memoryObject.outputPointerForwardCall(1, `${name}.__pointer`, this, false, false));
-					temp.concat(readAtAdvancedPointer(`${name}_pos`));
-				} else {
-					temp.concat(this.memoryObject.outputPointerFetchOf(`${name}.__pointer`, name));
-				}
-			});
-			return temp;
+			return this.getFunctionStackReset(functionName);
 		};
 
 		if (dynamicSetStackpos) {
@@ -459,6 +445,100 @@ export class FunctionRegisterer {
 	}
 
 	/**
+	 * Restore the saved register values of a frame.
+	 *
+	 * Save-slot addresses must already be valid; the dynamic return path sets
+	 * them from `frame start + stackOffset` before calling this.
+	 *
+	 * @param {string} functionName
+	 * @returns {Instruction}
+	 */
+	getFunctionStackReset(functionName) {
+		const func = this.functionCollection.get(functionName);
+		if (!func) return new Instruction();
+		const stackSymbol = func.stackSymbols.find(symb => symb.name === '__stackpos') ?? null;
+		let temp = new Instruction();
+		if (stackSymbol) {
+			temp.concat(this.memoryObject.outputPointerFetchOf(
+				`${stackSymbol.getAssemblySymbol()}.__pointer`,
+				func.preservedStack
+					? func.preservedStack.getAssemblySymbol() : '__internal_stackpos'));
+		}
+		func.stackSymbols.forEach(symb => {
+			if (symb.name === '__stackpos') return;
+			if (!needsSaveSlot(symb)) return;
+			const name = symb.getAssemblySymbol();
+			if (symb.implementAsPointer) {
+				temp.concat(this.memoryObject.outputPointerFetchOf(
+					`${name}.__pointer`, `${name}_block`));
+				temp.concat(this.memoryObject.outputPointerForwardCall(
+					1, `${name}.__pointer`, this, false, false));
+				temp.concat(readAtAdvancedPointer(`${name}_pos`));
+			} else {
+				temp.concat(this.memoryObject.outputPointerFetchOf(
+					`${name}.__pointer`, name));
+			}
+		});
+		return temp;
+	}
+
+	/**
+	 * Return from a nested call inside a function with local VLAs.
+	 *
+	 * Unlike the static path, this does NOT roll back and replay the static
+	 * prologue. The caller's VLA data lives above the static frame, so replaying
+	 * only the static symbols would leave `__stackframe` below the real top.
+	 * Instead:
+	 *   1. save the real top,
+	 *   2. read the runtime total marker at top - 1,
+	 *   3. walk back to the frame start,
+	 *   4. rebuild every save-slot address from start + stackOffset,
+	 *   5. restore the registers,
+	 *   6. put __stackframe back at the real top.
+	 *
+	 * @param {string} functionName
+	 * @returns {Instruction}
+	 */
+	getDynamicRollbackCall(functionName) {
+		const func = this.functionCollection.get(functionName);
+		const marker = '__vla_marker';
+		const total = '__vla_marker_total';
+		const topBlock = '__vla_top_block';
+		const topPos = '__vla_top_pos';
+		const result = new Instruction([
+			InstructionBuilder.set(topBlock, '__stackframe_block'),
+			InstructionBuilder.set(topPos, '__stackframe_pos'),
+			InstructionBuilder.set(`${marker}_block`, '__stackframe_block'),
+			InstructionBuilder.set(`${marker}_pos`, '__stackframe_pos')
+		]);
+		result.concat(this.memoryObject.outputPointerBackwardCall(1, marker, this, true));
+		result.concat(this.memoryObject.outputPointerFetchOf(marker, total));
+		/*
+		`__stackframe_backward(total)` lands on the frame start. The VLA bytes
+		above it are untouched; only the pointer moves.
+		*/
+		result.concat(this.getFunctionCall('__stackframe_backward',
+			new Map([['__step', total]]), null));
+		for (const symbol of func.stackSymbols) {
+			if (!needsSaveSlot(symbol)) continue;
+			const name = symbol.getAssemblySymbol();
+			result.concat(InstructionBuilder.set(`${name}.__pointer_block`,
+				'__stackframe_block'));
+			result.concat(InstructionBuilder.set(`${name}.__pointer_pos`,
+				'__stackframe_pos'));
+			const offset = Number(symbol.stackOffset) || 0;
+			if (offset > 0) {
+				result.concat(this.memoryObject.outputPointerForwardCall(
+					offset, `${name}.__pointer`, this, false, true));
+			}
+		}
+		result.concat(this.getFunctionStackReset(functionName));
+		result.concat(InstructionBuilder.set('__stackframe_block', topBlock));
+		result.concat(InstructionBuilder.set('__stackframe_pos', topPos));
+		return result;
+	}
+
+	/**
 	 * 
 	 * @param {string} functionName
 	 * @returns {Instruction}
@@ -466,6 +546,9 @@ export class FunctionRegisterer {
 	 */
 	getRollbackCall(functionName) {
 		const func = this.functionCollection.get(functionName);
+		if (func?.hasDynamicStack) {
+			return this.getDynamicRollbackCall(functionName);
+		}
 		if (!func.recursive) {
 			throw new InternalGenerationFailure(`Function ${functionName} does not support recursive call`);
 		}
@@ -513,14 +596,11 @@ export class FunctionRegisterer {
 		let anyStack = false, anyNear = false;
 		this.functionCollection.forEach((func, name) => {
 			if (helpers.has(name)) return;
-			func.stackTotal = 0;
+			this.refreshStackOffsets(func);
+			if (func.stackTotal > 0) anyStack = true;
 			func.stackSymbols.forEach(symb => {
-				symb.stackOffset = func.stackTotal;
-				func.stackTotal += stackFrameSizeOf(symb);
 				if (symb.isNearPointer === true) anyNear = true;
 			});
-			// The roll-back is only emitted for a function that owns stack space
-			if (func.stackTotal > 0) anyStack = true;
 		});
 		const bump = name => {
 			const helper = this.functionCollection.get(name);

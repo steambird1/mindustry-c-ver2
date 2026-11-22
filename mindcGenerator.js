@@ -8475,6 +8475,9 @@ export class CodeGenerator extends ASTVisitor {
 				if (sNames.length > 0)
 					sTarget = sTarget.filter(symb => !sameSlot(symb));
 				sTarget.push(symbol);	// So the type information doesn't really matter!
+				this.functionManagement.functionCollection.get(this.currentFunction).stackSymbols = sTarget;
+				this.functionManagement.refreshStackOffsets(
+					this.functionManagement.functionCollection.get(this.currentFunction));
 			}
 		}
 
