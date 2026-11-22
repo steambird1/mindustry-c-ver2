@@ -270,7 +270,21 @@ export class FunctionRegisterer {
 	}
 	
 	getFunctionStackRollback(functionName) {
-		const totalStackframeSize = this.functionCollection.get(functionName).stackTotal;
+		const func = this.functionCollection.get(functionName);
+		if (func?.hasDynamicStack) {
+			const marker = '__vla_marker';
+			const total = '__vla_marker_total';
+			const result = new Instruction([
+				InstructionBuilder.set(`${marker}_block`, '__stackframe_block'),
+				InstructionBuilder.set(`${marker}_pos`, '__stackframe_pos')
+			]);
+			result.concat(this.memoryObject.outputPointerBackwardCall(1, marker, this, true));
+			result.concat(this.memoryObject.outputPointerFetchOf(marker, total));
+			result.concat(this.getFunctionCall('__stackframe_backward',
+				new Map([['__step', total]]), null));
+			return result;
+		}
+		const totalStackframeSize = func.stackTotal;
 		return this.getFunctionCall('__stackframe_backward', new Map([['__step', totalStackframeSize]]), null);
 	}
 
@@ -349,7 +363,23 @@ export class FunctionRegisterer {
 			} else {
 				temp.concat(this.memoryObject.outputPointerStorageOf(`${stackPositionPointer}.__pointer`, '__internal_stackpos'));
 			}
+			temp.concat(outInitDynamicStack());
 			return temp;
+		};
+		/*
+		A function with local VLAs reserves one marker cell at the top of its
+		frame. The marker holds the runtime total (including itself). Each VLA
+		declaration leaves a new marker after its data; the epilogue reads the
+		last one and rolls back by it.
+		*/
+		const outInitDynamicStack = () => {
+			if (!func.hasDynamicStack) return new Instruction();
+			return new Instruction([
+				this.memoryObject.outputPointerStorageOf('__stackframe',
+					String(totalStackframeSize + 1)),
+				this.getFunctionCall('__stackframe_forward',
+					new Map([['__step', 1]]), null)
+			]);
 		};
 		const outResetStackpos = () => {
 			let temp = new Instruction();
@@ -391,6 +421,7 @@ export class FunctionRegisterer {
 			heapPreparation.concat(new InstructionReferrer(terminate, 'set_stackpos_term'));
 		} else if (setStackpos) {
 			if (!noRecursive) heapPreparation.concat(outSetStackpos());
+			else heapPreparation.concat(outInitDynamicStack());
 		} else {
 			heapPreparation.concat(outResetStackpos());
 		}

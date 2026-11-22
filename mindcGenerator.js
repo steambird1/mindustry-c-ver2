@@ -561,8 +561,12 @@ export class CodeGenerator extends ASTVisitor {
 			if (symbol.kind === 'parameter' && !recursive
 				&& !ctx.mustAlloc && !symbol.isVolatile) {
 				// A parameter of a non-recursive function is a register
-				symbol.size = type ? type.size : 1;
+				symbol.size = type?.isVLA ? 2 : (type ? type.size : 1);
 				if (isPointerLike) symbol.implementAsPointer = true;
+				if (type?.isVLA) {
+					symbol.needMemoryAllocation = false;
+					symbol.accessThroughPointer = false;
+				}
 				return;
 			}
 			symbol.size = type ? type.size : 1;
@@ -613,6 +617,19 @@ export class CodeGenerator extends ASTVisitor {
 					symbol.implementAsPointer = true;	// There's no need to give them memory space
 					break;
 				case 'array':
+					if (type?.isVLA) {
+						/*
+						A VLA parameter is a pointer pair into memory; its
+						dimensions are runtime values, so neither `size` nor the
+						open-handle path applies.
+						*/
+						symbol.isVLA = true;
+						symbol.size = symbol.kind === 'parameter' ? 2 : null;
+						symbol.implementAsPointer = true;
+						symbol.needMemoryAllocation = false;
+						symbol.accessThroughPointer = false;
+						break;
+					}
 					/*
 					An unbound handle (`int a[];` with no initializer) is ONE
 					register: the cell that will hold a packed handle once `a = b;`
@@ -1743,13 +1760,17 @@ export class CodeGenerator extends ASTVisitor {
 				symbol => {
 				// Symbol values
 					const symType = symbol.myType();
-					if ((symbol.accessThroughPointer || symbol.needMemoryAllocation) && !(symbol.isStatic || symbol.isPersistent)) {
+					if ((symbol.accessThroughPointer || symbol.needMemoryAllocation
+						|| symbol.isVlaLength === true)
+						&& !(symbol.isStatic || symbol.isPersistent)) {
 						stackSymbols.push(symbol);
 					}
 			});
 			const { stackSymbols: extraSymbols, singular, regStructMem } = this.handleStructExtra(currentSymbols);
 			stackSymbols = [...stackSymbols, ...extraSymbols];
 			this.functionManagement.addFunction(func.name, new Instruction(), funcSymbol.owningScope, stackSymbols, func.name === 'main', this.recursiveInfo.has(func.name));
+			const functionInfo = this.functionManagement.functionCollection.get(func.name);
+			if (functionInfo) functionInfo.hasDynamicStack = funcSymbol.hasDynamicStack === true;
 			functionPlans.push({ func, singular });
 		});
 		functionPlans.forEach(({ func, singular }) => {
@@ -2238,6 +2259,34 @@ export class CodeGenerator extends ASTVisitor {
 				return [this.writeSymbol(sym, paramName)];
 			})));	// Copy the parameters
 			// If there's no function address calling, this is not necessary
+		}
+		/*
+		VLA parameter bounds: evaluate each runtime dimension once, after the
+		parameters are in place, and keep it in the hidden length cell the
+		array type points at.
+		*/
+		const vlaParameterInit = new Instruction();
+		if (node.scope) {
+			node.scope.getAllSymbols().forEach(sym => {
+				if (sym.kind !== 'parameter') return;
+				const paramType = sym.myType?.() ?? null;
+				if (!paramType?.isVLA || !Array.isArray(paramType.vlaDimensions)) return;
+				for (const desc of paramType.vlaDimensions) {
+					if (!desc?.expr || !desc.symbol) continue;
+					const value = this.visitAndRead(desc.expr);
+					vlaParameterInit.concat(value);
+					vlaParameterInit.concat(this.writeSymbol(desc.symbol, value.instructionReturn));
+				}
+			});
+		}
+		result.concat(vlaParameterInit);
+		/*
+		A function with local VLAs has one runtime frame total. Start it at the
+		compile-time frame size; each VLA declaration adds its runtime cells.
+		*/
+		const functionInfo = this.functionManagement.functionCollection.get(node.name) ?? null;
+		if (functionInfo && functionSymbol?.hasDynamicStack === true) {
+			functionInfo.hasDynamicStack = true;
 		}
 		let body = this.visit(node.body);
 		//body.replace('func_ret', body.size() + 1);
@@ -3621,6 +3670,65 @@ export class CodeGenerator extends ASTVisitor {
 	 * @param {VariableDeclaratorNode} node 
 	 * @remark This has to do with many operations...
 	 */
+	/**
+	 * Allocate a local VLA at its declaration.
+	 *
+	 * The hidden length cells are initialized first, then the array's pair is
+	 * bound to the current frame top and `__stackframe_forward` reserves the
+	 * runtime number of cells. The frame total cell is increased so the
+	 * function's epilogue can roll the whole dynamic frame back.
+	 *
+	 * @param {SymbolEntry} symbol
+	 * @param {any} node The VariableDeclarator
+	 * @returns {Instruction}
+	 */
+	emitLocalVlaDeclaration(symbol, node) {
+		if (symbol.isVlaAllocated === true) return new Instruction();
+		symbol.isVlaAllocated = true;
+		const type = symbol.myType?.() ?? null;
+		const setup = new Instruction();
+		let current = type;
+		while (current && current.isTypeInfo && current.kind === 'array') {
+			const desc = current.vlaDimension ?? null;
+			if (desc?.expr && desc.symbol) {
+				const value = this.visitAndRead(desc.expr);
+				setup.concat(value);
+				setup.concat(this.writeSymbol(desc.symbol, value.instructionReturn));
+			}
+			current = current.pointerTo ?? null;
+		}
+		const cells = this.arrayCellCountOperand(type, setup);
+		if (cells === null) {
+			this.addError(`Cannot determine the size of VLA '${symbol.name}'`, node?.location ?? null);
+			return setup;
+		}
+		const base = symbol.getAssemblySymbol();
+		setup.concat(InstructionBuilder.set(`${base}_block`, '__stackframe_block'));
+		setup.concat(InstructionBuilder.set(`${base}_pos`, '__stackframe_pos'));
+		setup.concat(this.functionManagement.getFunctionCall('__stackframe_forward',
+			new Map([['__step', String(cells)]]), this.memory));
+		/*
+		Every dynamic allocation leaves a frame-total marker at the new top.
+		The marker at `vla_start - 1` is the previous one; the new total is
+		that value plus the VLA cells and the new marker cell.
+		*/
+		setup.concat(InstructionBuilder.set('__vla_marker_block', `${base}_block`));
+		setup.concat(InstructionBuilder.set('__vla_marker_pos', `${base}_pos`));
+		setup.concat(this.memory.outputPointerBackwardCall(1, '__vla_marker',
+			this.functionManagement, true));
+		setup.concat(this.memory.outputPointerFetchOf('__vla_marker',
+			'__vla_marker_total'));
+		setup.concat(InstructionBuilder.op('add', '__vla_marker_total',
+			'__vla_marker_total', String(cells)));
+		setup.concat(InstructionBuilder.op('add', '__vla_marker_total',
+			'__vla_marker_total', '1'));
+		setup.concat(this.memory.outputPointerStorageOf('__stackframe',
+			'__vla_marker_total'));
+		setup.concat(this.functionManagement.getFunctionCall('__stackframe_forward',
+			new Map([['__step', '1']]), this.memory));
+		return setup;
+	}
+
 	visitVariableDeclarator(node) {
 		// Simple symbols can have direct lookup in scope
 		const special = ['item_t', 'liquid_t', 'unit_t', 'block_t'];
@@ -3632,6 +3740,15 @@ export class CodeGenerator extends ASTVisitor {
 		}
 		if (symbol.isAutoDevice) {
 			return new Instruction();
+		}
+		/*
+		A local VLA has runtime storage. It is not part of the compile-time
+		frame layout; allocate it at the declaration point and add its size to
+		the function's runtime frame total.
+		*/
+		if (symbol.isVLA === true && symbol.kind !== 'parameter'
+			&& symbol.myType?.()?.isVLA === true) {
+			return this.emitLocalVlaDeclaration(symbol, node);
 		}
 		/*
 		A `remote` variable is only a binding: which processor, and which
@@ -5644,6 +5761,139 @@ export class CodeGenerator extends ASTVisitor {
 	}
 
 	/**
+	 * The runtime descriptor for one array dimension.
+	 *
+	 * A parameter keeps every dimension in one array level (`vlaDimensions`
+	 * is a list); a variable keeps one per nested level (`vlaDimension`).
+	 *
+	 * @param {TypeInfo?} type
+	 * @param {number} index
+	 * @returns {{expr: any, symbol: SymbolEntry}?}
+	 */
+	vlaDimensionAt(type, index) {
+		let current = type;
+		let at = 0;
+		while (current && current.isTypeInfo && current.kind === 'array') {
+			if (Array.isArray(current.arraySize)) {
+				const list = Array.isArray(current.vlaDimensions) ? current.vlaDimensions : [];
+				return list[index] ?? null;
+			}
+			if (at === index) return current.vlaDimension ?? null;
+			current = current.pointerTo ?? null;
+			at++;
+		}
+		return null;
+	}
+
+	/**
+	 * Cells occupied by one value of an array type, multiplying runtime
+	 * dimension cells where necessary.
+	 *
+	 * Returns null when a dimension is open (`int a[]`) rather than VLA.
+	 *
+	 * @param {TypeInfo?} type
+	 * @param {Instruction} setup
+	 * @returns {number|string|null}
+	 */
+	arrayCellCountOperand(type, setup) {
+		if (!type || type.isTypeInfo !== true) return 1;
+		if (type.kind !== 'array') return Number(type.size) || 1;
+		const dims = this.semantic?.arrayDimensionsOf?.(type) ?? [];
+		if (dims.length === 0) return Number(type.size) || 1;
+		const multiply = (a, b) => {
+			const target = this.getTempVariable();
+			setup.concat(InstructionBuilder.op('mul', target, String(a), String(b)));
+			return target;
+		};
+		let cells = 1;
+		let dynamic = false;
+		for (let i = 0; i < dims.length; i++) {
+			const desc = this.vlaDimensionAt(type, i);
+			if (desc?.expr) {
+				if (!desc.symbol) return null;
+				const operand = desc.symbol.getAssemblySymbol?.() ?? desc.symbol.name;
+				cells = (!dynamic && cells === 1) ? operand : multiply(cells, operand);
+				dynamic = true;
+			} else {
+				const n = Number(dims[i]);
+				if (!Number.isFinite(n) || n <= 0) return null;
+				cells = (typeof cells === 'number') ? cells * n : multiply(cells, n);
+			}
+		}
+		const element = this.arrayElementSizeOf(type);
+		if (typeof cells === 'number') return cells * element;
+		return element === 1 ? cells : multiply(cells, element);
+	}
+
+	/**
+	 * Cells per element of an array whose dimensions may be runtime values.
+	 *
+	 * Returns null when the type has no VLA dimension, so the ordinary
+	 * compile-time ratio path stays untouched.
+	 *
+	 * @param {TypeInfo?} type
+	 * @param {Instruction} setup Receives the multiplication instructions
+	 * @returns {number|string|null}
+	 */
+	vlaStrideOperand(type, setup) {
+		if (!type || type.kind !== 'array') return null;
+		const dims = this.semantic?.arrayDimensionsOf?.(type) ?? [];
+		if (dims.length === 0) return null;
+		let hasVLA = false;
+		for (let i = 0; i < dims.length; i++) {
+			if (this.vlaDimensionAt(type, i)?.expr) { hasVLA = true; break; }
+		}
+		if (!hasVLA) return null;
+		return this.arrayCellCountOperand(type, setup);
+	}
+
+	/**
+	 * Emit `sizeof` for a VLA expression.
+	 * @param {TypeInfo} type
+	 * @param {boolean} isParameter
+	 * @returns {IntRet}
+	 */
+	emitVlaSizeof(type, isParameter = false) {
+		const intType = this.semantic.getTypeInfo('int');
+		if (isParameter) {
+			/*
+			A VLA parameter is adjusted to a pointer in C. `sizeof(arr)` is the
+			pointer pair, not the whole runtime array.
+			*/
+			return new IntRet(this.glob, [], String(widthOfType(type)), intType, false);
+		}
+		const setup = new Instruction();
+		const cells = this.arrayCellCountOperand(type, setup);
+		if (cells === null) {
+			this.addError('sizeof() cannot determine the size of this open array', null);
+			return new IntRet(this.glob, [], '0', intType, false);
+		}
+		return new IntRet(this.glob, setup, String(cells), intType, true);
+	}
+
+	/**
+	 * Emit `lenof` for a VLA expression.
+	 * @param {TypeInfo} type
+	 * @param {number} level
+	 * @returns {IntRet}
+	 */
+	emitVlaLenof(type, level = 0) {
+		const intType = this.semantic.getTypeInfo('int');
+		const desc = this.vlaDimensionAt(type, level);
+		if (desc?.symbol) {
+			return new IntRet(this.glob, [], desc.symbol.getAssemblySymbol?.() ?? desc.symbol.name,
+				intType, false);
+		}
+		const dims = this.semantic?.arrayDimensionsOf?.(type) ?? [];
+		const known = Number(dims[level]);
+		if (Number.isFinite(known) && known > 0) {
+			return new IntRet(this.glob, [], String(known), intType, false);
+		}
+		this.addError('lenof() cannot determine this VLA length', null);
+		return new IntRet(this.glob, [], '0', intType, false);
+	}
+
+	/**
 	 * The 1D view of a multidimensional array.
 	 *
 	 * The storage is row-major and contiguous, so an `int[2][3]` view is an
@@ -5810,6 +6060,7 @@ export class CodeGenerator extends ASTVisitor {
 	 */
 	automaticArraySelectionAllowed(symbol) {
 		if (!this.autoArrayOptimize()) return false;
+		if (symbol.myType?.()?.isVLA === true) return false;
 		if (symbol.isAddressed === true) return false;
 		if (symbol.arrayEscapes === true) return false;
 		if (symbol.isExtern === true || symbol.isRemote === true) return false;
@@ -5888,6 +6139,15 @@ export class CodeGenerator extends ASTVisitor {
 		An inlined parameter has no style of its own: it borrows the caller's.
 		*/
 		if (symbol?.arrayAliasOf) return this.arrayStyleFor(symbol.arrayAliasOf);
+		/*
+		A VLA is always a runtime-strided memory array. It cannot be a handle
+		(one packed length cannot describe `arr[sz][sz + 1]`) and it cannot be
+		an embedded register layout (its length is not known).
+		*/
+		if (symbol?.myType?.()?.isVLA === true) {
+			symbol.chosenArrayStyle = { type: 'traditional', implement: null, reason: 'VLA' };
+			return symbol.chosenArrayStyle;
+		}
 		/*
 		A `byname` pointer element is one register holding a target name. Keep
 		these arrays in the register layout by default; the memory layout would
@@ -6456,9 +6716,30 @@ export class CodeGenerator extends ASTVisitor {
 		 */
 		let step;
 		if (node.getAttribute('computed')) {
+			const vlaStride = this.vlaStrideOperand(node.dataType, setup);
 			const ratio = node.dataType.size > 0 ? node.dataType.size : 1;
 			if (knownTotalOffset !== null && knownTotalOffset !== undefined) {
 				step = knownTotalOffset;
+			} else if (vlaStride !== null) {
+				if (typeof vlaStride === 'number') {
+					if (vlaStride > 1) {
+						if (node.children[1].type === 'NumericLiteral') {
+							step = vlaStride * node.children[1].value;
+						} else {
+							const scaled = this.getTempVariable();
+							setup.concat(InstructionBuilder.op('mul', scaled,
+								index.instructionReturn, vlaStride));
+							step = scaled;
+						}
+					} else {
+						step = index.instructionReturn;
+					}
+				} else {
+					const scaled = this.getTempVariable();
+					setup.concat(InstructionBuilder.op('mul', scaled,
+						index.instructionReturn, vlaStride));
+					step = scaled;
+				}
 			} else if (ratio > 1) {
 				if (node.children[1].type === 'NumericLiteral') {
 					step = ratio * node.children[1].value;
@@ -6920,6 +7201,7 @@ export class CodeGenerator extends ASTVisitor {
 		`paramSymbol` is null and the slot's own type is all there is to go on.
 		*/
 		const slotHasOpenDimension = slotType?.kind === 'array'
+			&& slotType.isVLA !== true
 			&& !(arrayLengthOfType(slotType) > 0);
 		const wantsHandle = argIsArray && !!slotType && slotType.kind === 'array'
 			&& (representation === 'handle' || representation === 'remote'
@@ -7117,6 +7399,18 @@ export class CodeGenerator extends ASTVisitor {
 	 */
 	visitFunctionCall(node) {
 		const glob = this.glob;
+		/*
+		`sizeof` / `lenof` on a VLA cannot be folded at semantic time; the
+		generator multiplies the hidden runtime dimension cells here.
+		*/
+		const vlaSizeof = node.getAttribute?.('vlaSizeof') ?? null;
+		if (vlaSizeof) {
+			return this.emitVlaSizeof(vlaSizeof.type, vlaSizeof.isParameter === true);
+		}
+		const vlaLenof = node.getAttribute?.('vlaLenof') ?? null;
+		if (vlaLenof) {
+			return this.emitVlaLenof(vlaLenof.type, vlaLenof.level ?? 0);
+		}
 		/*
 		`lenof(s)` where `s` is an array that arrived as a HANDLE: the length
 		rides in the packed register. Folding it at compile time answered 0,
@@ -8146,7 +8440,10 @@ export class CodeGenerator extends ASTVisitor {
 			kind = symbolType.kind;
 		}
 		const isPointer = kind === 'pointer';
-		let symbol = new SymbolEntry(`__tempsym_${isPointer ? `ptr_${this.registryPointerSymbolId++}` : this.registrySymbolId++}`, symbolType, this.currentScope, kind, null, symbolType.size);
+		const tempSize = symbolType.kind === 'pointer' ? 2
+			: (symbolType.kind === 'array' && symbolType.isVLA === true ? 2
+				: (Number(symbolType.size) || 1));
+		let symbol = new SymbolEntry(`__tempsym_${isPointer ? `ptr_${this.registryPointerSymbolId++}` : this.registrySymbolId++}`, symbolType, this.currentScope, kind, null, tempSize);
 
 		symbol.isVirtualSymbol = true;
 		// The only thing necessary is to restore them after function's exiting

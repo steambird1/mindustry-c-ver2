@@ -20,8 +20,8 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 291 passed, 0 failed (219 shape assertions, 1287 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 107 passed, 0 failed |
+| `node ../tools/check.mjs` | 295 passed, 0 failed (221 shape assertions, 1307 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 109 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 16 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 14 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
@@ -113,6 +113,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | shared chain + two-processor handoff (§7.56) | **done**; stable neighbour registers, peer round-trip test t269, metadata test t270 | §7.56 |
 | qualifier/type matrix (§7.57) | **partial**; shared scalar/array decay works, shared large aggregates need target-address propagation | §7.57 |
 | unified byname name packets (§7.58) | **partial**; register structs (flat or nested, including device/string_t), ordinary/shared pointer members and `byname` pointer members use name packets, arrays still rejected | §7.58 |
+| C99 VLA (§7.59) | **partial**; parameter VLAs (including multidimensional runtime strides), function-scope local VLAs with runtime stack allocation, runtime `sizeof`/`lenof`; recursive local VLAs and block/loop VLAs rejected | §7.59 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -2373,3 +2374,37 @@ now work via t272; large struct ARRAY elements still take the numeric path.
   unchanged. t273-t276 now assert both the packet read and the direct struct
   read; `negative/byname_of_memory_struct.c` rejects a target that genuinely
   needs memory.
+
+### 7.59 C99 variable length arrays
+
+- A non-constant array bound is a VLA. `TypeInfo.isVLA` plus per-level
+  `vlaDimension`/`vlaDimensions` carry the runtime expression; the hidden
+  length cells are ordinary local symbols (`isVlaLength`) so recursion saves
+  and restores them.
+- `hasOpenDimension`, `widthOfType` and `arrayParamRep` distinguish a VLA from
+  an open handle: a VLA is always a memory pointer pair, never a packed handle.
+- Parameter VLA: `void foo(int sz, int64_t arr[sz][sz + 1])` is adjusted to a
+  pointer, keeps `symbol.size = 2`, and evaluates `sz`/`sz + 1` once on entry.
+  Subscripts use the hidden inner length as the row stride; `sizeof(arr)` is
+  the pointer width, `sizeof(arr[0])` and `lenof(arr[0])` are runtime values.
+  t279 covers the two-dimensional case; t280 covers recursive parameter VLAs.
+- Local VLA: a function-scope declaration (`int a[n]`) allocates at its
+  declaration point. `__stackframe_forward` already accepts a runtime `__step`,
+  so the array gets `_block`/`_pos` from the current frame top and reserves
+  `length * elementCells`. `sizeof(a)`/`lenof(a)` use the runtime shape.
+  t281 covers two VLAs in one function; t282 covers a two-dimensional local
+  VLA.
+- Frame rollback: each dynamic allocation leaves a marker cell at the new top.
+  The marker holds the runtime frame total including itself; the next VLA reads
+  the previous marker, adds its cells and the new marker, and writes a new one.
+  The epilogue reads the last marker at `__stackframe - 1` and rolls back by
+  it, so no fixed hidden register or compile-time total is involved.
+- Limits: a VLA is only accepted in the function's top-level block. A VLA in
+  a loop/nested block needs block lifetime and stack marks (negative/n06).
+  A VLA cannot have an initializer (negative/local_vla_initializer.c).
+  A local VLA inside a recursive function is refused for now
+  (negative/recursive_local_vla.c): the existing recursive return protocol
+  rolls the caller frame back and lays the static prologue out again, which
+  would discard the VLA data; parameter VLAs are pointers and do recurse.
+  VLA typedefs, `[*]` prototypes and call-site bound evaluation are still out
+  of scope.

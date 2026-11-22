@@ -192,6 +192,7 @@ export function widthOfType(type) {
 		return (quals.includes('byname') || quals.includes('byvaluename')) ? 1 : 2;
 	}
 	if (type.kind === 'array') {
+		if (type.isVLA === true) return 2;
 		if ((type.qualifiers ?? []).includes('remote') || hasOpenDimension(type)) return 1;
 		return 2;
 	}

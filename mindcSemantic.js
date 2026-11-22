@@ -510,6 +510,9 @@ export class TypeInfo {
         this.members = members ?? []; // 结构体/联合体成员
         this.pointerTo = null; // 对于指针类型，指向的类型 (MUST BE A TYPE, NOT A FUNCTION)
         this.arraySize = null; // 对于数组类型，数组大小
+        this.isVLA = false; // 运行时维度的数组（C99 VLA）
+        this.vlaDimensions = null; // 参数式数组：每一维的 { expr, symbol } 或 null
+        this.vlaDimension = null; // 嵌套数组层：这一层的 { expr, symbol }
         this.qualifiers = []; // 类型限定符: const, volatile, auto, register, extern, etc.
 		// Probably we consider 'near' and 'far' as well
 		this.functionTo = null;	// Pointing to what function for function type
@@ -747,9 +750,15 @@ export class TypeInfo {
 			 * @type {TypeInfo}
 			 */
 			const tmpl = this.duplicate();
-			if (this.arraySize.length > 1) {
-				tmpl.size = tmpl.size / this.arraySize[0];
-				tmpl.arraySize = this.arraySize.slice(1);
+			const sizes = Array.isArray(this.arraySize) ? this.arraySize : null;
+			if (sizes && sizes.length > 1) {
+				const first = Number(sizes[0]);
+				tmpl.size = Number.isFinite(first) && first > 0 ? tmpl.size / first : NaN;
+				tmpl.arraySize = sizes.slice(1);
+				if (Array.isArray(this.vlaDimensions)) {
+					tmpl.vlaDimensions = this.vlaDimensions.slice(1);
+					tmpl.isVLA = tmpl.vlaDimensions.some(desc => !!desc?.expr);
+				}
 				return tmpl;
 			} else {
 				return this.pointerTo;
@@ -2236,8 +2245,22 @@ export class SemanticAnalyzer extends ASTVisitor {
 			PATTERN again -- which has no chosen representation -- so the
 			member was read as a block/offset pair that does not exist.
 			*/
-			const gotType = (param.type?.isTypeInfo === true) ? param.type
-				: this.typeInfoFromTypeNode(param);
+			let gotType = (param.type?.isTypeInfo === true) ? param.type
+				: this.typeInfoFromTypeNode(param, { allowVLA: true });
+			/*
+			A VLA parameter keeps its runtime dimensions on a per-function copy:
+			the hidden length symbols belong to this definition, not to the
+			prototype or another instantiation that shares the syntax.
+			*/
+			if (gotType?.isVLA) {
+				const copy = gotType.duplicate();
+				if (Array.isArray(copy.vlaDimensions)) {
+					copy.vlaDimensions = copy.vlaDimensions.map(desc =>
+						desc ? { ...desc, symbol: null } : null);
+				}
+				param.type = copy;
+				gotType = copy;
+			}
 			const paramSymbol = new SymbolEntry(
                 param.name,
                 { type: gotType },
@@ -2286,6 +2309,13 @@ export class SemanticAnalyzer extends ASTVisitor {
             this.currentScope.addSymbol(paramSymbol);
         });
 
+		/*
+		Bind each runtime parameter dimension to a hidden length cell. The
+		expression is evaluated at function entry, after the parameters have
+		been copied in, and the cell is what stride/sizeof read later.
+		*/
+		this.bindVlaParameterLengths(node);
+
         // 分析函数体
         if (node.body) {
             this.visit(node.body);
@@ -2295,6 +2325,40 @@ export class SemanticAnalyzer extends ASTVisitor {
         this.currentScope = this.currentScope.parent;
         this.currentFunction = null;
     }
+
+	/**
+	 * Give every runtime parameter dimension a hidden length cell.
+	 *
+	 * `void f(int sz, int64_t a[sz][sz + 1])` evaluates `sz` and `sz + 1` once
+	 * on entry. The array type keeps a descriptor per dimension; the function
+	 * body reads the hidden cell instead of trying to fold the expression.
+	 *
+	 * @param {any} node The FunctionDeclaration
+	 */
+	bindVlaParameterLengths(node) {
+		const intType = this.getTypeInfo('int');
+		for (const param of node.parameters ?? []) {
+			const symbol = this.currentScope.lookup(param.name);
+			const type = symbol?.myType?.() ?? null;
+			if (!type?.isVLA || !Array.isArray(type.vlaDimensions)) continue;
+			type.vlaDimensions.forEach((desc, index) => {
+				if (!desc?.expr || desc.symbol) return;
+				/*
+				Resolve the bound expression in the function scope. Later
+				parameters are visible here because the whole list has already
+				been added; that is the useful behaviour for `arr[sz]`.
+				*/
+				this.visit(desc.expr);
+				const hidden = new SymbolEntry(`__vla_len_${symbol.name}_${index}`,
+					{ type: intType }, this.currentScope, 'variable', param.location, 1);
+				hidden.isVlaLength = true;
+				hidden.vlaOwner = symbol;
+				hidden.vlaDimensionIndex = index;
+				this.currentScope.addSymbol(hidden);
+				desc.symbol = hidden;
+			});
+		}
+	}
 
     /**
      * A prototype and a definition (or two prototypes) must agree on the
@@ -2466,19 +2530,33 @@ export class SemanticAnalyzer extends ASTVisitor {
 			this.deduceArrayDimensions(declarator, baseType);
             if (declarator.arrayDimensions && declarator.arrayDimensions.length > 0) {
                 let arrayType = finalType;
+                let vlaLevel = 0;
                 for (const dim of declarator.arrayDimensions.reverse()) {
 					/*
 					A dimension has to be known while compiling. A const of a
-					literal counts; anything else would be a variable length
-					array, which this compiler does not support (the stack
-					frame size is fixed at compile time), so say so instead of
-					silently pretending the size is 1.
+					literal counts. A non-constant local dimension is a C99 VLA
+					when this declaration is directly in a function body; its
+					length cell and dynamic stack allocation are handled later.
 					*/
+					let vlaDimension = null;
 					if (dim.type !== 'NumericLiteral') {
 						const folded = this.constantDimensionOf(dim);
 						if (folded !== null) {
 							dim.value = folded;
 							dim.type = 'NumericLiteral';
+						} else if (this.localVlaAllowed(node, declarator)) {
+							this.visit(dim);
+							this.markVlaDimensionUses(dim);
+							const intType = this.getTypeInfo('int');
+							const hidden = new SymbolEntry(
+								`__vla_len_${declarator.name}_${vlaLevel}`,
+								{ type: intType }, this.currentScope, 'variable',
+								declarator.location, 1);
+							hidden.isVlaLength = true;
+							hidden.vlaOwner = declarator.name;
+							this.currentScope.addSymbol(hidden);
+							vlaDimension = { expr: dim, symbol: hidden };
+							this.currentFunction.hasDynamicStack = true;
 						} else {
 							this.addError(
 								`Variable length arrays are not supported: the size of ` +
@@ -2486,11 +2564,19 @@ export class SemanticAnalyzer extends ASTVisitor {
 								declarator.location);
 						}
 					}
-                    const arrType = new TypeInfo('', 'array', arrayType.size * ((typeof dim.value === 'number') ? dim.value : 1));
+                    const arrType = new TypeInfo('', 'array',
+						vlaDimension ? NaN : arrayType.size * ((typeof dim.value === 'number') ? dim.value : 1));
                     arrType.arraySize = dim;
                     arrType.pointerTo = arrayType;
 					arrType.qualifiers = [...finalType.qualifiers];
+					if (vlaDimension) {
+						arrType.isVLA = true;
+						arrType.vlaDimension = vlaDimension;
+					} else if (arrayType.isVLA === true) {
+						arrType.isVLA = true;
+					}
                     arrayType = arrType;
+					vlaLevel++;
                 }
                 finalType = arrayType;
 				//pointerAccess = true;
@@ -2547,6 +2633,9 @@ export class SemanticAnalyzer extends ASTVisitor {
                 'variable',
                 declarator.location
             );
+			if (finalType.isVLA === true) {
+				varSymbol.isVLA = true;
+			}
 			if (finalType.isNear()) {
 				varSymbol.isNearPointer = true;
 			}
@@ -4271,7 +4360,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 	 * @param {ASTNode?} typeNode
 	 * @returns {TypeInfo?}
 	 */
-	typeInfoFromTypeNode(typeNode) {
+	typeInfoFromTypeNode(typeNode, options = {}) {
 		if (!typeNode) return null;
 		if (typeNode.isTypeInfo === true) return typeNode;
 
@@ -4295,16 +4384,35 @@ export class SemanticAnalyzer extends ASTVisitor {
 
 		const dimensions = typeNode.arrayDimensions ?? [];
 		if (dimensions.length > 0) {
+			const vlaDimensions = [];
 			const sizes = dimensions.map(dimension => {
-				if (!dimension) return NaN;
+				if (!dimension) {
+					vlaDimensions.push(null);
+					return NaN;
+				}
 				const value = this.constantCaseValue(dimension);
-				return value === undefined ? NaN : Math.trunc(value);
+				if (value === undefined) {
+					/*
+					A non-constant bound in a parameter is a C99 VLA. Keep the
+					expression on the type; the function entry binds it to a
+					hidden length cell. Anywhere else it stays an open/unknown
+					dimension, as before.
+					*/
+					vlaDimensions.push(options.allowVLA ? { expr: dimension, symbol: null } : null);
+					return NaN;
+				}
+				vlaDimensions.push(null);
+				return Math.trunc(value);
 			});
 			let total = 1;
 			for (const size of sizes) total *= size;
 			const array = new TypeInfo('', 'array', total);
 			array.arraySize = sizes;
 			array.pointerTo = result;
+			if (options.allowVLA && vlaDimensions.some(desc => !!desc?.expr)) {
+				array.isVLA = true;
+				array.vlaDimensions = vlaDimensions;
+			}
 			result = array;
 		}
 		return result;
@@ -6280,10 +6388,57 @@ export class SemanticAnalyzer extends ASTVisitor {
 
 	/**
 	 * A dimension written as a name (`const int N = 4; int a[N];`).
+	/**
+	 * Whether a non-constant array dimension is a local VLA this compiler can
+	 * allocate on the function frame.
+	 *
+	 * The first version deliberately limits VLA declarations to the function's
+	 * top-level block. A VLA inside a loop or nested block would need a block
+	 * mark/restore for its lifetime, which is a later stage.
+	 *
+	 * @param {any} node The VariableDeclaration
+	 * @param {any} declarator
+	 * @returns {boolean}
+	 */
+	localVlaAllowed(node, declarator) {
+		if (!this.currentFunction) return false;
+		const owner = this.currentFunction.owningScope ?? null;
+		if (!owner) return false;
+		if (this.currentScope !== owner && this.currentScope?.parent !== owner) return false;
+		if (declarator.initializer) return false;
+		if ((declarator.pointerDepth ?? 0) > 0) return false;
+		const storage = node.type?.storageClass ?? null;
+		if (storage && ['static', 'extern', 'register'].includes(storage)) return false;
+		const qualifiers = node.type?.getAttribute?.('qualifiers') ?? [];
+		if (qualifiers.some(q => ['static', 'extern', 'persistent', 'near',
+			'remote', 'register'].includes(q))) return false;
+		return true;
+	}
+
+	/**
+	 * Keep symbols referenced by a VLA bound alive.
+	 *
+	 * The bound expression lives on the declarator, outside the body AST the
+	 * optimizer counts reads from; without this, `int n = 5; int a[n];` lost
+	 * the declaration of `n` and the VLA length read an uninitialised cell.
 	 *
 	 * @param {ASTNode?} dim
-	 * @returns {number?} null when it is not a compile time constant
 	 */
+	markVlaDimensionUses(dim) {
+		if (!dim || typeof dim !== 'object') return;
+		if (dim.type === 'Identifier') {
+			const symbol = this.currentScope?.lookup(dim.name) ?? null;
+			if (symbol) symbol.usedByVlaDimension = true;
+			return;
+		}
+		for (const key of ['children', 'arguments', 'left', 'right', 'expression',
+			'test', 'consequent', 'alternate', 'argument']) {
+			const value = dim[key];
+			if (Array.isArray(value)) value.forEach(item => this.markVlaDimensionUses(item));
+			else if (value && typeof value === 'object') this.markVlaDimensionUses(value);
+		}
+	}
+
 	constantDimensionOf(dim) {
 		if (!dim) return null;
 		if (dim.type === 'NumericLiteral') return Number(dim.value);
@@ -6377,6 +6532,13 @@ export class SemanticAnalyzer extends ASTVisitor {
 	 */
 	hasOpenDimension(type) {
 		if (!type || type.kind !== 'array') return false;
+		/*
+		A VLA has runtime dimensions, but it is not an open handle: its length
+		is carried in a hidden cell and its storage is memory. Treating it as
+		open would put it in a packed handle, where `arr[i][j]` has no row
+		stride to use.
+		*/
+		if (type.isVLA === true) return false;
 		const outer = (this.dimensionListOf(type) ?? [])[0];
 		return outer === undefined || outer === null
 			|| !Number.isFinite(Number(outer)) || Number(outer) <= 0;
@@ -6472,6 +6634,21 @@ export class SemanticAnalyzer extends ASTVisitor {
 			} else {
 				this.visit(arg);
 				const type = this.getExpressionType(arg);
+				/*
+				A VLA has a runtime size. Leave the call for the generator,
+				which can multiply the hidden dimension cells; folding it here
+				would answer 0.
+				*/
+				if (type?.isVLA === true) {
+					const symbol = arg.type === 'Identifier'
+						? (this.currentScope?.lookup?.(arg.name) ?? null) : null;
+					node.dataType = this.getTypeInfo('int');
+					node.setAttribute('vlaSizeof', {
+						type,
+						isParameter: symbol?.kind === 'parameter'
+					});
+					return true;
+				}
 				value = this.sizeOfTypeInfo(type);
 				if (value === null) {
 					this.addError(
@@ -6529,6 +6706,15 @@ export class SemanticAnalyzer extends ASTVisitor {
 			if (argNode.type === 'Identifier') {
 				const sym = this.currentScope?.lookup(argNode.name) ?? null;
 				const symType = sym?.myType?.() ?? null;
+				/*
+				A VLA's outer length is a runtime cell. Leave the call for the
+				generator; the existing fold would answer 0.
+				*/
+				if (symType?.isVLA === true && this.vlaDimensionOf(symType, 0)?.expr) {
+					node.dataType = this.getTypeInfo('int');
+					node.setAttribute('vlaLenof', { type: symType, level: 0 });
+					return true;
+				}
 				if (sym?.isRemote === true && symType?.kind === 'array') {
 					const declared = this.arrayDimensionsOf(symType);
 					const targetType = sym.remoteTarget?.myType?.() ?? null;
@@ -6579,6 +6765,18 @@ export class SemanticAnalyzer extends ASTVisitor {
 				}
 			}
 			if (value === null) {
+				/*
+				`lenof(a[0])` / a member expression: the element type can be a
+				VLA row, whose outer length is still runtime.
+				*/
+				this.visit(args[0]);
+				const lenType = this.getExpressionType(args[0])
+					?? args[0]?.dataType ?? null;
+				if (lenType?.isVLA === true && this.vlaDimensionOf(lenType, 0)?.expr) {
+					node.dataType = this.getTypeInfo('int');
+					node.setAttribute('vlaLenof', { type: lenType, level: 0 });
+					return true;
+				}
 				value = this.lenofOf(args[0], location);
 				if (value === null) return true;
 			}
@@ -6936,6 +7134,29 @@ export class SemanticAnalyzer extends ASTVisitor {
         }
         return dims;
     }
+
+	/**
+	 * Runtime descriptor for one array dimension, handling both the
+	 * parameter-style single array level and nested variable levels.
+	 *
+	 * @param {TypeInfo?} type
+	 * @param {number} index
+	 * @returns {{expr: any, symbol: any}?}
+	 */
+	vlaDimensionOf(type, index) {
+		let current = type;
+		let at = 0;
+		while (current && current.isTypeInfo && current.kind === 'array') {
+			if (Array.isArray(current.arraySize)) {
+				const list = Array.isArray(current.vlaDimensions) ? current.vlaDimensions : [];
+				return list[index] ?? null;
+			}
+			if (at === index) return current.vlaDimension ?? null;
+			current = current.pointerTo ?? null;
+			at++;
+		}
+		return null;
+	}
 
     /**
      * `void f(int p[4])` may only be handed an array with at least 4 elements;
@@ -8201,6 +8422,15 @@ export class SemanticAnalyzer extends ASTVisitor {
                 together, which is exactly what the versions are here to avoid.
                 */
                 if (symbol.arrayParamRep) continue;
+                /*
+                A VLA parameter is a pointer to memory with runtime row
+                strides. It is NOT a handle: a handle packs one length and one
+                element size, which cannot describe `arr[sz][sz + 1]`.
+                */
+                if (symbol.myType?.()?.isVLA === true) {
+                    symbol.arrayParamRep = 'traditional';
+                    continue;
+                }
                 const declaredRemote = symbol.isRemote === true
                     || this.typeHasRemoteQualifier(symbol.myType?.());
                 /*
