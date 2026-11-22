@@ -624,7 +624,7 @@ export class CodeGenerator extends ASTVisitor {
 						open-handle path applies.
 						*/
 						symbol.isVLA = true;
-						symbol.size = symbol.kind === 'parameter' ? 2 : null;
+						symbol.size = 2;
 						symbol.implementAsPointer = true;
 						symbol.needMemoryAllocation = false;
 						symbol.accessThroughPointer = false;
@@ -1761,7 +1761,8 @@ export class CodeGenerator extends ASTVisitor {
 				// Symbol values
 					const symType = symbol.myType();
 					if ((symbol.accessThroughPointer || symbol.needMemoryAllocation
-						|| symbol.isVlaLength === true)
+						|| symbol.isVlaLength === true
+						|| (symbol.isVLA === true && symbol.kind !== 'parameter'))
 						&& !(symbol.isStatic || symbol.isPersistent)) {
 						stackSymbols.push(symbol);
 					}

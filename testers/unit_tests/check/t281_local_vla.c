@@ -4,6 +4,10 @@ runtime cells and leaves a new frame-total marker; both arrays remain usable
 until the function returns.
 */
 /* EXPECT: 15 5 6 3 5 3 */
+/* EMIT: set [^ ]*a\.__pointer_block __stackframe_block */
+/* EMIT: set [^ ]*a\.__pointer_pos __stackframe_pos */
+/* EMIT: set [^ ]*b\.__pointer_block __stackframe_block */
+/* EMIT: set [^ ]*b\.__pointer_pos __stackframe_pos */
 auto device message1;
 
 void f(int n, int m) {

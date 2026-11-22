@@ -74,6 +74,14 @@ export function needsSaveSlot(symbol) {
 	*/
 	const kind = symbol.myType?.()?.kind ?? null;
 	/*
+	A local VLA's data lives in a runtime-sized frame region, so its
+	`_block` / `_pos` cannot be re-derived by walking the static frame after a
+	nested call. Keep the pair in a save slot, like a pointer value.
+	(A VLA *parameter* is a pointer too, but it is not a frame allocation and
+	the caller's value is not overwritten; it is handled separately.)
+	*/
+	if (symbol.isVLA === true && symbol.kind !== 'parameter') return true;
+	/*
 	An array's value IS its address, so walking the frame reproduces it -- even
 	when the array is marked "accessed through a pointer" (taking `&a[1]` does
 	that), `X.__pointer` is only a slot for that address, not the data itself.
@@ -208,6 +216,7 @@ export class FunctionRegisterer {
 			stackSymbols.push(new SymbolEntry('__stackpos', '__builtin_int', scope, 'variable', null, 1));
 		}
 		stackSymbols.forEach(element => {
+			element.stackOffset = stackTotal;
 			stackTotal += stackFrameSizeOf(element);
 		});
 		let preservedStack = null;
@@ -506,6 +515,7 @@ export class FunctionRegisterer {
 			if (helpers.has(name)) return;
 			func.stackTotal = 0;
 			func.stackSymbols.forEach(symb => {
+				symb.stackOffset = func.stackTotal;
 				func.stackTotal += stackFrameSizeOf(symb);
 				if (symb.isNearPointer === true) anyNear = true;
 			});

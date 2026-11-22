@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 295 passed, 0 failed (221 shape assertions, 1307 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 295 passed, 0 failed (225 shape assertions, 1307 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 109 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 16 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 14 passed, 0 failed, 2 exempt |
@@ -2394,6 +2394,13 @@ now work via t272; large struct ARRAY elements still take the numeric path.
   `length * elementCells`. `sizeof(a)`/`lenof(a)` use the runtime shape.
   t281 covers two VLAs in one function; t282 covers a two-dimensional local
   VLA.
+- Calling-convention preparation for recursive local VLAs: every local VLA is
+  now part of `stackSymbols` with a two-cell save slot, `needsSaveSlot` returns
+  true for it, and every stack symbol records its compile-time `stackOffset`
+  from the frame start. The hidden VLA length cells are ordinary one-cell
+  locals in the same layout. This is the state the future dynamic return path
+  needs to rebuild save-slot addresses from `frame start + offset`; the
+  recursive-local-VLA rejection remains until that path is wired up.
 - Frame rollback: each dynamic allocation leaves a marker cell at the new top.
   The marker holds the runtime frame total including itself; the next VLA reads
   the previous marker, adds its cells and the new marker, and writes a new one.
