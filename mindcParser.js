@@ -833,7 +833,13 @@ export class Parser {
                 this.consumeToken(); // 跳过 '['
                 let dimension = null;
                 if (!this.matchToken(TokenType.RIGHT_BRACKET)) {
-                    dimension = this.parseExpression();
+                    if (this.matchToken(TokenType.MULTIPLY)) {
+                        const token = this.getCurrentToken();
+                        this.consumeToken();
+                        dimension = new ASTNode('VlaStar', token.location);
+                    } else {
+                        dimension = this.parseExpression();
+                    }
                 }
                 this.expectToken(TokenType.RIGHT_BRACKET);
                 declarator.arrayDimensions.push(dimension);
@@ -2438,7 +2444,13 @@ export class Parser {
 					this.consumeToken();
 					let dimension = null;
 					if (!this.matchToken(TokenType.RIGHT_BRACKET)) {
-						dimension = this.parseExpression();
+						if (this.matchToken(TokenType.MULTIPLY)) {
+							const token = this.getCurrentToken();
+							this.consumeToken();
+							dimension = new ASTNode('VlaStar', token.location);
+						} else {
+							dimension = this.parseExpression();
+						}
 					}
 					this.expectToken(TokenType.RIGHT_BRACKET);
 					typeNode.arrayDimensions.push(dimension);

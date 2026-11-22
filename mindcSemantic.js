@@ -1393,7 +1393,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 				const directAlias = baseType.incomplete === true
 					&& (declarator.pointerDepth ?? 0) === 0
 					&& !(declarator.arrayDimensions?.length);
-				const aliasType = directAlias ? baseType : this.createAliasType(baseType, declarator);
+				const aliasType = directAlias ? baseType : this.createAliasType(baseType, declarator, typedefNode);
 				
 				// 添加到类型表和typedef表
 				this.addTypeAlias(aliasName, aliasType, declarator.location);
@@ -1594,6 +1594,26 @@ export class SemanticAnalyzer extends ASTVisitor {
                     this.processEnumDefinition(member.type, this.currentScope);
                 }
                 // const memberTypeName = this.getTypeNameFromTypeNode(member.type);
+				const memberDimensions = member.arrayDimensions
+					?? member.type?.arrayDimensions ?? [];
+				for (const dim of memberDimensions) {
+					if (!dim) continue;
+					if (dim.type === 'VlaStar') {
+						this.addError(
+							`'[*]' is only allowed in a function prototype parameter, `
+							+ `not in a struct or union member`,
+							dim.location ?? member.location);
+						return;
+					}
+					if (dim.type !== 'NumericLiteral'
+						&& this.constantCaseValue(dim) === undefined) {
+						this.addError(
+							`Variable length array member '${member.name}' is not allowed: `
+							+ `C99 requires a struct or union member to have a constant size`,
+							dim.location ?? member.location);
+						return;
+					}
+				}
 				const memberTypeName = this.getTypeNameFromDeclarator(member);
                 const memberType = this.getTypeInfo(memberTypeName);
                 
@@ -1601,6 +1621,13 @@ export class SemanticAnalyzer extends ASTVisitor {
                     this.addError(`Unknown member type '${memberTypeName}'`, member.location);
                     return;
                 }
+				if (memberType.isVLA === true) {
+					this.addError(
+						`Variable length array member '${member.name}' is not allowed: `
+						+ `C99 requires a struct or union member to have a constant size`,
+						member.location);
+					return;
+				}
                 if (memberType.incomplete === true) {
                     this.addError(`Member '${member.name}' has incomplete type '${memberType.toString()}'`,
                         member.location);
@@ -1772,7 +1799,7 @@ export class SemanticAnalyzer extends ASTVisitor {
         return null;
     }
 	
-	createAliasType(baseType, declarator) {
+	createAliasType(baseType, declarator, typedefNode = null) {
 		/*
 		An alias is a COPY of the whole base type, not a shell built from its
 		name and outermost size. Typedefs nest (`typedef int *p; typedef p *pp;`),
@@ -1805,17 +1832,30 @@ export class SemanticAnalyzer extends ASTVisitor {
 			*/
 			const baseQualifiers = [...aliasType.qualifiers];
 			let arrayType = aliasType;
+			let vlaLevel = 0;
 			for (const dim of [...declarator.arrayDimensions].reverse()) {
-				/*
-				A dimension has to be known while compiling -- the same rule a
-				variable declaration enforces, or `arr a;` made from this alias
-				would be a variable length array by surprise.
-				*/
-				let value = dim;
-				if (dim.type !== 'NumericLiteral') {
+				let vlaDimension = null;
+				if (dim?.type === 'VlaStar') {
+					this.addError(
+						`'[*]' is only allowed in a function prototype parameter`,
+						dim.location ?? declarator.location);
+				} else if (dim && dim.type !== 'NumericLiteral') {
 					const folded = this.constantDimensionOf(dim);
 					if (folded !== null) {
-						value = { type: 'NumericLiteral', value: folded };
+						dim.value = folded;
+						dim.type = 'NumericLiteral';
+					} else if (this.localVlaTypedefAllowed(typedefNode, declarator)) {
+						this.visit(dim);
+						this.markVlaDimensionUses(dim);
+						const intType = this.getTypeInfo('int');
+						const hidden = new SymbolEntry(
+							`__vla_len_${declarator.name}_${vlaLevel}`,
+							{ type: intType }, this.currentScope, 'variable',
+							declarator.location, 1);
+						hidden.isVlaLength = true;
+						hidden.vlaOwner = declarator.name;
+						this.currentScope.addSymbol(hidden);
+						vlaDimension = { expr: dim, symbol: hidden, preEvaluated: true };
 					} else {
 						this.addError(
 							`Variable length arrays are not supported: the size of ` +
@@ -1824,11 +1864,24 @@ export class SemanticAnalyzer extends ASTVisitor {
 					}
 				}
 				const arrType = new TypeInfo('', 'array',
-					arrayType.size * ((typeof value?.value === 'number') ? value.value : 1));
-				arrType.arraySize = value;
+					vlaDimension ? NaN : arrayType.size * ((typeof dim?.value === 'number') ? dim.value : 1));
+				arrType.arraySize = dim;
 				arrType.pointerTo = arrayType; // 使用pointerTo指向元素类型
 				arrType.qualifiers = [...baseQualifiers];
+				if (vlaDimension) {
+					arrType.isVLA = true;
+					arrType.vlaDimension = vlaDimension;
+				} else if (arrayType.isVLA === true) {
+					arrType.isVLA = true;
+				}
 				arrayType = arrType;
+				vlaLevel++;
+			}
+			if (arrayType.isVLA === true) {
+				if (typedefNode) {
+					typedefNode.vlaAliasTypes ??= [];
+					typedefNode.vlaAliasTypes.push(arrayType);
+				}
 			}
 			return arrayType;
 		}
@@ -2201,6 +2254,7 @@ export class SemanticAnalyzer extends ASTVisitor {
                 type: this.getTypeNameFromTypeNode(param)
             }));
         }
+        funcSymbol.parameterSignature = this.parameterTypeNamesOf(node);
         funcSymbol.isPrototype = !node.body;
         funcSymbol.isDefined = !!node.body;
         funcSymbol.declarationNode = node;
@@ -2260,6 +2314,11 @@ export class SemanticAnalyzer extends ASTVisitor {
 				}
 				param.type = copy;
 				gotType = copy;
+				if (node.body && copy.vlaDimensions?.some(desc => desc?.star)) {
+					this.addError(
+						`'[*]' is only allowed in a function prototype, not in a definition`,
+						param.location ?? node.location);
+				}
 			}
 			const paramSymbol = new SymbolEntry(
                 param.name,
@@ -2379,8 +2438,9 @@ export class SemanticAnalyzer extends ASTVisitor {
                     related: [{ message: 'previous declaration is here', location: existing.location }]
                 });
         }
-        const now = (node.parameters ?? []).map(p => String(this.getTypeNameFromTypeNode(p)));
-        const before = (existing.type?.parameters ?? []).map(p => String(p?.type ?? p));
+        const now = this.parameterTypeNamesOf(node);
+        const before = existing.parameterSignature
+            ?? (existing.type?.parameters ?? []).map(p => String(p?.type ?? p));
         if (before.length !== now.length || before.some((t, i) => t !== now[i])) {
             this.addError(`Function '${node.name}' is redeclared with a different parameter list`,
                 node.location,
@@ -2581,6 +2641,27 @@ export class SemanticAnalyzer extends ASTVisitor {
                 finalType = arrayType;
 				//pointerAccess = true;
             }
+			/*
+			A type can become a VLA through a typedef as well as through the
+			declarator's own dimensions. Apply the same storage/lifetime rules
+			to both spellings.
+			*/
+			if (finalType.isVLA === true) {
+				if (declarator.initializer) {
+					this.addError(
+						`Variable length array '${declarator.name}' cannot have an initializer`,
+						declarator.location);
+					return;
+				}
+				if (!this.localVlaAllowed(node, declarator)) {
+					this.addError(
+						`Variable length array '${declarator.name}' is only supported `
+						+ `in a function top-level block`,
+						declarator.location);
+					return;
+				}
+				if (this.currentFunction) this.currentFunction.hasDynamicStack = true;
+			}
 
 			/*
 			Peel off pointers and array layers. A struct/union has no "single"
@@ -4390,6 +4471,20 @@ export class SemanticAnalyzer extends ASTVisitor {
 					vlaDimensions.push(null);
 					return NaN;
 				}
+				if (dimension.type === 'VlaStar') {
+					/*
+					C99 `[*]` is only legal in a function prototype parameter.
+					The type keeps the star so a definition can bind the real
+					length; no expression is evaluated here.
+					*/
+					if (!options.allowVLA) {
+						this.addError(
+							`'[*]' is only allowed in a function prototype parameter`,
+							dimension.location ?? typeNode.location ?? null);
+					}
+					vlaDimensions.push({ star: true, expr: null, symbol: null });
+					return NaN;
+				}
 				const value = this.constantCaseValue(dimension);
 				if (value === undefined) {
 					/*
@@ -4404,12 +4499,21 @@ export class SemanticAnalyzer extends ASTVisitor {
 				vlaDimensions.push(null);
 				return Math.trunc(value);
 			});
+			/*
+			Only the outermost `[*]` is supported: an inner one would decide
+			the row stride, and a prototype has no length for that stride.
+			*/
+			if (vlaDimensions.some((desc, index) => desc?.star && index > 0)) {
+				this.addError(
+					`Only the outermost array dimension may use '[*]'`,
+					typeNode.location ?? null);
+			}
 			let total = 1;
 			for (const size of sizes) total *= size;
 			const array = new TypeInfo('', 'array', total);
 			array.arraySize = sizes;
 			array.pointerTo = result;
-			if (options.allowVLA && vlaDimensions.some(desc => !!desc?.expr)) {
+			if (options.allowVLA && vlaDimensions.some(desc => !!desc?.expr || desc?.star)) {
 				array.isVLA = true;
 				array.vlaDimensions = vlaDimensions;
 			}
@@ -4424,7 +4528,7 @@ export class SemanticAnalyzer extends ASTVisitor {
 	 * @param {TypeSpecifierNode} typeNode 
 	 * @returns 
 	 */
-    getTypeNameFromTypeNode(typeNode) {
+    getTypeNameFromTypeNode(typeNode, options = {}) {
         if (!typeNode) return null;
 		/*
 		Already a resolved type: happens when a function is specialised and its
@@ -4463,8 +4567,13 @@ export class SemanticAnalyzer extends ASTVisitor {
 			*/
 			arraySuffix = ' ' + typeNode.arrayDimensions.map(dim => {
 				if (!dim) return '[]';
+				if (dim.type === 'VlaStar') {
+					return `[${options.vlaPlaceholder ?? '*'}]`;
+				}
 				const folded = this.constantCaseValue(dim);
-				const value = folded !== undefined ? Math.trunc(folded) : (dim.value ?? '');
+				if (folded !== undefined) return `[${Math.trunc(folded)}]`;
+				if (options.vlaPlaceholder) return `[${options.vlaPlaceholder}]`;
+				const value = dim.value ?? '';
 				return `[${value}]`;
 			}).join('');
 		}
@@ -6400,6 +6509,31 @@ export class SemanticAnalyzer extends ASTVisitor {
 	 * @param {any} declarator
 	 * @returns {boolean}
 	 */
+	/**
+	 * Whether a VLA typedef may be declared here.
+	 *
+	 * Same first-version restriction as a local VLA: function top-level block
+	 * only. The bound is evaluated once at the typedef declaration and shared
+	 * by every object declared through the alias.
+	 *
+	 * @param {any} typedefNode
+	 * @param {any} declarator
+	 * @returns {boolean}
+	 */
+	localVlaTypedefAllowed(typedefNode, declarator) {
+		if (!this.currentFunction) return false;
+		const owner = this.currentFunction.owningScope ?? null;
+		if (!owner) return false;
+		if (this.currentScope !== owner && this.currentScope?.parent !== owner) return false;
+		const qualifiers = [
+			...(typedefNode?.type?.getAttribute?.('qualifiers') ?? []),
+			...(declarator?.getAttribute?.('qualifiers') ?? [])
+		];
+		if (qualifiers.some(q => ['static', 'extern', 'persistent', 'near',
+			'remote', 'register'].includes(q))) return false;
+		return true;
+	}
+
 	localVlaAllowed(node, declarator) {
 		if (!this.currentFunction) return false;
 		const owner = this.currentFunction.owningScope ?? null;
@@ -6614,6 +6748,11 @@ export class SemanticAnalyzer extends ASTVisitor {
 				const info = this.resolveCompileTimeTypeName(String(arg.value));
 				if (!info) {
 					this.addError(`Unknown type '${arg.value}' in sizeof()`, location);
+					return true;
+				}
+				if (info.isVLA === true) {
+					node.dataType = this.getTypeInfo('int');
+					node.setAttribute('vlaSizeof', { type: info, isParameter: false });
 					return true;
 				}
 				value = this.sizeOfTypeInfo(info);
@@ -6955,7 +7094,8 @@ export class SemanticAnalyzer extends ASTVisitor {
      * @returns {string[]}
      */
     parameterTypeNamesOf(node) {
-        return (node?.parameters ?? []).map(param => String(this.getTypeNameFromTypeNode(param) ?? '?'));
+        return (node?.parameters ?? []).map(param =>
+            String(this.getTypeNameFromTypeNode(param, { vlaPlaceholder: '__vla' }) ?? '?'));
     }
 
     /**
@@ -6973,6 +7113,21 @@ export class SemanticAnalyzer extends ASTVisitor {
         const byName = new Map();
         for (const func of (ast?.functions ?? [])) {
             if (!func || func.type !== 'FunctionDeclaration' || !func.name) continue;
+            /*
+            `[*]` is only legal on the OUTERMOST dimension of a prototype
+            parameter. Prototypes are skipped by the main parameter visitor,
+            so validate their spelling here.
+            */
+            (func.parameters ?? []).forEach(param => {
+                const dims = param.arrayDimensions ?? param.type?.arrayDimensions ?? [];
+                dims.forEach((dim, index) => {
+                    if (dim?.type === 'VlaStar' && index > 0) {
+                        this.addError(
+                            `Only the outermost array dimension may use '[*]'`,
+                            dim.location ?? param.location ?? func.location);
+                    }
+                });
+            });
             const paramTypes = this.parameterTypeNamesOf(func);
             const signature = paramTypes.join(',');
             let entries = byName.get(func.name);

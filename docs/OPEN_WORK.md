@@ -20,8 +20,8 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 296 passed, 0 failed (225 shape assertions, 1312 pragma-invariance runs) |
-| `node ../tools/negative.mjs` | 108 passed, 0 failed |
+| `node ../tools/check.mjs` | 300 passed, 0 failed (225 shape assertions, 1332 pragma-invariance runs) |
+| `node ../tools/negative.mjs` | 112 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 16 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 14 passed, 0 failed, 2 exempt |
 | `node ../tools/runall.mjs` | 267/275 — the 8 misses are reported as known gaps, not failures |
@@ -113,7 +113,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | shared chain + two-processor handoff (§7.56) | **done**; stable neighbour registers, peer round-trip test t269, metadata test t270 | §7.56 |
 | qualifier/type matrix (§7.57) | **partial**; shared scalar/array decay works, shared large aggregates need target-address propagation | §7.57 |
 | unified byname name packets (§7.58) | **partial**; register structs (flat or nested, including device/string_t), ordinary/shared pointer members and `byname` pointer members use name packets, arrays still rejected | §7.58 |
-| C99 VLA (§7.59) | **partial**; parameter and recursive function-scope VLAs, multidimensional runtime strides, runtime stack allocation, runtime `sizeof`/`lenof`; block/loop VLAs, VLA typedefs and `[*]` prototypes remain out of scope | §7.59 |
+| C99 VLA (§7.59) | **partial**; parameter and recursive function-scope VLAs, `[*]` prototype parameters, function-scope VLA typedefs, multidimensional runtime strides, runtime stack allocation, runtime `sizeof`/`lenof`; block/loop VLAs and inner `[*]` remain out of scope | §7.59 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -2409,8 +2409,29 @@ now work via t272; large struct ARRAY elements still take the numeric path.
   the previous marker, adds its cells and the new marker, and writes a new one.
   The epilogue reads the last marker at `__stackframe - 1` and rolls back by
   it, so no fixed hidden register or compile-time total is involved.
+- `[*]` prototype parameter: the parser keeps a `VlaStar` node, the parameter
+  type is a traditional pointer with a runtime outer dimension, and the
+  definition supplies the real bound. Only the outermost dimension may use
+  `[*]`; an inner one would decide a row stride the prototype cannot supply.
+  `sizeof(a)` is the pointer width, `sizeof(a[0])`/`lenof(a[0])` use the
+  static inner shape, and the definition may not spell `[*]`. t284 covers
+  `int a[*][4]` against the definition `int a[n][4]`; negative/vla_star_inner
+  and negative/vla_star_definition cover the rejected spellings.
+- Function-scope VLA typedef: `typedef int Row[n];` evaluates the bound once
+  at the typedef declaration and stores it in a hidden length cell. Every
+  object declared through `Row` gets its own dynamic array but shares that
+  length. `sizeof(Row)`, `sizeof(a)` and `lenof(a)` are runtime values;
+  recursive functions preserve both the hidden length and each object's base
+  pointer through the dynamic return path. t285 covers two objects from one
+  alias; t286 covers the alias in a recursive function; t287 covers
+  `sizeof(Row)` when no object is declared, so the typedef itself is not
+  inlined away.
+- Struct/union members: a variably modified member is rejected explicitly
+  (C99 requires the member size to be constant), including a member typed by
+  a VLA typedef. negative/vla_struct_member covers it.
 - Limits: a VLA is only accepted in the function's top-level block. A VLA in
   a loop/nested block needs block lifetime and stack marks (negative/n06).
-  A VLA cannot have an initializer (negative/local_vla_initializer.c).
-  VLA typedefs, `[*]` prototypes and call-site bound evaluation are still out
-  of scope.
+  A VLA cannot have an initializer (negative/local_vla_initializer.c). VLA
+  typedefs share the same function-scope restriction (negative/
+  vla_typedef_global.c). Inner `[*]`, VLA typedefs in nested blocks, pointer-to-
+  VLA arithmetic and call-site bound evaluation remain out of scope.

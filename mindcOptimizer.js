@@ -6802,7 +6802,7 @@ export class Optimizer extends ASTVisitor {
 		if (info.node.scope
 			&& info.node.scope.recursivelyGetAllSymbols().some(s =>
 				s && ((s.kind === 'parameter' && s.myType?.()?.isVLA === true)
-					|| s.isVLA === true))) {
+					|| s.isVLA === true || s.isVlaLength === true))) {
 			return false;
 		}
 		// Reachable through a function pointer: the call sites are not all known

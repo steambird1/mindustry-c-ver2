@@ -2223,7 +2223,27 @@ export class CodeGenerator extends ASTVisitor {
 	visituinion(node) { return new Instruction(); }
 	visitStruct(node) { return new Instruction(); }
 	visitUnion(node) { return new Instruction(); }
-	visitTypedefDeclaration(node) { return new Instruction(); }
+	visitTypedefDeclaration(node) {
+		const result = new Instruction();
+		/*
+		A block-scoped VLA typedef evaluates its bounds ONCE, at the typedef
+		declaration. Later objects declared through the alias share those
+		hidden length cells.
+		*/
+		for (const type of node.vlaAliasTypes ?? []) {
+			let current = type;
+			while (current && current.isTypeInfo && current.kind === 'array') {
+				const desc = current.vlaDimension ?? null;
+				if (desc?.expr && desc.symbol) {
+					const value = this.visitAndRead(desc.expr);
+					result.concat(value);
+					result.concat(this.writeSymbol(desc.symbol, value.instructionReturn));
+				}
+				current = current.pointerTo ?? null;
+			}
+		}
+		return result;
+	}
 	visitTypeSpecifier(node) { return new Instruction(); }
 
 	visitFunctionDeclaration(node) {
@@ -3691,7 +3711,7 @@ export class CodeGenerator extends ASTVisitor {
 		let current = type;
 		while (current && current.isTypeInfo && current.kind === 'array') {
 			const desc = current.vlaDimension ?? null;
-			if (desc?.expr && desc.symbol) {
+			if (desc?.expr && desc.symbol && desc.preEvaluated !== true) {
 				const value = this.visitAndRead(desc.expr);
 				setup.concat(value);
 				setup.concat(this.writeSymbol(desc.symbol, value.instructionReturn));
