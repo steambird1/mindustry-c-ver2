@@ -2354,8 +2354,20 @@ export class CodeGenerator extends ASTVisitor {
 			if (node.dataType && node.dataType.isPointerImpl()) {
 				stmt.concat(result);
 				stmt.setAttribute('isPointer', true);
+				/*
+				A shared pointer return is handed over as a building + offset
+				pair. The caller marks the call result as building-backed, so
+				the block half must be the building itself -- not the numeric
+				`_block` register of an escaping array.
+				*/
+				const resultIsPointer = result instanceof PointerRet;
+				const sharedReturn = isSharedPointerType(node.dataType);
+				const returnBlock = (sharedReturn && resultIsPointer
+					&& (result.buildingAlias || result.blockIsBuilding))
+					? (result.buildingAlias ?? `${result.instructionReturn}_block`)
+					: `${result.instructionReturn}_block`;
 				stmt.concat([
-					InstructionBuilder.set(`__return_block`, `${result.instructionReturn}_block`),
+					InstructionBuilder.set(`__return_block`, returnBlock),
 					InstructionBuilder.set(`__return_pos`, `${result.instructionReturn}_pos`)
 				])
 			} else if (result.getAttribute('isPointer')) {
@@ -7403,10 +7415,24 @@ export class CodeGenerator extends ASTVisitor {
 				[InstructionBuilder.set(slotName, value.name)], slotName, slotType, false);
 		}
 		// Reusing the storage the argument already owns is free and avoids a copy
-		const delivery = value.rename(slotName);
+		let delivery = value.rename(slotName);
 		if (slotType && value.type && !this.semantic.isSameType(slotType, value.type)) {
 			// Types differ enough to require an explicit conversion
 			delivery.concat(this.copyObject(slotName, slotName, slotType, value.type));
+		}
+		/*
+		A shared pointer parameter is a building + offset pair. An aggregate
+		array keeps the numeric block id in `_block` even when its fixed storage
+		building is known, so hand the building over explicitly -- otherwise
+		the callee maps a local link id that means nothing (or a different
+		building) on another processor.
+		*/
+		if (isSharedPointerType(slotType) && value instanceof PointerRet
+			&& !value.blockIsBuilding && value.buildingAlias) {
+			delivery = new RefPointerRet(glob, [
+				delivery.instructions,
+				InstructionBuilder.set(`${slotName}_block`, value.buildingAlias)
+			], slotName, slotType, false, value.buildingAlias, true);
 		}
 		return delivery;
 	}
@@ -7521,8 +7547,17 @@ export class CodeGenerator extends ASTVisitor {
 		const container = this.getTempSymbol(returnType);
 		const stored = returned.storeTo(container, true);
 		result.concat(stored);
-		return valueClassOf(glob, returnType).create(glob, result.instructions,
+		const ret = valueClassOf(glob, returnType).create(glob, result.instructions,
 			stored.name, returnType, true, null);
+		/*
+		A shared pointer return is a building + offset pair. The caller must
+		keep that representation, otherwise `*get(...)` runs the building
+		through `getlink` and reads a local link id that does not exist.
+		*/
+		if (isSharedPointerType(returnType) && ret instanceof RefPointerRet) {
+			ret.blockIsBuilding = true;
+		}
+		return ret;
 	}
 
 	/**

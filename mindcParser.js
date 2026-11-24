@@ -1026,7 +1026,7 @@ export class Parser {
         
         // 跳过类型限定符和存储类说明符
         while (this.matchTokenTypeAt(currentIndex, [
-            TokenType.CONST, TokenType.VOLATILE,
+            TokenType.CONST, TokenType.VOLATILE, TokenType.SHARED,
             TokenType.STATIC, TokenType.PERSISTENT, TokenType.EXTERN, TokenType.AUTO, TokenType.REGISTER
         ])) {
             currentIndex++;
@@ -1045,7 +1045,16 @@ export class Parser {
             TokenType.STRUCT, TokenType.UNION, TokenType.ENUM,
             TokenType.IDENTIFIER // typedef定义的类型
         ])) {
-			endedAsIdentifier = this.matchTokenTypeAt(currentIndex, [TokenType.IDENTIFIER]);
+			const token = this.tokens[currentIndex];
+			/*
+			A known typedef/struct name is part of the TYPE, not the function
+			name. The old heuristic treated every identifier as the function
+			name, so `Big *f()` and `shared struct Big *f()` were not seen as
+			functions at all.
+			*/
+			const isTypeName = token.type === TokenType.IDENTIFIER
+				&& this.knownTypeNames?.has?.(token.value) === true;
+			endedAsIdentifier = token.type === TokenType.IDENTIFIER && !isTypeName;
             currentIndex++;
         }
 		

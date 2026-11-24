@@ -1338,8 +1338,12 @@ export class PointerRet extends VariableRet {
 		pointer through its own classes; a pointer VARIABLE's pair is the
 		pointer's own storage, which a block/offset pointer cannot describe.
 		*/
-		if (this.type && ['array', 'struct', 'union'].includes(this.type.kind)
-			&& widthOfType(this.type) >= 2) {
+		/*
+		An aggregate value IS its address here, even when its size is one
+		word: a `struct {int x;}` still lives in memory and `&s` is its
+		block/offset pair.
+		*/
+		if (this.type && ['array', 'struct', 'union'].includes(this.type.kind)) {
 			return this;
 		}
 		throw new InfrastructureNotImplementedExpection('address of a pointer');
@@ -1492,17 +1496,26 @@ export class MemPointerRet extends PointerRet {
 				`cannot assign a value of type '${value.type?.toString?.() ?? 'unknown'}' to a pointer`);
 		}
 		let valueBlock = null;
-		if (isSharedPointerType(this.type) && (value.buildingAlias || value.blockIsBuilding)) {
-			const id = value.buildingAlias
-				? stableIdOfBlock(glob, value.buildingAlias) : 0;
-			if (id <= 0) {
+		const writeInstructions = [this.instructions, value.instructions];
+		if (isSharedPointerType(this.type)) {
+			if (!value.buildingAlias && !value.blockIsBuilding) {
 				throw new InfrastructureNotImplementedExpection(
-					'a shared pointer needs a statically known building to serialize');
+					'a shared pointer needs a building-backed value to serialize');
 			}
-			valueBlock = String(id);
+			if (value.buildingAlias) {
+				const id = stableIdOfBlock(glob, value.buildingAlias);
+				if (id > 0) valueBlock = String(id);
+			}
+			if (!valueBlock) {
+				const idTarget = glob.tmp(glob.semantic.getTypeInfo('int'));
+				const idName = idTarget.name ?? idTarget;
+				writeInstructions.push(buildingToStableId(glob,
+					value.buildingAlias ?? `${value.name}_block`, idName));
+				valueBlock = idName;
+			}
 		}
 		return new RefPointerRet(glob,
-			[this.instructions, value.instructions,
+			[...writeInstructions,
 				referenceWrite(glob, this, value.name, 2, valueBlock)],
 			this.name, this.type, false);
 	}
