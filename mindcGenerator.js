@@ -118,7 +118,8 @@ export class CodeGenerator extends ASTVisitor {
 		this.memory = new MemoryManager(compiler.memoryInfo);
 		const optimizeOption = compiler?.extraConfig?.getAttribute('optimizeOption') ?? {};
 		this.functionManagement = new FunctionRegisterer(this.memory,
-			optimizeOption.stackCheck, optimizeOption.stackUnderflow);
+			optimizeOption.stackCheck, optimizeOption.stackUnderflow,
+			optimizeOption.sharedIdMode ?? 'auto');
 		/**
 		 * The object-oriented value layer (see mindcInfrastructure.js).
 		 * @type {Globals}

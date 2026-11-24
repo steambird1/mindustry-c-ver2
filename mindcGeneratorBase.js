@@ -171,9 +171,11 @@ export class FunctionRegisterer {
 	 * 
 	 * @param {MemoryManager} memoryObject 
 	 */
-	constructor(memoryObject, stackCheck = undefined, stackUnderflow = undefined) {
+	constructor(memoryObject, stackCheck = undefined, stackUnderflow = undefined, sharedIdMode = 'auto') {
 		this.stackCheck = stackCheck;
 		this.stackUnderflow = stackUnderflow;
+		this.sharedIdMode = sharedIdMode;
+		this.sharedIdHelpersEnabled = false;
 		/**
 		 * @type {Map<string, functionInfo>}
 		 */
@@ -190,6 +192,12 @@ export class FunctionRegisterer {
 			memoryObject.outputPointerForwardFunction(this, '__stackframe_forward', '__stackframe_', true, stackCheck);
 			memoryObject.outputPointerBackwardFunction(this, '__stackframe_backward', '__stackframe_', true, stackUnderflow);
 			memoryObject.outputNearFitFunction(this, '__nearFit', '__ptr', true, stackCheck);
+		}
+		const blockCount = memoryObject.memoryBlocks.length;
+		const helperMode = sharedIdMode === 'on'
+			|| (sharedIdMode !== 'off' && blockCount >= 4);
+		if (helperMode && blockCount > 0) {
+			this.outputSharedIdFunctions(memoryObject);
 		}
 	}
 	
@@ -218,6 +226,40 @@ export class FunctionRegisterer {
 			offset += stackFrameSizeOf(symbol);
 		});
 		func.stackTotal = offset;
+	}
+
+	/**
+	 * Stable-id mapping helpers for larger memory configurations.
+	 *
+	 * The inline form emits one select per block at every mapping site. Above a
+	 * few blocks it is shorter to emit the chain once and call it. The helpers
+	 * use fixed registers and need no stack frame.
+	 *
+	 * @param {MemoryManager} memoryObject
+	 */
+	outputSharedIdFunctions(memoryObject) {
+		const blocks = memoryObject.memoryBlocks ?? [];
+		if (blocks.length === 0) return;
+		const toBuilding = new Instruction([
+			InstructionBuilder.set('__shared_building', 'null')
+		]);
+		for (const block of blocks) {
+			toBuilding.concat(InstructionBuilder.select('__shared_building', 'equal',
+				'__shared_id', String(block.stableId ?? 0), block.name,
+				'__shared_building'));
+		}
+		this.addFunction('__sharedIdToBuilding', toBuilding, null, [], true, false, true);
+
+		const toId = new Instruction([
+			InstructionBuilder.set('__shared_id_out', '0')
+		]);
+		for (const block of blocks) {
+			toId.concat(InstructionBuilder.select('__shared_id_out', 'equal',
+				'__shared_building', block.name, String(block.stableId ?? 0),
+				'__shared_id_out'));
+		}
+		this.addFunction('__sharedBuildingToId', toId, null, [], true, false, true);
+		this.sharedIdHelpersEnabled = true;
 	}
 
 	addFunction(name, body, scope = null, givenStackSymbols = [], specialBuiltin = false, recursive = false, removable = false) {

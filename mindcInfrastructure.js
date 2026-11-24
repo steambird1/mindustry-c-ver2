@@ -457,6 +457,13 @@ export function stableIdOfBlock(glob, name) {
  * @returns {Instruction}
  */
 export function stableIdToBuilding(glob, idOperand, target) {
+	if (glob.funcReg?.sharedIdHelpersEnabled === true) {
+		return new Instruction([
+			glob.funcReg.getFunctionCall('__sharedIdToBuilding',
+				new Map([['__shared_id', idOperand]]), null),
+			InstructionBuilder.set(target, '__shared_building')
+		]);
+	}
 	const result = new Instruction([InstructionBuilder.set(target, 'null')]);
 	for (const block of glob.memory?.memoryBlocks ?? []) {
 		result.concat(InstructionBuilder.select(target, 'equal', idOperand,
@@ -473,6 +480,13 @@ export function stableIdToBuilding(glob, idOperand, target) {
  * @returns {Instruction}
  */
 export function buildingToStableId(glob, buildingOperand, target) {
+	if (glob.funcReg?.sharedIdHelpersEnabled === true) {
+		return new Instruction([
+			glob.funcReg.getFunctionCall('__sharedBuildingToId',
+				new Map([['__shared_building', buildingOperand]]), null),
+			InstructionBuilder.set(target, '__shared_id_out')
+		]);
+	}
 	const result = new Instruction([InstructionBuilder.set(target, '0')]);
 	for (const block of glob.memory?.memoryBlocks ?? []) {
 		result.concat(InstructionBuilder.select(target, 'equal', buildingOperand,

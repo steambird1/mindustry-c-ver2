@@ -467,6 +467,25 @@ export class Compiler {
 									}
 								}
 								break;
+							case "shared_ids":
+								/*
+							  #pragma optimize(shared_ids)       -- force helper
+							  #pragma optimize(shared_ids, off)  -- force inline
+							  #pragma optimize(shared_ids, auto) -- threshold
+								The helper emits the stable-id select chain once;
+								the inline form repeats it at every mapping site.
+								It changes code shape only, never program output.
+								*/
+								if (config.length >= 2 && config[1] === 'off') {
+									optimizerConfig.sharedIdMode = 'off';
+								} else if (config.length >= 2 && config[1] === 'on') {
+									optimizerConfig.sharedIdMode = 'on';
+								} else if (config.length >= 2 && config[1] === 'auto') {
+									optimizerConfig.sharedIdMode = 'auto';
+								} else {
+									optimizerConfig.sharedIdMode = 'on';
+								}
+								break;
 						}
 					} else if (info.startsWith("overload")) {
 						/*
