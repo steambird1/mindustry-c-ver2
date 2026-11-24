@@ -3926,13 +3926,15 @@ export class CodeGenerator extends ASTVisitor {
 				*/
 				const isRemotePointer = evaluation instanceof RemotePointerRet;
 				if (symbol.accessThroughPointer || noCodeToRename || isNamePacket
+					|| isSharedPointerType(symbol.myType?.())
 					|| evaluation.getAttribute('disallowReplacement')) {
 					finalize.concat(evaluation);
 					/*
 					`&st` is handed over as a set of names, not as a struct
 					value to copy member by member -- that would need memory.
 					*/
-					if (!isNamePacket && node.initializer.dataType && (
+					if (!isNamePacket && !isSharedPointerType(symbol.myType?.())
+						&& node.initializer.dataType && (
 						node.initializer.dataType.kind === 'struct' || node.initializer.dataType.kind === 'union' || evaluation.getAttribute('isStructRet')
 					)) {
 						const structValued = node.initializer.dataType.kind === 'struct'
