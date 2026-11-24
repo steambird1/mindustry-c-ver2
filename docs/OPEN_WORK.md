@@ -20,7 +20,7 @@ Reproduce the baselines from `testers/unit_tests`:
 
 | runner | result |
 |---|---|
-| `node ../tools/check.mjs` | 300 passed, 0 failed (225 shape assertions, 1332 pragma-invariance runs) |
+| `node ../tools/check.mjs` | 304 passed, 0 failed (235 shape assertions, 1346 pragma-invariance runs) |
 | `node ../tools/negative.mjs` | 112 passed, 0 failed |
 | `node ../tools/nomem.mjs` | 16 passed, 0 failed |
 | `node ../tools/loadorder.mjs` | 14 passed, 0 failed, 2 exempt |
@@ -109,9 +109,9 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | quadratic / packed const arrays (§7.53) | **done**; degree-2 polynomials and ≤53-bit packed integers, test t264 | §7.53 |
 | integral facts remove redundant `floor` (§7.54) | **done**; generator lattice plus mlog fallback, test t265 | §7.54 |
 | pointer building alias (§7.55) | **done**; non-escaping single-block arrays keep the building in `_block` and read/write directly, test t266 | §7.55 |
-| shared pointer stable ids (§7.56) | **done**; `shared` address space, program-level stable ids, stable-id pointer slots and shared struct members, tests t268/t277/t278 | §7.56 |
+| shared pointer stable ids (§7.56) | **done**; `shared` address space, program-level stable ids, stable-id pointer slots, shared struct members, and reusable mapping helpers, tests t268/t277/t278/t290 | §7.56 |
 | shared chain + two-processor handoff (§7.56) | **done**; stable neighbour registers, peer round-trip test t269, metadata test t270 | §7.56 |
-| qualifier/type matrix (§7.57) | **partial**; shared scalar/array decay works, shared large aggregates need target-address propagation | §7.57 |
+| qualifier/type matrix (§7.57) | **done**; shared scalar/array decay, aggregate pointer members, and aggregate array elements keep their fixed-storage building, including dynamic indices | §7.57 |
 | unified byname name packets (§7.58) | **partial**; register structs (flat or nested, including device/string_t), ordinary/shared pointer members and `byname` pointer members use name packets, arrays still rejected | §7.58 |
 | C99 VLA (§7.59) | **partial**; parameter and recursive function-scope VLAs, `[*]` prototype parameters, function-scope VLA typedefs, multidimensional runtime strides, runtime stack allocation, runtime `sizeof`/`lenof`; block/loop VLAs and inner `[*]` remain out of scope | §7.59 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
@@ -2285,8 +2285,11 @@ called `f` even when `a` was false.
   block half is the stable id; when read, a local select table maps the id back
   to this processor's building.
 - `stableIdToBuilding`/`buildingToStableId` are select chains over the memory
-  blocks, not memory tables. This is enough for the usual small number of
-  shared banks/cells; a large table can later move to a local metadata block.
+  blocks, not memory tables. Small configurations emit them inline; from four
+  memory blocks on (or with `#pragma optimize(shared_ids)`) the two chains are
+  emitted once as `__sharedIdToBuilding` / `__sharedBuildingToId`, using fixed
+  registers. `#pragma optimize(shared_ids, off|auto)` chooses a mode explicitly.
+  t290 covers both directions.
 - `MemPointerRet` performs the shared serialization/deserialization for
   pointer-valued memory slots. A shared pointer read resolves the id once and
   then dereferences the local building directly, without `getlink`.
@@ -2309,6 +2312,14 @@ called `f` even when `a` was false.
 - t278 runs the cross-processor case: the peer writes `q->p = &shared_data[1]`
   into a shared struct and the main processor resolves the member and prints
   `42 7`. The write emits stable id 1, not the peer's local link index.
+- An aggregate array element keeps the array's fixed-storage building:
+  `shared struct Big *p = &big_array[1]` is a building-backed pair, not the
+  array's numeric `_block`. This also works with a run-time index. A shared
+  pointer return and a shared pointer parameter carry the building itself
+  (`__return_block` / parameter `_block`), so a value that passes through a
+  call keeps its shareable representation. t288 (constant element), t289
+  (scalar return) and t291 (dynamic aggregate return, parameter and slot)
+  cover the paths.
 
 ### 7.57 Qualifier / complex-type test matrix
 
@@ -2323,20 +2334,26 @@ struct and union types:
 - `shared struct Big *p = &big` and `shared union U *p = &u` now work: the
   fixed aggregate's address carries its building alias, the pointer keeps that
   building, and member access uses direct memory reads/writes. t272 covers both.
-- `shared struct Big *p = &big_array[1]` still fails at the aggregate-array
-  element declaration path; the array element address reaches the shared
-  pointer as a numeric block rather than a building.
+- `shared struct Big *p = &big_array[1]` works for a fixed global array, with a
+  constant or run-time index. The element address carries the array's building
+  and the shared pointer keeps it; a shared return/parameter preserves it as
+  well. t288 and t291 cover the element, return, parameter and slot paths.
 - `Big *byname p = byname(&big)` is correctly rejected: a name pointer can
   only name a single register, not a large memory aggregate.
   `negative/byname_of_memory_struct.c` covers the diagnostic.
 - `int *byname p = byname(&data[2])` is correctly rejected: byname needs the
   address of a variable, not an array element.
 
-The next fix is to carry the fixed-storage building alias through aggregate
-address formation (`&big`, `&array[i]` of a large struct) so shared pointers to
-complex types can reuse the same stable-id slot path. t271 covers the working
-array-decay case. `shared struct Big *p = &big` and `shared union U *p = &u`
-now work via t272; large struct ARRAY elements still take the numeric path.
+Aggregate address formation (`&big`, `&array[i]` of a large struct) now carries
+the fixed-storage building, so shared pointers to complex types reuse the same
+stable-id slot path. t271 covers the array-decay case; `shared struct Big *p =
+&big` and `shared union U *p = &u` are covered by t272, and aggregate array
+elements by t288/t291.
+
+A shared pointer to a LOCAL aggregate array element is still rejected: a local
+array lives at a runtime stack-frame position, so there is no statically known
+building to serialize. The error is reported instead of emitting a pointer that
+would be misread as a local link id.
 
 ### 7.58 `byname` is the user-facing name packet
 
