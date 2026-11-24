@@ -1464,7 +1464,7 @@ export class CodeGenerator extends ASTVisitor {
 		return this.writeSymbol(symbol, source);
 	}
 
-	writeSymbol(symbol, source) {
+	writeSymbol(symbol, source, valueNode = null) {
 		const target = symbolRef(this.glob, symbol);
 		/*
 		A name-based struct pointer: what has to be stored is the SET OF NAMES,
@@ -1493,7 +1493,119 @@ export class CodeGenerator extends ASTVisitor {
 			*/
 			return target.set(new ImmediateRet(this.glob, String(source), symbol.myType()));
 		}
-		return target.set(this.asRet(source, symbol.myType()));
+		return this.storeValue(target, this.asRet(source, symbol.myType()), valueNode);
+	}
+
+	/**
+	 * Store `value` into `target`, turning the one shared-pointer limitation a
+	 * user can reach into a source diagnostic.
+	 *
+	 * A shared pointer is a (building, offset) pair. Another processor resolves
+	 * the building through the program-level stable id, so the building has to
+	 * be known at compile time. Local storage is placed in the run-time stack
+	 * frame instead; its position is only known while that frame is current, so
+	 * there is nothing stable to share. Report that as a normal codegen error
+	 * with the expression that caused it, rather than letting the infrastructure
+	 * limitation surface as an internal compiler error.
+	 *
+	 * @param {VariableRet} target
+	 * @param {VariableRet} value
+	 * @param {any} [node] The value expression, for the source location.
+	 * @returns {VariableRet|Instruction}
+	 */
+	storeValue(target, value, node = null) {
+		try {
+			return target.set(value);
+		} catch (error) {
+			if (error instanceof InfrastructureNotImplementedExpection
+				&& isSharedPointerType(target?.type)
+				&& /shared pointer/i.test(String(error.message))) {
+				this.reportSharedPointerTarget(node);
+				return new Instruction([], 'null', new Map([['disallowReplacement', true]]));
+			}
+			throw error;
+		}
+	}
+
+	/**
+	 * Explain why a shared pointer target was refused. `node` is the initializer
+	 * or right-hand side of the assignment, when known.
+	 *
+	 * @param {any} [node]
+	 */
+	reportSharedPointerTarget(node) {
+		const local = this.localObjectOfAddressExpression(node);
+		const location = node?.location ?? node ?? null;
+		if (local) {
+			const subject = local.kind === 'array'
+				? `an element of the local array '${local.name}'`
+				: `the local object '${local.name}'`;
+			this.addError(
+				`a shared pointer cannot refer to ${subject}: local storage lives `
+				+ `in the run-time stack frame, so it has no fixed building to share`,
+				location,
+				{ code: 'E_SHARED_POINTER_LOCAL_TARGET' });
+			return;
+		}
+		this.addError(
+			'a shared pointer needs a target in a fixed memory block: this '
+			+ 'address is only known at run time, so it cannot be shared',
+			location,
+			{ code: 'E_SHARED_POINTER_DYNAMIC_TARGET' });
+	}
+
+	/**
+	 * The local object an address expression points into, if any.
+	 *
+	 * `&data[1]` and `&data[1].x` both name the local `data`; a cast around the
+	 * address (or around the base) is looked through. Only objects whose scope is
+	 * not the global scope are local, i.e. placed by the stack-frame machinery.
+	 *
+	 * @param {any} node
+	 * @returns {{name: string, kind: string?}|null}
+	 */
+	localObjectOfAddressExpression(node) {
+		let expr = node;
+		let guard = 0;
+		while (expr && guard++ < 16) {
+			if (expr.type === 'UnaryExpression' && expr.operator === '&') {
+				expr = expr.argument;
+				continue;
+			}
+			if (expr.type === 'CastExpression') {
+				expr = expr.argument ?? expr.children?.[0] ?? null;
+				continue;
+			}
+			if (expr.type === 'Identifier') {
+				const symbol = this.currentScope?.lookup?.(expr.name) ?? null;
+				if (symbol && symbol.isGlobal !== true) {
+					return { name: this.displaySymbolName(symbol.name ?? expr.name),
+						kind: symbol.myType?.()?.kind ?? null };
+				}
+				return null;
+			}
+			if (expr.type === 'MemberExpression') {
+				expr = expr.children?.[0] ?? expr.object ?? null;
+				continue;
+			}
+			return null;
+		}
+		return null;
+	}
+
+	/**
+	 * A parameter's symbol name carries its function and index (`f:data:0`);
+	 * diagnostics should show the name as written.
+	 *
+	 * @param {string} name
+	 * @returns {string}
+	 */
+	displaySymbolName(name) {
+		const parts = String(name ?? '').split(':');
+		if (parts.length > 1 && /^\d+$/.test(parts[parts.length - 1])) {
+			return parts[parts.length - 2] || name;
+		}
+		return name;
 	}
 
 	/**
@@ -4002,7 +4114,8 @@ export class CodeGenerator extends ASTVisitor {
 						const sharedTarget = isSharedPointerType(symbol.myType?.());
 						finalize.concat(this.writeSymbol(symbol,
 							(isNamePacket || isRemotePointer || sharedTarget) ? evaluation
-								: (evaluation.instructionReturn ?? 'null')));
+								: (evaluation.instructionReturn ?? 'null'),
+							node.initializer));
 					}
 				} else if (evaluation instanceof PointerRet && evaluation.blockIsBuilding) {
 					/*
@@ -4010,7 +4123,7 @@ export class CodeGenerator extends ASTVisitor {
 					through the normal pointer assignment path, which serializes
 					`_block` to the numeric id used by pointer variables.
 					*/
-					finalize.concat(this.writeSymbol(symbol, evaluation));
+					finalize.concat(this.writeSymbol(symbol, evaluation, node.initializer));
 				} else {
 					finalize.concat(evaluation.replace_variable(symbol.getAssemblySymbol(), evaluation.instructionReturn));
 				}
@@ -5160,7 +5273,7 @@ export class CodeGenerator extends ASTVisitor {
 				value = value.convertTo(intType);
 			}
 		}
-		return lval.set(value);
+		return this.storeValue(lval, value, node.right);
 	}
 
 	/**

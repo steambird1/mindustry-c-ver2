@@ -14,7 +14,7 @@
 | 命令（从 `testers/unit_tests` 执行） | 读哪个目录 | 当前结果 | 判定标准 |
 |---|---|---|---|
 | `node ..\tools\check.mjs` | `check/` | **304 passed, 0 failed**（235 shape assertions, 1346 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
-| `node ..\tools\negative.mjs` | `negative/` | **112 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
+| `node ..\tools\negative.mjs` | `negative/` | **114 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
 | `node ..\tools\nomem.mjs` | `nomem/` | **16 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
 | `node ..\tools\loadorder.mjs` | 仓库根的 `mindc*.js` | **14 passed, 0 failed, 2 exempt** | 每个入口单独起一个 `node` 进程导入，不得有循环依赖 |
 | `node ..\tools\runall.mjs` | 14 个目录：`suite/` `mem/` `arr/` `arr2/` `ptr2/` `stack/` `tests/` `uc/` `cases/` `exttests/` `hdr/` `t/` `big/` `u/` | **267/275**（8 个已知坏例以 KNOWN-GAP 如实上报，不算失败） | 能编译、能跑完不崩；带 `EXPECT:` 的还比对输出 |
@@ -76,13 +76,13 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 
 ## 目录地图
 
-`testers/unit_tests/` 下共 **719 个 `.c`，全部有 runner**（304 + 12 + 112 + 16 + 275 = 719）：
+`testers/unit_tests/` 下共 **721 个 `.c`，全部有 runner**（304 + 12 + 114 + 16 + 275 = 721）：
 
 | 目录 | 文件数 | 谁来跑 |
 |---|---|---|
 | `check/` | 304 | `check.mjs`（同时驱动 `check/peers/` 的 12 个对端，见下文） |
 | `t/` | 98 | `runall.mjs`（早期按主题分的用例，`2dc683e` 起纳入） |
-| `negative/` | 112 | `negative.mjs` |
+| `negative/` | 114 | `negative.mjs` |
 | `suite/` | 50 | `runall.mjs` |
 | `mem/` | 25 | `runall.mjs` |
 | `tests/` | 25 | `runall.mjs`（另有手工的 `batch.mjs [baseline]`） |

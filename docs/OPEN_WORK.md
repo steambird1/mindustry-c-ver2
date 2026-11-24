@@ -2352,8 +2352,10 @@ elements by t288/t291.
 
 A shared pointer to a LOCAL aggregate array element is still rejected: a local
 array lives at a runtime stack-frame position, so there is no statically known
-building to serialize. The error is reported instead of emitting a pointer that
-would be misread as a local link id.
+building to serialize. The refusal is an ordinary codegen diagnostic on the
+initializer or assignment (`E_SHARED_POINTER_LOCAL_TARGET`), naming the local
+array; `negative/shared_pointer_local_array_element*.c` cover both paths and
+check that no internal compiler error is reported.
 
 ### 7.58 `byname` is the user-facing name packet
 
