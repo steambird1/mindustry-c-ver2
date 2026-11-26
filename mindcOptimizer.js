@@ -429,6 +429,15 @@ export class Optimizer extends ASTVisitor {
         // 3. 按作用域递归分析
         this.analyzeScope(this.globalScope);
 
+		/*
+		Fix what this round considers part of the program before anything
+		reads the tree. Uncalled functions -- the inline helpers a header
+		defines above all -- are not requirements of this program: their
+		pointer parameters must not be diagnosed and their bodies must not be
+		emitted. The analysis and the removal below share this one verdict.
+		*/
+		this.liveFunctions = this.liveFunctionNames();
+
 		// 4. Decide which pointers may store a NAME instead of an address
 		this.analyzeNamePointers();
 		// Needs the verdict of the pass above: `int *p = &x` is fine only when p
@@ -533,9 +542,17 @@ export class Optimizer extends ASTVisitor {
 			});
 		};
 
+		/*
+		`&x` inside an uncalled function is not an address this program ever
+		takes: a header's inline helper keeps its own body, but that body is
+		not part of this program.
+		*/
+		const liveFunctions = this.liveFunctions ?? this.liveFunctionNames();
 		const walk = (node, scope) => {
 			if (!node || typeof node !== 'object') return;
 			if (Array.isArray(node)) { node.forEach(child => walk(child, scope)); return; }
+			if (node.type === 'FunctionDeclaration'
+				&& node.name !== 'main' && !liveFunctions.has(node.name)) return;
 			if (node.type === 'FunctionCall' || node.type === 'BuiltinCall') {
 				// A builtin keeps its name on `functionName`, a user call on `callee`
 				const callee = node.callee?.name ?? node.functionName ?? node.name ?? null;
@@ -595,6 +612,8 @@ export class Optimizer extends ASTVisitor {
 		this.ensureFunctionDeclarations();
 
 		const walkScope = scope => {
+			const owner = this.functionOfScope(scope);
+			if (owner && owner !== 'main' && !liveFunctions.has(owner)) return;
 			if (scope?.astNode) walk(scope.astNode, scope);
 			scope?.children?.forEach(walkScope);
 		};
@@ -1092,6 +1111,14 @@ export class Optimizer extends ASTVisitor {
 			return 'byname() needs the address of a single register variable';
 		};
 
+		/*
+		Skip bodies the program cannot reach. This is what keeps an unused
+		inline helper from a header (stdio.h's `puts`, string.h's many
+		functions) from reporting that its pointer parameter needs memory:
+		the helper is dead code, not a requirement of this program.
+		*/
+		const liveFunctions = this.liveFunctions ?? this.liveFunctionNames();
+
 		/**
 		 * @param {any} node
 		 * @param {any} scope
@@ -1099,6 +1126,8 @@ export class Optimizer extends ASTVisitor {
 		const walk = (node, scope) => {
 			if (!node || typeof node !== 'object') return;
 			if (Array.isArray(node)) { node.forEach(child => walk(child, scope)); return; }
+			if (node.type === 'FunctionDeclaration'
+				&& node.name !== 'main' && !liveFunctions.has(node.name)) return;
 			switch (node.type) {
 				case 'AssignmentExpression': {
 					const left = node.left;
@@ -1257,6 +1286,8 @@ export class Optimizer extends ASTVisitor {
 		};
 
 		const walkScope = scope => {
+			const owner = this.functionOfScope(scope);
+			if (owner && owner !== 'main' && !liveFunctions.has(owner)) return;
 			if (scope?.astNode) walk(scope.astNode, scope);
 			scope?.children?.forEach(walkScope);
 		};
@@ -1736,7 +1767,16 @@ export class Optimizer extends ASTVisitor {
 							dropped the same way once every call was inlined.)
 							*/
 							if (!relevantSymbol) return;
-							if (relevantSymbol.isAddressed || recursiveGraph.has(func.name)) {
+							/*
+							Pragma handlers are reached by the generated stack /
+							remote code, not by a call the analyzer can see. They
+							are roots just like an addressed function, and
+							analyzing their bodies is what records the calls
+							they make, so `liveFunctionNames` can keep those
+							callees as well.
+							*/
+							if (relevantSymbol.isAddressed || recursiveGraph.has(func.name)
+								|| this.protectedHandlerNames().has(func.name)) {
 								this.analyzeNode(func, {
 									actualCalling: false,
 									parentInfo: info
@@ -2147,6 +2187,16 @@ export class Optimizer extends ASTVisitor {
 	analyzeUnaryExpression(node, info = null) {
 		const curStat = this.shouldRunEvaluation(node, info);
 		if ((node.operator === '++' || node.operator === '--')) {
+			/*
+			`a++` / `++a` reads `a` as well as writing it. When the RESULT of
+			the update is used (`b = a++`), that read is observable: deleting
+			the declaration because "nothing reads a" removed the only source
+			of b's value and then crashed trying to delete the initializer.
+			A discarded update (`a++;`) still only has to count as a write.
+			*/
+			if (!this.isDiscardedValue(node)) {
+				this.analyzeNode(node.argument, info);
+			}
 			if (node.argument.type === 'Identifier') {
 				const scopePath = this.currentScope.lookupScopeOf(node.argument.name).getPath();
 				const localConstants = this.localConstants.get(scopePath);
@@ -2157,7 +2207,7 @@ export class Optimizer extends ASTVisitor {
 					if (node.operator === '--') newConstant--;
 				}
 				this.addWriteForCurrentScope(node.argument.name, 
-					(info.isUnsure || !info.actualCalling) ? null : newConstant, 
+					(info?.isUnsure || !info?.actualCalling) ? null : newConstant,
 					curStat);
 			}
 		} else if (node.operator === '&') {
@@ -2173,6 +2223,15 @@ export class Optimizer extends ASTVisitor {
 				if (node.symbol && node.symbol.isArray()) {
 					this.arrayState.downgrade(node.symbol.getAssemblySymbol());
 				}
+			} else {
+				/*
+				`&a[i]`: the address of an ELEMENT. The element itself is not
+				read, but the object and the index are -- and the index is
+				exactly what a slice (`int b[] = &a[i];`) packs into the handle
+				later. Skipping it here deleted `int i = 1;` as unused, and the
+				handle then carried a start offset of 0.
+				*/
+				this.analyzeNode(node.argument, info);
 			}
 		} else {
 			// Using '*' toward a simple array will be considered fetching its first element, so this won't
@@ -2646,14 +2705,32 @@ export class Optimizer extends ASTVisitor {
 		// If there's no side effect, still consider optimizing.
 		// Logic manually adjusted !
         if (node.left.type === 'Identifier') {
-			if (this.hasSideEffects(node.right)) {
+			/*
+			A generated assignment (an inlined return temporary, say) can name
+			a symbol that is not a source-level variable. There is no scope to
+			look its value up in; record the write and leave it at that.
+			*/
+			const leftScope = this.currentScope.lookupScopeOf(node.left.name);
+			/*
+			A store to an inlining temporary whose scope is no longer on the
+			path (the loop that owned it was optimized away) cannot be read:
+			the generated name is not a source variable, so nothing else can
+			name it. Drop the dead store, keeping the right side when it does
+			something.
+			*/
+			if (!leftScope && node.left.name.includes(':')) {
+				this.replaceNode(node, this.hasFoldSideEffects(node.right)
+					? node.right : null);
+				return;
+			}
+			if (this.hasSideEffects(node.right) || !leftScope) {
 				this.addWriteForCurrentScope(node.left.name);
 			} else {
 				const symbol = this.currentScope.lookup(node.left.name);
-				const scopePath = this.currentScope.lookupScopeOf(node.left.name).getPath();
+				const scopePath = leftScope.getPath();
 				const localConstants = this.localConstants.get(scopePath);
 				const variableUses = this.variableUses.get(scopePath);
-				const usage = variableUses.get(node.left.name);
+				const usage = variableUses?.get(node.left.name);
 				/*
 				Fold the assignment when the variable may be tracked -- or when
 				we are SIMULATING a loop. There the constants were planted by
@@ -2673,6 +2750,7 @@ export class Optimizer extends ASTVisitor {
 				the write and drops the stale constant.
 				*/
 				const unsureWrite = !!(info && info.isUnsure);
+				let foldedWrite = false;
 				if (usage && !unsureWrite && (usage.canOptimize || (info && info.optimizingLoop))) {
 					// ! Manually modified (now constant expression also consider '+=') !
 					let constValue = undefined;
@@ -2687,6 +2765,7 @@ export class Optimizer extends ASTVisitor {
 						if (symbol && this.shouldRunEvaluation(node, info, symbol)) {	// Not considering symbol currently!
 							// symbol.markAsConstant(constValue);
 							this.addWrittenSymbol(symbol, constValue, true);
+							foldedWrite = true;
 							/*
 							The write folded, so the assignment looks redundant
 							-- but NOT while we are SIMULATING a loop. There the
@@ -2709,9 +2788,18 @@ export class Optimizer extends ASTVisitor {
 							symbol.variableReferrer.registerCandidate(node);
 						}
 					}
+					/*
+					While SIMULATING, the value really is known even though
+					`actualCalling` is not set on the simulation context. Passing
+					`null` here used to erase the value that was just recorded,
+					which is what stopped `sum = sum + i` from folding.
+					*/
+					const writeValue = (info && info.optimizingLoop)
+						? constValue
+						: (((info && info.isUnsure) || !(info && info.actualCalling)) ? null : constValue);
 					// Manually added
 					this.addWriteForCurrentScope(node.left.name, 
-						(info.isUnsure || !info.actualCalling) ? null : constValue, 
+						writeValue, 
 						this.shouldRunEvaluation(node, info));
 				}
 				/*
@@ -2720,8 +2808,11 @@ export class Optimizer extends ASTVisitor {
 				established earlier, `int t = b;`, would survive a later write to
 				`b` and make `a = t` compile into `a = b`. Record the write
 				anyway; its VALUE stays unknown, only the access is known.
+
+				But a write that DID fold already recorded its value: running
+				the pessimistic branch afterwards would erase it again.
 				*/
-				if (unsureWrite || !(usage && usage.canOptimize)) {
+				if (!foldedWrite && (unsureWrite || !(usage && usage.canOptimize))) {
 					const written = this.currentScope.lookup(node.left.name);
 					if (written) {
 						this.addWrittenSymbol(written, null,
@@ -2729,7 +2820,7 @@ export class Optimizer extends ASTVisitor {
 					}
 				}
 				
-				if (symbol.isArray()) {
+				if (symbol && symbol.isArray()) {
 					if (node.right.symbol && node.right.symbol.isArray()) {
 						this.arrayState.assign(symbol.getAssemblySymbol(), node.right.symbol.getAssemblySymbol());
 					} else {
@@ -2752,18 +2843,68 @@ export class Optimizer extends ASTVisitor {
 	/**
 	 * Functions that must be kept even when no call to them is visible: the
 	 * stack helpers reach them through `#pragma stackcheck(fn)` /
-	 * `#pragma stackunderflow(fn)`, which is not a call the optimizer can see.
+	 * `#pragma stackunderflow(fn)`, and the remote check through
+	 * `#pragma checkRemote(fn)`. None of those is a call the optimizer can see.
 	 *
 	 * @returns {Set<string>}
 	 */
 	protectedHandlerNames() {
 		const config = this.optimizeConfig ?? {};
 		const names = new Set();
-		['stackCheck', 'stackUnderflow'].forEach(key => {
+		['stackCheck', 'stackUnderflow', 'checkRemote'].forEach(key => {
 			const value = config[key];
 			if (typeof value === 'string' && value.length > 0) names.add(value);
 		});
 		return names;
+	}
+
+	/**
+	 * Every function this program can actually reach.
+	 *
+	 * The call graph only contains edges from bodies the scope analysis walked
+	 * -- main and what is reached from it -- plus the functions whose address
+	 * was taken or that a pragma names as a handler. Following the graph from
+	 * those roots gives the whole live set; anything else is dead, including
+	 * an uncalled `inline` helper from a header.
+	 *
+	 * @returns {Set<string>}
+	 */
+	liveFunctionNames() {
+		const live = new Set();
+		/**
+		 * @param {string?} name
+		 */
+		const mark = name => {
+			if (!name || live.has(name)) return;
+			live.add(name);
+			(this.functionCallGraph.get(name) ?? []).forEach(mark);
+		};
+		mark('main');
+		this.functionInfo?.forEach((info, name) => {
+			if (info.isAddressed) mark(name);
+		});
+		(this.protectedHandlerNames?.() ?? []).forEach(mark);
+		return live;
+	}
+
+	/**
+	 * The name of the function a scope belongs to, or null at file scope.
+	 *
+	 * A function's body and its nested blocks are scopes of their own, and
+	 * `walkScope` walks them independently of the FunctionDeclaration node.
+	 * Climbing to the nearest FunctionDeclaration is what lets an analysis
+	 * skip the whole subtree of a function the program cannot reach.
+	 *
+	 * @param {any} scope
+	 * @returns {string?}
+	 */
+	functionOfScope(scope) {
+		for (let current = scope; current; current = current.parent) {
+			if (current.astNode?.type === 'FunctionDeclaration') {
+				return current.astNode.name ?? null;
+			}
+		}
+		return null;
 	}
 
 	recordFunctionCall(callerName, funcName) {
@@ -2898,6 +3039,25 @@ export class Optimizer extends ASTVisitor {
     }
 	// ! Manually updated !
 	analyzeIfStatement(node, info = null) {
+		/*
+		A `?:` whose test is a compile-time constant becomes the branch that is
+		actually taken -- the BRANCH EXPRESSION, not its value, so anything the
+		chosen branch does is kept. (`int y = 1 ? (x = 5) : 7;` must still
+		assign x.) The test itself must be free of effects for this to be safe.
+		*/
+		if (node.type === 'ConditionalExpression' && node.test) {
+			const testTruth = this.truthinessOfConstant(
+				this.evaluateConstantExpression(node.test));
+			if (testTruth !== null && this.isSafeConstantReplacement(node.test)) {
+				const chosen = testTruth ? node.consequent : node.alternate;
+				if (chosen) {
+					this.replaceNode(node, chosen);
+					this.modified = true;
+					this.analyzeNode(chosen, info);
+					return;
+				}
+			}
+		}
 		// 分析条件表达式
 		let conditionValue;
 		if (node.test) {
@@ -2909,7 +3069,14 @@ export class Optimizer extends ASTVisitor {
 			// 记录条件信息用于优化
 			if (this.shouldRunEvaluation(node, info)) {
 				if (conditionValue !== undefined) {
-					node.setAttribute('constantCondition', conditionValue);
+					/*
+					Only a condition whose evaluation has nothing to lose may be
+					used to delete a branch: `if ((x = 5)) ...` must keep the
+					assignment.
+					*/
+					if (this.isSafeConstantReplacement(node.test)) {
+						node.setAttribute('constantCondition', conditionValue);
+					}
 					if (!(info && info.optimizingLoop)) {
 						if (conditionValue) {
 							// 条件总是为真，可以标记then分支总是执行
@@ -2925,7 +3092,8 @@ export class Optimizer extends ASTVisitor {
 			
 			
 			// 检查条件是否有副作用
-			if (this.hasSideEffects(node.test) || this.controlExpressionHasCall(node.test)) {
+			if (this.hasSideEffects(node.test) || this.hasFoldSideEffects(node.test)
+				|| this.controlExpressionHasCall(node.test)) {
 				node.setAttribute('conditionHasSideEffects', true);
 			}
 		}
@@ -3003,7 +3171,7 @@ export class Optimizer extends ASTVisitor {
 			const conditionValue = this.evaluateConstantExpression(node.test);
 			
 			// 记录条件信息用于优化
-			if (conditionValue !== undefined) {
+			if (conditionValue !== undefined && this.isSafeConstantReplacement(node.test)) {
 				//node.setAttribute('constantCondition', conditionValue);
 				
 				if (conditionValue == 0) {
@@ -3014,7 +3182,7 @@ export class Optimizer extends ASTVisitor {
 			}
 			
 			// 检查条件是否有副作用
-			if (this.hasSideEffects(node.test)) {
+			if (this.hasSideEffects(node.test) || this.hasFoldSideEffects(node.test)) {
 				node.setAttribute('conditionHasSideEffects', true);
 			}
 		}
@@ -3106,10 +3274,12 @@ export class Optimizer extends ASTVisitor {
 					(the body was checked to be free of side effects), so a loop
 					that never reaches its `break` may simply be dropped.
 					*/
-					const tried = this.analyzeWhileLoopForOptimization(node, {
+					const optimizeInfo = {
 						...(info ?? {}),
 						loopInitConstants: loopInitConstants
-					}) || this.analyzeEndlessLoopForOptimization(node, info);
+					};
+					const tried = this.analyzeWhileLoopForOptimization(node, optimizeInfo)
+						|| this.analyzeEndlessLoopForOptimization(node, optimizeInfo);
 					if (tried) {
 						if ((!info || !info.optimizingLoop) && this.optimizeDeterministicWhileLoop(node)) {
 							this.modified = true;
@@ -3439,10 +3609,11 @@ export class Optimizer extends ASTVisitor {
 				optimizingLoop: false,
 				parentInfo: info
 			});
-			if (this.hasSideEffects(node.test)) {
+			if (this.hasSideEffects(node.test) || this.hasFoldSideEffects(node.test)) {
 				node.setAttribute('conditionHasSideEffects', true);
 			}
 		}
+		let loopInitConstants = null;
 		if (node.body) {
 			/*
 			Also cached before analysis, for the same reason -- this is the
@@ -3455,6 +3626,28 @@ export class Optimizer extends ASTVisitor {
 			if (modifieds.has('unrecognized')) {
 				weird = true;
 				modifieds.delete('unrecognized');
+			}
+			/*
+			Snapshot the pre-loop values of every variable the body writes,
+			before the analysis can drop them. The simulation seeds the
+			accumulators from these, so `sum = sum + i` folds like `sum += i`.
+			*/
+			if (!weird) {
+				const byScope = new Map();
+				for (const entry of modifieds) {
+					if (!entry || typeof entry !== 'object' || !entry.varName) continue;
+					const symbol = entry.symbol ?? this.currentScope.lookup(entry.varName);
+					const scope = symbol?.scope
+						?? this.currentScope.lookupScopeOf(entry.varName)
+						?? entry.scope;
+					const path = scope?.getPath?.();
+					if (!path) continue;
+					const initial = this.localConstants.get(path);
+					if (!initial || !initial.has(entry.varName)) continue;
+					if (!byScope.has(path)) byScope.set(path, new Map());
+					byScope.get(path).set(entry.varName, initial.get(entry.varName));
+				}
+				if (byScope.size > 0) loopInitConstants = byScope;
 			}
 			this.analyzeNode(node.body, {
 				isLoop: true,
@@ -3473,7 +3666,8 @@ export class Optimizer extends ASTVisitor {
 		}
 		let optimized = false;
 		if (!(info && info.optimizingLoop)) {
-			optimized = this.tryOptimizeDoWhile(node, info, entryTest);
+			optimized = this.tryOptimizeDoWhile(node,
+				{ ...(info ?? {}), loopInitConstants }, entryTest);
 		}
 		if (!optimized) this.markLoopAsPotentiallyWithSideEffects(node);
 	}
@@ -3490,7 +3684,10 @@ export class Optimizer extends ASTVisitor {
 	 * @returns {boolean}
 	 */
 	tryOptimizeDoWhile(node, info, entryTest) {
-		if (!node.test || node.test.type !== 'BinaryExpression') return false;
+		// See analyzeWhileLoopForOptimization: the body analysis leaves a
+		// stale restriction set behind.
+		this.restrictiveVariables = null;
+		if (!node.test) return false;
 		if (node.getAttribute('bodyHasSideEffects')
 			|| node.getAttribute('conditionHasSideEffects')) return false;
 		/* The first test is true, so the body/test sequence is a while's. */
@@ -3502,6 +3699,11 @@ export class Optimizer extends ASTVisitor {
 		*/
 		if (this.containsSwitch(node.body)) return false;
 		if (this.containsLoopJumpOrLoop(node.body)) return false;
+		if (!this.isSafeConstantReplacement(node.test)) return false;
+
+		const fallback = () => this.tryOptimizeComplexDoWhile(node, info);
+		if (node.test.type !== 'BinaryExpression') return fallback();
+
 		let loopVarName = null;
 		let comparisonOp = null;
 		let constValue = null;
@@ -3514,23 +3716,42 @@ export class Optimizer extends ASTVisitor {
 			comparisonOp = this.reverseComparisonOperator(node.test.operator);
 			constValue = this.evaluateConstantExpression(node.test.left);
 		}
-		if (!loopVarName) return false;
+		if (!loopVarName) return fallback();
 		const updateInfo = this.findLoopVariableUpdateInBody(node.body, loopVarName);
-		if (!updateInfo) return false;
+		if (!updateInfo) return fallback();
 		const scope = this.currentScope.lookupScopeOf(loopVarName);
-		if (!scope) return false;
+		if (!scope) return fallback();
 		const localConstants = this.localConstants.get(scope.getPath());
-		if (!localConstants) return false;
+		if (!localConstants) return fallback();
 		const initValue = localConstants.get(loopVarName);
-		if (initValue === undefined) return false;
+		if (initValue === undefined) return fallback();
 		const conditionInfo = { comparisonOp, constValue };
 		const iterationCount = (constValue === undefined) ? null
 			: this.calculateLoopIterations(initValue, conditionInfo, updateInfo);
-		if (iterationCount === null || iterationCount < 1 || iterationCount > 250) return false;
+		if (iterationCount === null || iterationCount < 1 || iterationCount > 250) return fallback();
 		node.setAttribute('loopVarName', loopVarName);
 		const tried = this.runWhileSimulation(node, loopVarName, initValue,
-			conditionInfo, updateInfo, iterationCount, info);
-		if (!tried) return false;
+			conditionInfo, updateInfo, iterationCount, info,
+			info && info.loopInitConstants);
+		if (!tried) return fallback();
+		return this.optimizeDeterministicWhileLoop(node);
+	}
+
+	/**
+	 * The general-condition path for `do ... while`.
+	 *
+	 * The caller has already established that the first test is true, so the
+	 * do-while is exactly a while loop over the same body/test pair. Reuse the
+	 * complex-condition simulation, then apply the do-while replacement.
+	 *
+	 * @param {ASTNode} node
+	 * @param {any} info
+	 * @returns {boolean}
+	 */
+	tryOptimizeComplexDoWhile(node, info) {
+		if (!this.tryOptimizeComplexWhileCondition(node, info)) return false;
+		// A do-while always runs its body once; never delete it as "never".
+		if (node.getAttribute('neverExecuted')) return false;
 		return this.optimizeDeterministicWhileLoop(node);
 	}
 
@@ -3593,6 +3814,14 @@ export class Optimizer extends ASTVisitor {
 	 * @param {ASTNode} whileNode - while语句节点
 	 */
 	analyzeWhileLoopForOptimization(whileNode, info) {
+		/*
+		The body analysis leaves `restrictiveVariables` pointing at the loop's
+		modified variables. That flag exists to stop the AST rewrite from
+		folding a loop-written variable to its PRE-loop value; here we are
+		about to read values for simulation, where the current table is exactly
+		what should be read.
+		*/
+		this.restrictiveVariables = null;
 		// while循环的优化比for循环更复杂
 		// 这里我们只处理简单情况：条件中的变量在循环体中被简单修改
 		/*
@@ -3675,8 +3904,16 @@ export class Optimizer extends ASTVisitor {
 								whileNode.setAttribute('neverExecuted', true);
 								return true;
 							} else if (iterationCount <= MAX_OPTIMIZE_ITERATIONS) {
+								/*
+								Seed every loop-written variable, not only the
+								loop counter: an accumulator like `sum = sum + i`
+								otherwise looks like a side effect (`canOptimize`
+								is false for loop-written variables) and the
+								simulation cannot fold it.
+								*/
 								return this.runWhileSimulation(whileNode, loopVarName, initValue,
-									conditionInfo, updateInfo, iterationCount, info);
+									conditionInfo, updateInfo, iterationCount, info,
+									info && info.loopInitConstants);
 							}
 						} else if (constValue === undefined) {
 							/*
@@ -3690,13 +3927,111 @@ export class Optimizer extends ASTVisitor {
 								return true;
 							}
 							return this.runWhileSimulation(whileNode, loopVarName, initValue,
-								conditionInfo, updateInfo, MAX_OPTIMIZE_ITERATIONS, info);
+								conditionInfo, updateInfo, MAX_OPTIMIZE_ITERATIONS, info,
+								info && info.loopInitConstants);
 						}
 					}
 				}
 			}
 		}
-		return false;
+		/*
+		The simple `identifier op constant` shape did not fit (or did not
+		finish). Try the general path: the simulator evaluates the WHOLE test
+		each round anyway, so `i < 5 && sum < 100`, `!(i >= 5)` and
+		`i < 3 || i == 7` can use the same compile-time iteration without any
+		loop unrolling.
+		*/
+		return this.tryOptimizeComplexWhileCondition(whileNode, info);
+	}
+
+	/**
+	 * The pre-loop value of a variable the loop writes.
+	 *
+	 * @param {{varName: string, scope?: any, symbol?: any}} varInfo
+	 * @param {any} info
+	 * @returns {{scopePath: string, value: any}?}
+	 */
+	loopInitialValueOf(varInfo, info) {
+		if (!varInfo || !varInfo.varName) return null;
+		const symbol = varInfo.symbol ?? this.currentScope.lookup(varInfo.varName);
+		const scope = symbol?.scope
+			?? varInfo.scope
+			?? this.currentScope.lookupScopeOf(varInfo.varName);
+		const path = scope?.getPath?.();
+		if (!path) return null;
+		const snapshot = info && info.loopInitConstants;
+		const saved = snapshot?.get(path);
+		if (saved && saved.has(varInfo.varName)) {
+			return { scopePath: path, value: saved.get(varInfo.varName) };
+		}
+		const live = this.localConstants.get(path);
+		if (live && live.has(varInfo.varName)) {
+			return { scopePath: path, value: live.get(varInfo.varName) };
+		}
+		return null;
+	}
+
+	/**
+	 * Try the deterministic loop model on a condition the simple comparison
+	 * recognizer does not understand.
+	 *
+	 * Nothing is unrolled: the loop is simulated round by round at compile
+	 * time (with the existing budget) and, when it provably ends, replaced by
+	 * the final values of the variables it writes.
+	 *
+	 * @param {ASTNode} whileNode
+	 * @param {any} info
+	 * @returns {boolean}
+	 */
+	tryOptimizeComplexWhileCondition(whileNode, info) {
+		if (!whileNode || !whileNode.test) return false;
+		if (whileNode.getAttribute('bodyHasSideEffects')
+			|| whileNode.getAttribute('conditionHasSideEffects')) return false;
+		/*
+		Replacing the loop deletes the test, so the test must not do anything
+		an assignment or a call would.
+		*/
+		if (!this.isSafeConstantReplacement(whileNode.test)) return false;
+		const entry = this.evaluateConstantExpression(whileNode.test);
+		if (entry === undefined || (typeof entry === 'object' && entry !== null)) {
+			return false;
+		}
+		if (!entry) {
+			whileNode.setAttribute('neverExecuted', true);
+			return true;
+		}
+
+		const modifiedVars = this.collectModifiedVariablesInLoop(whileNode);
+		let loopVarName = null;
+		let initValue = undefined;
+		for (const varInfo of modifiedVars) {
+			if (varInfo === 'unrecognized') return false;
+			const initial = this.loopInitialValueOf(varInfo, info);
+			if (initial) {
+				loopVarName = varInfo.varName;
+				initValue = initial.value;
+				break;
+			}
+		}
+		if (!loopVarName) return false;
+
+		const MAX_OPTIMIZE_ITERATIONS = 250;
+		const conditionInfo = { comparisonOp: null, constValue: undefined };
+		const updateInfo = { type: 'none', step: 0 };
+		const tried = this.runWhileSimulation(whileNode, loopVarName, initValue,
+			conditionInfo, updateInfo, MAX_OPTIMIZE_ITERATIONS, info,
+			info && info.loopInitConstants);
+		if (!tried) return false;
+		/*
+		`runWhileSimulation` was given a budget, not the real count. The
+		simulator knows how many rounds it actually ran; use that number for
+		the partial-optimization paths and for the log.
+		*/
+		const actual = whileNode.getAttribute('simulatedIterations');
+		if (typeof actual === 'number' && actual >= 0) {
+			whileNode.setAttribute('iterationCount', actual);
+		}
+		return true;
 	}
 
 	/**
@@ -3841,7 +4176,7 @@ export class Optimizer extends ASTVisitor {
 			const conditionValue = this.evaluateConstantExpression(node.test);
 			
 			// 记录条件信息用于优化
-			if (conditionValue !== undefined) {
+			if (conditionValue !== undefined && this.isSafeConstantReplacement(node.test)) {
 				//node.setAttribute('constantCondition', conditionValue);
 				
 				if (conditionValue) {
@@ -3862,10 +4197,12 @@ export class Optimizer extends ASTVisitor {
 			/*
 			A call in the condition counts as a side effect even when the call
 			looks harmless: if it were inlined, the loop simulator would count
-			iterations without ever running what it does.
+			iterations without ever running what it does. Assignments and
+			`++`/`--` count too: the loop optimizers delete the test.
 			*/
 			node.setAttribute('conditionHasSideEffects',
-				Boolean(this.hasSideEffects(node.test) || this.controlExpressionHasCall(node.test)));
+				Boolean(this.hasSideEffects(node.test) || this.hasFoldSideEffects(node.test)
+					|| this.controlExpressionHasCall(node.test)));
 		} else {
 			// 没有条件表达式，是无限循环 (for(;;))
 			// ! Notice that there might be 'break' !
@@ -5929,6 +6266,23 @@ export class Optimizer extends ASTVisitor {
 	}
 
 	/**
+	 * Whether the VALUE of this expression is thrown away by its parent.
+	 *
+	 * `a++;` and `for (...; ...; a++)` only need the write; `b = a++;` uses the
+	 * value too, so the operand is a real read.
+	 *
+	 * @param {ASTNode} node
+	 * @returns {boolean}
+	 */
+	isDiscardedValue(node) {
+		const parent = node?.parent ?? null;
+		if (!parent) return false;
+		if (parent.type === 'ExpressionStatement') return true;
+		if (parent.type === 'ForStatement' && parent.update === node) return true;
+		return false;
+	}
+
+	/**
 	 * @param {IdentifierNode} node
 	 * @returns {boolean}
 	 */
@@ -5939,7 +6293,8 @@ export class Optimizer extends ASTVisitor {
 			if (node.parent.type === 'VariableDeclarator' || node.parent.type === 'Declarator') {
 				if (node !== node.parent.initializer) return true;
 			}
-			if (node.parent.type === 'UnaryExpression' && node.parent.operator === '&') return true;
+			if (node.parent.type === 'UnaryExpression'
+				&& ['&', '++', '--'].includes(node.parent.operator)) return true;
 		}
 		return false;
 	}
@@ -6041,48 +6396,65 @@ export class Optimizer extends ASTVisitor {
 				if (subscriptNode) modified = this.replaceConstantsAt(subscriptNode, constants, restrictions) || modified;
 				break;
 			}
-            case 'BinaryExpression':
+            case 'BinaryExpression': {
                 // 常量折叠
                 const leftValue = this.evaluateConstantExpression(node.left);
                 const rightValue = this.evaluateConstantExpression(node.right);
 				const isAssignment = node.operator.includes('=') && node.operator !== '==' && node.operator !== '!=' && node.operator !== '>=' && node.operator !== '<=';
-                /*
-				if (isAssignment) {
-					if (node.left.type === 'Identifier' && this.variableCanBeRemoved(node.left.name) && leftValue !== undefined) {
-						console.log(`Removing assignment instruction:`,node);
-						this.replaceNode(node, null);
-						break;
+				let folded = false;
+				/*
+				Never fold an assignment to a bare value: the store itself is
+				the point. (The expression's VALUE is the right hand side, but
+				replacing it with a literal would delete the write.)
+				*/
+				if (!isAssignment) {
+					/*
+					Evaluate the whole node, not just the two operands: that is
+					what gives `&&` / `||` their lazy value, and it also keeps
+					`0 && (x = 5)` foldable while refusing `(x = 5) && 0`.
+					*/
+					const result = this.evaluateConstantExpression(node);
+					if (result !== undefined && this.isSafeConstantReplacement(node)) {
+						const replacement = this.getLiteral(result);
+						replacement.location = node.location;
+						replacement.dataType = node.dataType;
+						this.replaceNode(node, replacement);
+						modified = true;
+						folded = true;
 					}
 				}
-				*/
-                if ((isAssignment || leftValue !== undefined) && rightValue !== undefined) {
-                    const result = this.evaluateBinaryOperation(node.operator, leftValue, rightValue, node.dataType);
-                    if (result !== undefined) {
-                        const replacement = this.getLiteral(result);
-                        replacement.location = node.location;
-						replacement.dataType = node.dataType;
-                        this.replaceNode(node, replacement);
-                        modified = true;
-                    }
-                }
 
-				if (!this.isLiteralNode(node.left) && leftValue != undefined) {
-					console.log(`Replacing binary expression left`,node.left,`with value`,leftValue);
-					this.replaceNode(node.left, this.getLiteral(leftValue));
+				if (!folded) {
+					if (isAssignment) {
+						// Only the right hand side is a value here.
+						if (!this.isLiteralNode(node.right) && rightValue !== undefined
+							&& this.isSafeConstantReplacement(node.right)) {
+							this.replaceNode(node.right, this.getLiteral(rightValue));
+						}
+					} else {
+						if (!this.isLiteralNode(node.left) && leftValue !== undefined
+							&& this.isSafeConstantReplacement(node.left)) {
+							console.log(`Replacing binary expression left`,node.left,`with value`,leftValue);
+							this.replaceNode(node.left, this.getLiteral(leftValue));
+						}
+						if (!this.isLiteralNode(node.right) && rightValue !== undefined
+							&& this.isSafeConstantReplacement(node.right)) {
+							console.log(`Replacing binary expression right`,node.right,`with value`,rightValue);
+							this.replaceNode(node.right, this.getLiteral(rightValue));
+						}
+
+						// 代数简化
+						this.simplifyBinaryExpression(node, leftValue, rightValue);
+					}
 				}
-				if (!this.isLiteralNode(node.right) && rightValue != undefined) {
-					console.log(`Replacing binary expression right`,node.right,`with value`,rightValue);
-					this.replaceNode(node.right, this.getLiteral(rightValue));
-				}
-                
-                // 代数简化
-                this.simplifyBinaryExpression(node, leftValue, rightValue);
-                
+
                 break;
+			}
                 
             case 'UnaryExpression':
                 const argValue = this.evaluateConstantExpression(node.argument);
-                if (!this.isLiteralNode(node.argument) && argValue !== undefined) {
+                if (!this.isLiteralNode(node.argument) && argValue !== undefined
+					&& this.isSafeConstantReplacement(node.argument)) {
                     const result = this.evaluateUnaryOperation(node.operator, argValue);
                     if (result !== undefined) {
 						console.log(`Replacing unary expression`,node,`with value`,result);
@@ -6097,7 +6469,12 @@ export class Optimizer extends ASTVisitor {
                 
             case 'IfStatement':
                 const testValue = this.evaluateConstantExpression(node.test);
-                if (testValue !== undefined) {
+                /*
+                Pruning the branch must not skip what the condition does. A
+                condition like `(x = 5)` is constant, but replacing the whole
+                statement with a branch would lose the assignment.
+                */
+                if (testValue !== undefined && this.isSafeConstantReplacement(node.test)) {
                     if (testValue) {
                         // 条件为真，只保留then分支
                         this.replaceNode(node, node.consequent);
@@ -6113,7 +6490,8 @@ export class Optimizer extends ASTVisitor {
                 
             case 'WhileStatement':
                 const whileTestValue = this.evaluateConstantExpression(node.test);
-                if (whileTestValue !== undefined && !whileTestValue) {
+                if (whileTestValue !== undefined && !whileTestValue
+					&& this.isSafeConstantReplacement(node.test)) {
                     // 条件为假的while循环，直接删除
                     this.replaceNode(node, null);
                     modified = true;
@@ -6124,7 +6502,8 @@ export class Optimizer extends ASTVisitor {
 			case 'AssignmentExpression':
 				// It is possible that assign value is given a constant
 				rightConstValue = this.evaluateConstantExpression(node.right);
-				if (!this.isLiteralNode(node.right) && rightConstValue != null) {
+				if (!this.isLiteralNode(node.right) && rightConstValue != null
+					&& this.isSafeConstantReplacement(node.right)) {
 					// This is a constant, add it into constant set
 					console.log(`Optimzing assignment expression right`,node.right);
 					this.replaceNode(node.right, this.getLiteral(rightConstValue));
@@ -6140,6 +6519,7 @@ export class Optimizer extends ASTVisitor {
 				if (node.initializer) {
 					rightConstValue = this.evaluateConstantExpression(node.initializer);
 					if (!this.isLiteralNode(node.initializer) && rightConstValue != null
+					&& this.isSafeConstantReplacement(node.initializer)
 					&& !(typeof rightConstValue === 'object' && rightConstValue.isBuiltinConstant && rightConstValue.category === 'unknown')) {
 						// This is a constant, add it into constant set
 						console.log(`Optimzing assignment expression right`,node.initializer);
@@ -6245,7 +6625,15 @@ export class Optimizer extends ASTVisitor {
 				}
 				break;
 			case 'UnaryExpression':
-				if (node.argument.type === 'Identifier' && constants.has(node.argument.name) && this.variableCanBeRemoved(node.argument.name)) {
+				/*
+				Only a DISCARDED update may be deleted as dead. The old check
+				removed `a++` even when it was the initializer of another
+				variable, turning `int b = a++;` into an uninitialised b (and
+				then crashing in replaceNode when the initializer was nulled).
+				*/
+				if ((node.operator === '++' || node.operator === '--')
+					&& this.isDiscardedValue(node)
+					&& node.argument.type === 'Identifier' && constants.has(node.argument.name) && this.variableCanBeRemoved(node.argument.name)) {
 					console.log(`[ScopeOp Stage] Remove unused assignment expression:`,node);
 					this.replaceNode(node, null);
 					replaced = true;
@@ -6322,37 +6710,36 @@ export class Optimizer extends ASTVisitor {
         });
     }
 
+	/**
+	 * Drop the scope that belonged to a function just removed from the AST.
+	 *
+	 * `Scope.removeSymbol` drops the symbol only; the function's own scope
+	 * stays in `globalScope.children`. Later rounds walk the scope tree
+	 * separately from the AST, so leaving it there would keep the dead body
+	 * visible to the analyses (and let `collectFunctionInfoFromScope` count it
+	 * again).
+	 *
+	 * @param {any} funcNode
+	 */
+	removeScopeOfFunction(funcNode) {
+		const prune = scope => {
+			if (!scope) return;
+			scope.children = (scope.children ?? []).filter(child => child?.astNode !== funcNode);
+			scope.children.forEach(prune);
+		};
+		prune(this.globalScope);
+	}
+
 	// ! Has manual changes !
     removeUnusedFunctions() {
-        const usedFunctions = new Set(['main']);
-        /*
-        Nothing recorded a single call: the bodies have not been looked at yet.
-        Going on would delete every function but main and leave the call sites
-        dangling, so wait for a round that knows something.
-        */
-        if (this.functionCallGraph.size === 0) return;
-        
-        // 从main函数开始标记使用的函数
-        const markUsed = (funcName) => {
-            if (usedFunctions.has(funcName)) return;
-            
-            usedFunctions.add(funcName);
-            const calledFunctions = this.functionCallGraph.get(funcName) || new Set();
-            for (const called of calledFunctions) {
-                markUsed(called);
-            }
-        };
-        
-        // 标记所有被调用的函数
-        this.functionCallGraph.forEach((called, caller) => {
-            if (usedFunctions.has(caller)) {
-                called.forEach(callee => markUsed(callee));
-            }
-        });
-
-		this.functionInfo.forEach((fn, name) => {
-			if (fn.isAddressed) markUsed(name);
-		})
+		/*
+		An EMPTY call graph is a legitimate answer -- main calls nothing -- not
+		a sign that the bodies have not been looked at. The scope analysis has
+		already run, so treat it as "nothing else is reachable" and remove the
+		rest. Returning early here kept every uncalled function alive, and the
+		generator then emitted all of a header's helpers.
+		*/
+		const liveFunctions = this.liveFunctions ?? this.liveFunctionNames();
         
         // 删除未使用的函数定义
 		// Manually use owningScope instead of scope
@@ -6364,22 +6751,23 @@ export class Optimizer extends ASTVisitor {
 				if (symbol.owningScope) {
 					const funcNode = symbol.owningScope.astNode;
                 
-					// 保留main函数、内联函数和被使用的函数
+					/*
+					`main`, everything reachable from it, the addressed functions
+					and the pragma handlers are live. `inline` is not a reason to
+					keep a function: an uncalled inline helper is dead exactly
+					like an ordinary one.
+					*/
 					if (funcName !== 'main' && 
-						!funcNode.isInline && 
-						!usedFunctions.has(funcName) &&
+						!liveFunctions.has(funcName) &&
 						funcNode.body) {
 						// For functions we use 'body (=== null)' instead of 'isDefinition'
 						
-						// Never drop a stack handler: the walker calls it
-						if (this.protectedHandlerNames().has(funcName)) {
-							return;
-						}
 						// Manually added: also remove symbols
 						this.globalScope.removeSymbol(funcName);
 						
 						// 从AST中删除函数定义
 						this.removeNodeFromParent(funcNode);
+						this.removeScopeOfFunction(funcNode);
 						this.modified = true;
 						this.logOptimization(`Removed unused function '${funcName}'`);
 						
@@ -6518,7 +6906,8 @@ export class Optimizer extends ASTVisitor {
 		const MAX_OPTIMIZE_ITERATIONS = 250;
 		return this.runWhileSimulation(whileNode, loopVarName, initValue,
 			{ comparisonOp: null, constValue: undefined },
-			{ type: 'none', step: 0 }, MAX_OPTIMIZE_ITERATIONS, info);
+			{ type: 'none', step: 0 }, MAX_OPTIMIZE_ITERATIONS, info,
+			info && info.loopInitConstants);
 	}
 
 	/**
@@ -6998,6 +7387,11 @@ export class Optimizer extends ASTVisitor {
 				}
 				break;
             case 'BinaryExpression':
+				if (node.operator === '&&' || node.operator === '||') {
+					// C's `&&` / `||` are lazy and yield 0 or 1.
+					return this.evaluateLogicalExpression(node);
+				}
+				// Fall through: plain binary operators evaluate both sides.
 			case 'AssignmentExpression':	// Manually added
                 const left = this.evaluateConstantExpression(node.left);
                 const right = this.evaluateConstantExpression(node.right);
@@ -7037,6 +7431,74 @@ export class Optimizer extends ASTVisitor {
                 return undefined;
         }
     }
+
+	/**
+	 * The truthiness of a value the constant evaluator produced.
+	 *
+	 * `null` means "not known": a builtin constant object (such as `@tick`)
+	 * has a value, but not one the compiler may compare at compile time.
+	 *
+	 * @param {any} value
+	 * @returns {boolean?}
+	 */
+	truthinessOfConstant(value) {
+		if (value === undefined || value === null) return null;
+		if (typeof value === 'object') return null;
+		if (typeof value === 'boolean') return value;
+		if (typeof value === 'number') return value !== 0;
+		if (typeof value === 'string') return value.length > 0;
+		return Boolean(value);
+	}
+
+	/**
+	 * Evaluate `left && right` / `left || right` the way C does.
+	 *
+	 * The right side is only looked at when the left side does not decide the
+	 * answer. Folding is refused whenever it would drop something C evaluates:
+	 * an assignment, a call, `++`/`--`, and so on.
+	 *
+	 * @param {ASTNode} node
+	 * @returns {any} 0 / 1, or undefined when it cannot be folded safely
+	 */
+	evaluateLogicalExpression(node) {
+		const isAnd = node.operator === '&&';
+		const leftValue = this.evaluateConstantExpression(node.left);
+		const leftTruth = this.truthinessOfConstant(leftValue);
+
+		if (leftTruth !== null) {
+			/*
+			The left side is always evaluated. If replacing the whole
+			expression by a constant would drop what it does, do not fold.
+			*/
+			if (!this.isSafeConstantReplacement(node.left)) return undefined;
+			if (isAnd ? !leftTruth : leftTruth) {
+				// Short circuit: the right side never runs.
+				return isAnd ? 0 : 1;
+			}
+			if (this.hasFoldSideEffects(node.right)) return undefined;
+			const rightValue = this.evaluateConstantExpression(node.right);
+			if (rightValue === undefined) return undefined;
+			const rightTruth = this.truthinessOfConstant(rightValue);
+			if (rightTruth === null) return undefined;
+			return rightTruth ? 1 : 0;
+		}
+
+		/*
+		The left value is unknown. The right side can still decide the answer
+		(`unknown && 0`, `unknown || 1`), but only when neither side has an
+		effect that folding would discard.
+		*/
+		if (this.hasFoldSideEffects(node.left) || this.hasFoldSideEffects(node.right)) {
+			return undefined;
+		}
+		const rightValue = this.evaluateConstantExpression(node.right);
+		if (rightValue === undefined) return undefined;
+		const rightTruth = this.truthinessOfConstant(rightValue);
+		if (rightTruth === null) return undefined;
+		if (isAnd && !rightTruth) return 0;
+		if (!isAnd && rightTruth) return 1;
+		return undefined;
+	}
 
 	// ! Manually modified !
 	// Special compatibility for '+=' and '='
@@ -7088,8 +7550,9 @@ export class Optimizer extends ASTVisitor {
             case '&': case '&=': return left & right;
             case '|': case '|=': return left | right;
             case '^': case '^=': return left ^ right;
-			case '||': return left || right;
-			case '&&': return left && right;
+			// C logical operators yield 0 or 1, never the operand's own value.
+			case '||': return (left || right) ? 1 : 0;
+			case '&&': return (left && right) ? 1 : 0;
             case '<<': case '<<=': return left << right;
             case '>>': case '>>=': return left >> right;
             case '==': return isEqual(left, right);
@@ -7112,6 +7575,123 @@ export class Optimizer extends ASTVisitor {
             default: return undefined;
         }
     }
+
+	/**
+	 * Whether evaluating this expression does something a replacement must not
+	 * silently drop.
+	 *
+	 * This is deliberately stricter than `hasSideEffects`: a plain read is not
+	 * an effect (folding it away is fine), while an assignment, a call or
+	 * `++`/`--` is. `hasSideEffects` answers a different question -- whether a
+	 * loop body is worth keeping -- and treats writes to loop-local variables
+	 * as harmless, which is exactly what makes loops optimizable.
+	 *
+	 * @param {ASTNode?} node
+	 * @returns {boolean}
+	 */
+	hasFoldSideEffects(node) {
+		if (!node) return false;
+		if (Array.isArray(node)) return node.some(child => this.hasFoldSideEffects(child));
+		switch (node.type) {
+			case 'AssignmentExpression':
+				return true;
+			case 'UnaryExpression':
+				if (node.operator === '++' || node.operator === '--') return true;
+				/*
+				A dereference reads memory (and may be volatile). Folding the
+				expression around it would delete that read, so be
+				conservative, like `hasSideEffects` already is.
+				*/
+				if (node.operator === '*' || node.operator === '&') return true;
+				return this.hasFoldSideEffects(node.argument);
+			case 'FunctionCall':
+			case 'BuiltinCall':
+			case 'AsmStatement':
+				return true;
+			case 'BinaryExpression':
+				return this.hasFoldSideEffects(node.left) || this.hasFoldSideEffects(node.right);
+			case 'ConditionalExpression':
+				return this.hasFoldSideEffects(node.test)
+					|| this.hasFoldSideEffects(node.consequent)
+					|| this.hasFoldSideEffects(node.alternate);
+			case 'CastExpression':
+				return this.hasFoldSideEffects(node.expression);
+			case 'Identifier':
+				return node.symbol?.isVolatile === true;
+			case 'MemberExpression':
+				if (node.dataType?.isVolatile?.() || node.symbol?.isVolatile) return true;
+				return (node.children ?? []).some(child => this.hasFoldSideEffects(child));
+			default:
+				break;
+		}
+		if (node.children) return node.children.some(child => this.hasFoldSideEffects(child));
+		return false;
+	}
+
+	/**
+	 * Whether replacing this expression by the constant it evaluates to keeps
+	 * everything C would do.
+	 *
+	 * The lazy operators are understood: `0 && (x = 5)` is safe because the
+	 * right side never runs, while `(x = 5) && 0` is not.
+	 *
+	 * @param {ASTNode?} node
+	 * @returns {boolean}
+	 */
+	isSafeConstantReplacement(node) {
+		if (!node) return true;
+		switch (node.type) {
+			case 'AssignmentExpression':
+			case 'FunctionCall':
+			case 'BuiltinCall':
+			case 'AsmStatement':
+				return false;
+			case 'UnaryExpression':
+				if (node.operator === '++' || node.operator === '--') return false;
+				// `*p` / `&x` must not disappear from the program.
+				if (node.operator === '*' || node.operator === '&') return false;
+				return this.isSafeConstantReplacement(node.argument);
+			case 'Identifier':
+				return node.symbol?.isVolatile !== true;
+			case 'BinaryExpression': {
+				if (node.operator === '&&' || node.operator === '||') {
+					const leftTruth = this.truthinessOfConstant(
+						this.evaluateConstantExpression(node.left));
+					if (leftTruth !== null) {
+						if (!this.isSafeConstantReplacement(node.left)) return false;
+						const evaluatesRight = node.operator === '&&' ? leftTruth : !leftTruth;
+						if (!evaluatesRight) return true;
+					}
+					return this.isSafeConstantReplacement(node.left)
+						&& this.isSafeConstantReplacement(node.right);
+				}
+				return this.isSafeConstantReplacement(node.left)
+					&& this.isSafeConstantReplacement(node.right);
+			}
+			case 'ConditionalExpression': {
+				const testTruth = this.truthinessOfConstant(
+					this.evaluateConstantExpression(node.test));
+				if (testTruth !== null) {
+					if (!this.isSafeConstantReplacement(node.test)) return false;
+					return this.isSafeConstantReplacement(
+						testTruth ? node.consequent : node.alternate);
+				}
+				return this.isSafeConstantReplacement(node.test)
+					&& this.isSafeConstantReplacement(node.consequent)
+					&& this.isSafeConstantReplacement(node.alternate);
+			}
+			case 'CastExpression':
+				return this.isSafeConstantReplacement(node.expression);
+			case 'MemberExpression':
+				if (node.dataType?.isVolatile?.() || node.symbol?.isVolatile) return false;
+				return (node.children ?? []).every(child => this.isSafeConstantReplacement(child));
+			default:
+				if (node.children) {
+					return node.children.every(child => this.isSafeConstantReplacement(child));
+				}
+				return true;
+		}
+	}
 
 	// ! This function has TO-DOs !
 	// This function is manually merged from AI output.
@@ -7273,37 +7853,39 @@ export class Optimizer extends ASTVisitor {
         
         switch (node.operator) {
             case '+':
-                if (leftConst === 0) {
+                if (leftConst === 0 && this.isSafeConstantReplacement(node.left)) {
                     this.replaceNode(node, node.right);
                     return true;
                 }
-                if (rightConst === 0) {
+                if (rightConst === 0 && this.isSafeConstantReplacement(node.right)) {
                     this.replaceNode(node, node.left);
                     return true;
                 }
                 break;
             case '-':
-                if (rightConst === 0) {
+                if (rightConst === 0 && this.isSafeConstantReplacement(node.right)) {
                     this.replaceNode(node, node.left);
                     return true;
                 }
                 break;
             case '*':
-                if (leftConst === 1) {
+                if (leftConst === 1 && this.isSafeConstantReplacement(node.left)) {
                     this.replaceNode(node, node.right);
                     return true;
                 }
-                if (rightConst === 1) {
+                if (rightConst === 1 && this.isSafeConstantReplacement(node.right)) {
                     this.replaceNode(node, node.left);
                     return true;
                 }
-                if (leftConst === 0 || rightConst === 0) {
+                if ((leftConst === 0 || rightConst === 0)
+                    && this.isSafeConstantReplacement(node.left)
+                    && this.isSafeConstantReplacement(node.right)) {
                     this.replaceNode(node, ASTBuilder.numericLiteral(0));
                     return true;
                 }
                 break;
             case '/':
-                if (rightConst === 1) {
+                if (rightConst === 1 && this.isSafeConstantReplacement(node.right)) {
                     this.replaceNode(node, node.left);
                     return true;
                 }
@@ -7614,9 +8196,11 @@ export class Optimizer extends ASTVisitor {
 			case 'Declarator':
 				if (oldNode === parent.initializer) {
 					parent.initializer = newNode;
-					newNode.parent = parent;
+					if (newNode) newNode.parent = parent;
+					return;
 				}
-			
+				break;
+
 			case 'MemberExpression':
 				if (oldNode === parent.getChild(0)) {
 					if (newNode) {
@@ -7875,6 +8459,7 @@ export class Optimizer extends ASTVisitor {
 		if (inlined && funcInfo.calls === 0) {
 			this.globalScope.removeSymbol(funcName);	// Manually added
 			this.removeNodeFromParent(funcInfo.node);
+			this.removeScopeOfFunction(funcInfo.node);
 			this.logOptimization(`Removed unused function '${funcName}' after inlining`);
 		}
 		return inlined;
@@ -8124,6 +8709,25 @@ export class Optimizer extends ASTVisitor {
 			const arg = (callNode.arguments ?? [])[i];
 			if (!arg) continue;
 			const type = arg.dataType ?? null;
+			/*
+			A pointer handed to an ARRAY parameter is a slice (`f(&a[2])`,
+			`f(a + 2)`): the tail runs to the end of the storage, and the callee
+			reaches it through the root's helper plus the packed offset. There is
+			no array name to alias the parameter to, and treating the pointer as
+			one would read a block/offset pair where a handle is expected.
+			Keep the real call, which passes the handle and stays correct.
+			*/
+			const paramSymbol = funcNode.scope?.lookup?.(params[i]?.name) ?? null;
+			const paramType = paramSymbol?.myType?.() ?? params[i]?.dataType ?? null;
+			/*
+			The BODY slices this parameter (`int b[] = slice(s, 1);`, `s[1]`
+			on a multidimensional parameter). The callee then reads a packed
+			handle, while inlining would make the parameter a block/offset
+			alias -- one register holding a handle cannot be read as an
+			address. Keep the real call, which passes the handle.
+			*/
+			if (paramSymbol?.slicedByBody === true) return false;
+			if (type?.kind === 'pointer' && paramType?.kind === 'array') return false;
 			if (!type || type.kind !== 'array') continue;
 			const aliased = this.arrayArgumentSymbolOf(arg);
 			if (aliased) {

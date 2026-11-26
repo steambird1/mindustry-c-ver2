@@ -11,7 +11,7 @@ import { ASTNodeType, AttributeClass, ASTNode, CompilationPhase,
 // at run time is `MemoryBlockInfo`, and it is a type name, so nothing here
 // reads a binding from `mindcGeneratorBase.js` while this module's body runs.
 import { MemoryBlockInfo } from "./mindcGeneratorBase.js";
-import { widthOfType, normalizeImplementation, registerElementLayoutOf, packedStructLookupCompatible, isNameableRegisterStruct } from "./mindcInfrastructure.js";
+import { widthOfType, normalizeImplementation, registerElementLayoutOf, packedStructLookupCompatible, isNameableRegisterStruct, HANDLE_OFFSET_MASK } from "./mindcInfrastructure.js";
 import { makeDiagnostic } from "./mindcDiagnostics.js";
 
 export class VariableLinker {
@@ -1282,6 +1282,13 @@ export class SemanticAnalyzer extends ASTVisitor {
 			*/
 			{ name: 'vecalias', returnType: 'void', parameters: [], hasVarArgs: true, special: 'vecalias' },
 			{ name: 'veccpy', returnType: 'void', parameters: [], hasVarArgs: true, special: 'veccpy' },
+			/*
+			`slice(x, start[, end])` is an intrinsic, not a function: it builds a
+			packed handle, which needs the get / set helper entry points only the
+			generator knows. `returnType` is replaced by the array type
+			`prepareSliceCall` computes for the arguments.
+			*/
+			{ name: 'slice', returnType: 'int', parameters: [], hasVarArgs: true, special: 'slice' },
 			{ name: 'remote', returnType: 'void*', parameters: [], hasVarArgs: true, special: 'remote' },
 			...(this.extraConfig.getAttribute('extraFunctions') ?? [])
 		];
@@ -3025,11 +3032,30 @@ export class SemanticAnalyzer extends ASTVisitor {
                 };
                 if (initType && !this.isTypeCompatible(finalType, initType)
                     && !fpAcceptsTemplate(finalType, initType)
-                    && !fpAcceptsAutoVersion(finalType, initType)) {
+                    && !fpAcceptsAutoVersion(finalType, initType)
+                    && !(declarator.getAttribute?.('openDimensionBinding') === true
+                        && (this.sliceOfArrayExpression(declarator.initializer, initType)
+                            || this.isSliceConditional(declarator.initializer)))) {
                     this.addError(
                         `Cannot initialize '${this.typeToString(finalType)}' with '${this.typeToString(initType)}'`,
                         declarator.initializer.location
                     );
+				}
+				/*
+				A slice is a HANDLE (one cell), not storage. A concrete array has
+				storage of its own, so the only thing its initializer could do
+				is copy the elements -- and that spelling reads as "b IS the
+				slice", which it is not. Say what to write instead.
+				*/
+				if (finalType.kind === 'array' && declarator.initializer
+					&& declarator.getAttribute?.('openDimensionBinding') !== true
+					&& this.sliceOfArrayExpression(declarator.initializer, initType, null)) {
+					this.addError(
+						`Cannot initialize '${declarator.name}' with a slice: it has storage of `
+						+ `its own, while a slice is a handle. Copy the elements with `
+						+ `'veccpy(${declarator.name}, ...)', or declare an open handle `
+						+ `('int ${declarator.name}[] = slice(...);')`,
+						declarator.initializer.location);
 				}
 
                 varSymbol.initialized = true;
@@ -3114,6 +3140,142 @@ export class SemanticAnalyzer extends ASTVisitor {
 	 * @returns {void}
 	 */
 	bindOpenDimensionArray(declarator, symbol, initType) {
+		/*
+		A `slice(...)` that already failed has said why. Without this the
+		declaration would add a second complaint ("no length to take") that
+		describes the symptom rather than the mistake.
+		*/
+		if (declarator.initializer?.type === 'BuiltinCall'
+			&& declarator.initializer.functionName === 'slice'
+			&& !declarator.initializer.getAttribute?.('sliceCall')) {
+			return;
+		}
+		/*
+		A CONDITIONAL initializer chooses its target at run time, so it cannot
+		be a compile-time alias. It becomes a runtime handle cell whose packed
+		value is selected by the condition.
+		*/
+		if (declarator.initializer?.type === 'ConditionalExpression') {
+			const branches = [declarator.initializer.consequent, declarator.initializer.alternate];
+			const describe = branch => {
+				const named = this.symbolOfArrayExpression(branch);
+				if (named) return { symbol: named, slice: null };
+				const branchType = this.getExpressionType(branch)
+					?? branch?.dataType ?? null;
+				const slice = this.sliceOfArrayExpression(branch, branchType,
+					(message, location) => this.addError(message, location));
+				return slice ? { symbol: slice.symbol, slice } : null;
+			};
+			const described = branches.map(describe);
+			if (described.some(branch => !branch)) {
+				this.addError(
+					`A conditional array handle can only choose between named arrays or `
+					+ `slices of one, as in 'int ${declarator.name}[] = cond ? a[i] : a[j];'`,
+					declarator.initializer.location ?? declarator.location);
+				return;
+			}
+			if (described.some(branch => branch.symbol.isRemote === true
+				|| this.typeHasRemoteQualifier(branch.symbol.myType?.()))) {
+				this.addError(
+					`Cannot bind a remote array to '${declarator.name}': a handle packs helper `
+					+ `entry points of THIS processor, which mean nothing there`,
+					declarator.initializer.location ?? declarator.location);
+				return;
+			}
+			/*
+			Every array a handle may reach has to stay reachable: the optimizer
+			must not turn one into a constant table (a later write through the
+			handle would have nowhere to land), and a memory array's helper needs
+			a stable numeric block id.
+			*/
+			described.forEach(branch => this.markArrayReachableByHandle(branch.symbol));
+			/*
+			`cond ? &a[0] : &a[i]` chooses between two POINTER tails; the
+			conditional's own type is a pointer, so the handle's array type has
+			to be built here, from the pointee. Its length is the rest of each
+			array, packed by the branch that is chosen.
+			*/
+			const branchTypes = branches.map(branch =>
+				this.getExpressionType(branch) ?? branch?.dataType ?? null);
+			const mixed = branchTypes.some(type => type?.kind === 'pointer')
+				&& branchTypes.some(type => type?.kind === 'array');
+			const type = initType?.kind === 'pointer'
+				? this.flatArrayTypeOf(initType.pointerTo)
+				: mixed
+					? this.flatArrayTypeOf(initType?.pointerTo ?? initType, NaN)
+					: initType;
+			if (!type || type.kind !== 'array') {
+				this.addError(
+					`A conditional bound to '${declarator.name}[]' must choose between `
+					+ `arrays or pointer slices of one`,
+					declarator.initializer.location ?? declarator.location);
+				return;
+			}
+			const readonlyBranch = described.some(branch =>
+				branch.symbol.handleReadonly === true
+				|| branch.symbol.isConst === true
+				|| this.isReadonlyArrayType(branch.symbol.myType?.())
+				|| branch.symbol.requestedArrayImplementation === 'encoded');
+			if ((this.isReadonlyArrayType(type) || readonlyBranch)
+				&& symbol.isConst !== true) {
+				this.addError(
+					`A conditional choosing a read-only array can only be bound to a `
+					+ `read-only handle: declare 'const int ${declarator.name}[]'`,
+					declarator.location);
+				return;
+			}
+			this.bindRuntimeHandle(declarator, symbol,
+				readonlyBranch ? this.readonlyArrayType(type) : type);
+			if (described.some(branch => branch.slice
+				|| branch.symbol.hasSliceOffset === true)) {
+				symbol.hasSliceOffset = true;
+			}
+			return;
+		}
+		/*
+		A SLICE of a memory array -- `int b[] = g[i];`, `int b[] = &a[i];`.
+		The handle reaches the root's storage and carries the starting element
+		in its packed value; the length is the rest of the array, or the
+		dimensions left after the subscripts.
+		*/
+		{
+			let reported = false;
+			const slice = this.sliceOfArrayExpression(declarator.initializer, initType,
+				(message, location) => {
+					reported = true;
+					this.addError(message, location);
+				});
+			if (!slice && reported) return;
+			if (slice) {
+				/*
+				A POINTER tail (`&a[i]`) is an address into the element type, so
+				the flat view is built from the pointee. The subscript and
+				`slice()` forms are already array-typed, and a static length
+				computed from their bounds has to survive here -- the type may
+				carry NaN (a run-time length) otherwise.
+				*/
+				const base = initType?.kind === 'pointer'
+					? (initType.pointerTo ?? initType) : initType;
+				const elementBase = this.innermostArrayElementOf(base) ?? base;
+				const hasStaticLength = slice.length !== null
+					&& slice.length !== undefined;
+				const type = hasStaticLength
+					? this.flatArrayTypeOf(base, slice.length)
+					: this.flatArrayTypeOf(elementBase);
+				if ((this.isReadonlyArrayType(type)
+					|| this.isReadonlyArrayType(slice.symbol.myType?.())
+					|| slice.symbol.isConst === true)
+					&& symbol.isConst !== true) {
+					this.addError(
+						`Cannot bind a slice of a read-only array to '${declarator.name}': `
+						+ `declare it 'const int ${declarator.name}[]' to keep it read-only`,
+						declarator.location);
+					return;
+				}
+				this.bindSliceHandle(declarator, symbol, slice, type);
+				return;
+			}
+		}
 		if (!initType || initType.kind !== 'array') {
 			this.addError(
 				`The size of array '${declarator.name}' is neither given nor deducible: ` +
@@ -3121,18 +3283,86 @@ export class SemanticAnalyzer extends ASTVisitor {
 				declarator.location);
 			return;
 		}
-		if (this.hasOpenDimension(initType)) {
-			this.addError(
-				`Neither '${declarator.name}' nor what it is given says how many elements `
-				+ `there are: one of them has to`,
-				declarator.location);
+		const target = this.symbolOfArrayExpression(declarator.initializer);
+		/*
+		A HANDLE is a value, not an array with storage of its own. Binding `b`
+		to `int h[];` (or to an open-dimension parameter) copies the packed
+		handle; there is no array to alias and no length to take from a type.
+		*/
+		const handleSource = this.hasOpenDimension(initType)
+			|| target?.isUnboundHandle === true
+			|| target?.arrayParamRep === 'handle';
+		if (handleSource) {
+			if (!target) {
+				this.addError(
+					`'${declarator.name}' can copy a handle only from a named handle, as in `
+					+ `'int ${declarator.name}[] = h;'`,
+					declarator.location);
+				return;
+			}
+			if (target.isRemote === true || this.typeHasRemoteQualifier(initType)) {
+				this.addError(
+					`Cannot bind a remote array to '${declarator.name}': a handle packs helper `
+					+ `entry points of THIS processor, which mean nothing there`,
+					declarator.location);
+				return;
+			}
+			/*
+			Read-only is a property of the VALUE: a handle that may point at a
+			constant table (or was declared const) cannot be copied into a
+			handle that promises writes. `const int k[] = h;` is the spelling
+			that keeps the promise.
+			*/
+			if (target.handleReadonly === true || target.isConst === true
+				|| this.isReadonlyArrayType(target.myType?.())) {
+				if (symbol.isConst !== true) {
+					this.addError(
+						`Cannot copy read-only handle '${target.name}' into '${declarator.name}': `
+						+ `declare it 'const int ${declarator.name}[]' if the copy is meant to be `
+						+ `read-only too`,
+						declarator.location);
+					return;
+				}
+			}
+			this.bindRuntimeHandle(declarator, symbol, initType);
+			if (target.hasSliceOffset === true) symbol.hasSliceOffset = true;
+			if (target.handleReadonly === true || target.isConst === true) {
+				symbol.handleReadonly = true;
+			}
 			return;
 		}
-		const target = this.symbolOfArrayExpression(declarator.initializer);
 		if (!target) {
+			/*
+			A struct MEMBER that is itself an array (`int b[] = s.m;`) is not a
+			slice: its storage belongs to the struct, and the handle would need
+			a base inside it. Say what is missing instead of the generic
+			"nothing to take a length from".
+			*/
+			if (declarator.initializer?.type === 'MemberExpression'
+				&& declarator.initializer.getAttribute?.('computed') !== true) {
+				this.addError(
+					`Cannot bind '${declarator.name}' to a struct member array: slicing a `
+					+ `member is not supported yet. Give '${declarator.name}' its own storage, `
+					+ `or pass the member array by name from a function`,
+					declarator.location);
+				return;
+			}
 			this.addError(
 				`'${declarator.name}' has no length of its own, so it can only be bound to `
 				+ `a named array -- there is nothing to take a length from here`,
+				declarator.location);
+			return;
+		}
+		/*
+		An alias of a READ-ONLY array must be read-only too: it has no storage
+		of its own, so the `const` has to come from the declaration. `const int
+		k[] = s;` is the spelling; a plain `k[] = s;` would launder the
+		constness away.
+		*/
+		if (target.isConst === true && symbol.isConst !== true) {
+			this.addError(
+				`Cannot alias read-only '${target.name}' as '${declarator.name}': declare it `
+				+ `'const int ${declarator.name}[]' to keep the view read-only`,
 				declarator.location);
 			return;
 		}
@@ -3151,6 +3381,70 @@ export class SemanticAnalyzer extends ASTVisitor {
 		*/
 		target.nativeBlockUnsafe = true;
 		symbol.isRemote = target.isRemote === true || this.typeHasRemoteQualifier(initType);
+	}
+
+	/**
+	 * Make an open-dimension declaration a runtime handle cell.
+	 *
+	 * Unlike an alias this is a VALUE: it can be copied from another handle or
+	 * selected by a conditional expression, and it can be rebound later.
+	 *
+	 * @param {any} declarator
+	 * @param {SymbolEntry} symbol
+	 * @param {TypeInfo} type
+	 * @returns {void}
+	 */
+	bindRuntimeHandle(declarator, symbol, type) {
+		/*
+		A read-only handle is a VALUE property: the packed set helper may not
+		exist (a constant table has none), and writes through a copy have to be
+		refused even when the declaration forgot the `const`. Carry it on the
+		element type, which is what `h[i] = v` asks.
+		*/
+		if (symbol.isConst === true || this.isReadonlyArrayType(type)) {
+			type = this.readonlyArrayType(type);
+			symbol.handleReadonly = true;
+		}
+		const wrapper = symbol.type;
+		symbol.type = (wrapper && typeof wrapper === 'object' && 'type' in wrapper)
+			? { ...wrapper, type } : type;
+		symbol.isUnboundHandle = true;
+		symbol.arrayParamRep = 'handle';
+		/*
+		`checkUnboundHandles` walks declarations, not scopes. The attribute is
+		how it sees that this cell was bound by its own initializer.
+		*/
+		declarator.setAttribute('handleBinding', symbol);
+	}
+
+	/**
+	 * The type of `cond ? a : b` when both sides are arrays.
+	 *
+	 * A common, fully known shape keeps its static length (`lenof` can fold,
+	 * constant subscripts can be checked). Anything else -- different lengths,
+	 * or a branch whose length only exists in a packed handle -- becomes an
+	 * open dimension: the length is asked for at run time.
+	 *
+	 * @param {TypeInfo} consequent
+	 * @param {TypeInfo} alternate
+	 * @returns {TypeInfo}
+	 */
+	conditionalArrayType(consequent, alternate) {
+		const front = this.arrayDimensionsOf(consequent);
+		const back = this.arrayDimensionsOf(alternate);
+		const known = dimensions => dimensions.length > 0 && dimensions.every(value =>
+			value !== null && value !== undefined && Number.isFinite(Number(value)));
+		const readonly = this.isReadonlyArrayType(consequent)
+			|| this.isReadonlyArrayType(alternate);
+		if (known(front) && known(back)
+			&& front.length === back.length
+			&& front.every((value, index) => Number(value) === Number(back[index]))) {
+			return readonly ? this.readonlyArrayType(consequent) : consequent;
+		}
+		const open = consequent.duplicate();
+		open.arraySize = NaN;
+		open.size = NaN;
+		return readonly ? this.readonlyArrayType(open) : open;
 	}
 
 	/**
@@ -4880,6 +5174,33 @@ export class SemanticAnalyzer extends ASTVisitor {
             node.dataType = this.getTypeInfo('string_t');
             return;
         }
+        /*
+        `e + i` is POINTER arithmetic, and it needs an address to step. An
+        `embedded` array, a constant table and a handle have none: their
+        elements are separate registers (or packed in one cell), so the sum
+        used to compile into a value that meant nothing. Say so, and point at
+        the form that does express "start at element i".
+        */
+        if (node.operator === '+' || node.operator === '-') {
+            for (const operand of [node.left, node.right]) {
+                const type = this.getExpressionType(operand);
+                if (type?.kind !== 'array') continue;
+                const symbol = this.symbolOfArrayExpression(operand);
+                if (!symbol) continue;
+                const implementation = this.arrayImplementationOf(symbol);
+                /*
+                A remote array has a real address (processor + name), so the
+                arithmetic stays meaningful there.
+                */
+                if (implementation === 'memory' || implementation === 'remote') continue;
+                this.addError(
+                    `Cannot apply '${node.operator}' to '${symbol.name}': its layout is `
+                    + `${implementation ? `'${implementation}'` : 'a register layout'}, so its `
+                    + `elements have no address. Use 'slice(${symbol.name}, i)' for a view`,
+                    node.location);
+                return;
+            }
+        }
 
         // 检查操作符的类型兼容性
         if (!this.isTypeCompatibleForOperator(node.operator, leftType, rightType)) {
@@ -4927,6 +5248,32 @@ export class SemanticAnalyzer extends ASTVisitor {
 				if (!this.isLValue(node.argument)) {
 					this.addError(`Cannot take address of non-lvalue`, node.location);
 					return;
+				}
+				/*
+				`&e[i]` inside a register-layout array asks for the address of
+				one REGISTER, which has none (name pointers can be named but not
+				stepped). The array-level form is `slice(e, i)`.
+				*/
+				if (node.argument?.type === 'MemberExpression'
+					&& node.argument.getAttribute?.('computed') === true) {
+					let cursor = node.argument;
+					while (cursor?.type === 'MemberExpression') {
+						cursor = cursor.children?.[0] ?? null;
+					}
+					const rootSymbol = cursor?.type === 'Identifier'
+						? this.symbolOfArrayExpression(cursor) : null;
+					if (rootSymbol?.myType?.()?.kind === 'array') {
+						const implementation = this.arrayImplementationOf(rootSymbol);
+						if (implementation !== 'memory' && implementation !== 'remote') {
+							this.addError(
+								`Cannot take the address of '${rootSymbol.name}[...]': its `
+								+ `layout is ${implementation ? `'${implementation}'` : 'a register layout'}, `
+								+ `so the elements are separate registers. Use `
+								+ `'slice(${rootSymbol.name}, i)' for a view`,
+								node.location);
+							return;
+						}
+					}
 				}
 				
 				/*
@@ -5759,9 +6106,126 @@ export class SemanticAnalyzer extends ASTVisitor {
      * @returns {boolean} true when the assignment was refused
      */
     refuseIncompatibleArrayAssignment(node, leftType, rightType) {
-        if (leftType?.kind !== 'array' || rightType?.kind !== 'array') return false;
+        /*
+        Only an ARRAY left side can be an array assignment. `a[i] = x` and
+        `p = &a[i]` are ordinary scalar/pointer writes; a slice expression on
+        their right is just arithmetic and must not be mistaken for a binding.
+        */
+        if (leftType?.kind !== 'array') return false;
         const left = this.symbolOfArrayExpression?.(node.left) ?? null;
         const right = this.symbolOfArrayExpression?.(node.right) ?? null;
+        /*
+        A SLICE is an address inside another array, not an array with cells of
+        its own: binding it is always a handle cell. This is checked before the
+        array/array guard because `h = &a[i]` has a POINTER right side.
+        */
+        if (left?.isUnboundHandle === true) {
+            let reported = false;
+            const slice = this.sliceOfArrayExpression(node.right, rightType,
+                (message, location) => {
+                    reported = true;
+                    this.addError(message, location);
+                });
+            if (!slice && reported) return true;
+            if (slice) {
+                const readonly = this.isReadonlyArrayType(rightType)
+                    || rightType?.pointerTo?.isConst?.() === true
+                    || this.isReadonlyArrayType(slice.symbol.myType?.())
+                    || slice.symbol.isConst === true;
+                if (slice.kind !== 'handle') {
+                    this.markArrayReachableByHandle(slice.symbol);
+                }
+                if (readonly) {
+                    if (left.isConst !== true && left.handleReadonly !== true) {
+                        this.addError(
+                            `Cannot bind a slice of a read-only array to '${left.name}': `
+                            + `declare it 'const int ${left.name}[]' to keep it read-only`,
+                            node.location);
+                        return true;
+                    }
+                    this.makeSymbolReadonly(left);
+                }
+                left.hasSliceOffset = true;
+                return false;
+            }
+        }
+        /*
+        A concrete array has storage of its own; a slice is a handle. Writing
+        `b = g[i]` would have to copy the elements, and that spelling reads as
+        a binding -- say so instead of emitting a copy that aliases nothing.
+        */
+        if (left && left.isUnboundHandle !== true && leftType?.kind === 'array'
+            && this.sliceOfArrayExpression(node.right, rightType, null)) {
+            this.addError(
+                `Cannot assign a slice to '${left.name}': it has storage of its own, `
+                + `while a slice is a handle. Copy the elements with `
+                + `'veccpy(${left.name}, ...)'`,
+                node.location);
+            return true;
+        }
+        if (rightType?.kind !== 'array') return false;
+        /*
+        A conditional right side chooses its array at run time. Binding it to
+        a handle cell is supported (the generator selects the packed handle);
+        any other destination would need a run-time element copy and is not a
+        form this dialect implements. A remote branch cannot travel as a handle
+        for the usual reason: the helper line numbers are local to one
+        processor.
+        */
+        if (node.right?.type === 'ConditionalExpression') {
+            const branches = [node.right.consequent, node.right.alternate];
+            const described = branches.map(branch => {
+                const named = this.symbolOfArrayExpression?.(branch) ?? null;
+                if (named) return { symbol: named, slice: null };
+                const branchType = this.getExpressionType(branch) ?? branch?.dataType ?? null;
+                const slice = this.sliceOfArrayExpression(branch, branchType,
+                    (message, location) => this.addError(message, location));
+                return slice ? { symbol: slice.symbol, slice } : null;
+            });
+            if (described.some(branch => !branch)) {
+                this.addError(
+                    `A conditional array value can only choose between named arrays or `
+                    + `slices of one, as in 'h = cond ? a[i] : a[j];'`,
+                    node.right.location ?? node.location);
+                return true;
+            }
+            if (described.some(branch => branch.symbol.isRemote === true
+                || this.typeHasRemoteQualifier(branch.symbol.myType?.()))) {
+                this.addError(
+                    `Cannot assign a remote array through a conditional expression: a handle `
+                    + `packs helper entry points of THIS processor, which mean nothing there`,
+                    node.location);
+                return true;
+            }
+            if (left?.isUnboundHandle !== true) {
+                this.addError(
+                    `A conditional array value can only be bound to a handle cell, as in `
+                    + `'int h[]; h = cond ? a : b;'`,
+                    node.location);
+                return true;
+            }
+            described.forEach(branch => this.markArrayReachableByHandle(branch.symbol));
+            const readonly = described.some(branch =>
+                branch.symbol.handleReadonly === true
+                || branch.symbol.isConst === true
+                || this.isReadonlyArrayType(branch.symbol.myType?.())
+                || branch.symbol.requestedArrayImplementation === 'encoded');
+            if (readonly) {
+                if (left.isConst !== true && left.handleReadonly !== true) {
+                    this.addError(
+                        `A conditional choosing a read-only array can only be bound to a `
+                        + `read-only handle: declare 'const int ${nameOf(left)}[]'`,
+                        node.location);
+                    return true;
+                }
+                this.makeSymbolReadonly(left);
+            }
+            if (described.some(branch => branch.slice
+                || branch.symbol.hasSliceOffset === true)) {
+                left.hasSliceOffset = true;
+            }
+            return false;
+        }
         /*
         An array assignment copies elements through the block/offset ABI; the
         fast "block is a building" form is only safe for plain indexed access.
@@ -5842,6 +6306,28 @@ export class SemanticAnalyzer extends ASTVisitor {
                     + `elements instead`, node.location);
                 return true;
             }
+            /*
+            Read-only sources: a handle that may point at a constant table (or
+            was declared const), and an encoded table itself (which has no set
+            helper to pack). Both can only be bound to a handle that promises
+            no writes.
+            */
+            const readonlySource = rightImpl === 'encoded'
+                || right?.handleReadonly === true
+                || right?.isConst === true
+                || this.isReadonlyArrayType(right?.myType?.())
+                || this.isReadonlyArrayType(rightType);
+            if (readonlySource) {
+                if (left.isConst !== true && left.handleReadonly !== true) {
+                    this.addError(
+                        `Cannot bind a read-only array to '${nameOf(left)}': declare it `
+                        + `'const int ${nameOf(left)}[]' if the binding is meant to stay `
+                        + `read-only too`, node.location);
+                    return true;
+                }
+                this.makeSymbolReadonly(left);
+            }
+            if (right?.hasSliceOffset === true) left.hasSliceOffset = true;
             return false;    // binding: the implementations may differ
         }
         /*
@@ -5863,6 +6349,13 @@ export class SemanticAnalyzer extends ASTVisitor {
                 node.location);
             return true;
         }
+        /*
+        A SLICE on the right of a CONCRETE array assignment is an ordinary
+        copy source (`b = g[i];` copies the row's elements). The two sides do
+        not have to be the same layout: the copy walks both through
+        `element(i)`, exactly as `veccpy` does.
+        */
+        if (this.sliceOfArrayExpression(node.right, rightType, null)) return false;
         if (leftImpl === rightImpl) return false;
         this.addError(
             `Cannot assign ${saidAs(rightImpl)} to ${saidAs(leftImpl)}: `
@@ -5879,6 +6372,491 @@ export class SemanticAnalyzer extends ASTVisitor {
             ?? this.currentScope?.lookup?.(node.name)
             ?? this.globalScope?.lookup?.(node.name)
             ?? null;
+    }
+
+    /**
+     * `cond ? a[i] : a[j]` -- a conditional whose two branches are slices.
+     * Its type is whatever the branches are (an array, or a pointer for
+     * `&a[i]`), and binding it produces a handle either way.
+     *
+     * @param {any} node
+     * @returns {boolean}
+     */
+    isSliceConditional(node) {
+        if (node?.type !== 'ConditionalExpression') return false;
+        const branches = [node.consequent, node.alternate];
+        return branches.every(branch => {
+            if (!branch) return false;
+            if (this.symbolOfArrayExpression(branch)) return true;
+            const type = this.getExpressionType(branch) ?? branch.dataType ?? null;
+            return !!this.sliceOfArrayExpression(branch, type);
+        });
+    }
+
+    /**
+     * `slice(x, start[, end])`: a handle view of `x`'s element sequence.
+     *
+     * This is the form that does not depend on an ADDRESS: it is defined on
+     * the sequence of elements, so it works the same for a memory array, an
+     * `embedded` register array and a handle that already is one. `end` is
+     * exclusive; omitting it means "to the end".
+     *
+     * The result is a handle VALUE, so it can be bound (`int b[] = ...`),
+     * assigned to a handle cell, passed to an array parameter, or chosen by a
+     * conditional. It is not a pointer: `&slice(a, i)` has nothing to point at
+     * if the root is in registers.
+     *
+     * @param {ASTNode} node A `slice` BuiltinCall
+     * @returns {void}
+     */
+    prepareSliceCall(node) {
+        const args = node.arguments ?? [];
+        if (args.length < 2 || args.length > 3) {
+            this.addError(`'slice' takes 2 or 3 arguments: slice(array, start[, end])`,
+                node.location);
+            return;
+        }
+        const [sourceNode, startNode, endNode] = args;
+        /*
+        The BOUNDS are values and are visited normally. The SOURCE is an array
+        name, so it is looked up rather than evaluated.
+        */
+        this.visit(startNode);
+        if (endNode) this.visit(endNode);
+        for (const [label, arg] of [['start', startNode], ['end', endNode]]) {
+            if (!arg) continue;
+            const type = this.getExpressionType(arg);
+            if (!type || !this.isIntegerType(type.name)) {
+                this.addError(`'slice': the ${label} must be an integer, but it is `
+                    + `'${type ? this.typeToString(type) : 'unknown'}'`, arg.location);
+                return;
+            }
+        }
+        const source = (sourceNode?.type === 'Identifier')
+            ? (this.currentScope?.lookup?.(sourceNode.name)
+                ?? this.globalScope?.lookup?.(sourceNode.name) ?? null)
+            : null;
+        const sourceType = source?.myType?.() ?? null;
+        if (!source || sourceType?.kind !== 'array') {
+            this.addError(
+                `The first argument of 'slice' must be the name of an array or a handle, `
+                + `as in 'slice(a, 1, 3)'`,
+                sourceNode?.location ?? node.location);
+            return;
+        }
+        if (source.isRemote === true || this.typeHasRemoteQualifier(sourceType)
+            || this.arrayImplementationOf(source) === 'remote') {
+            this.addError(
+                `Cannot slice '${source.name}': it is remote, and a handle packs helper `
+                + `entry points of THIS processor`,
+                node.location);
+            return;
+        }
+        const isHandle = source.isUnboundHandle === true
+            || source.arrayParamRep === 'handle'
+            || this.hasOpenDimension(sourceType);
+        const requested = source.requestedArrayImplementation ?? null;
+        if (!isHandle && requested && requested !== 'traditional'
+            && requested !== 'embedded' && requested !== 'embedded_divided') {
+            const reason = requested === 'encoded'
+                ? `it is a constant table with no writable storage`
+                : requested.startsWith('embedded_lookup')
+                    ? `it is a lookup table, indexed by content rather than by position`
+                    : `it was asked to use the '${requested}' layout`;
+            this.addError(`Cannot slice '${source.name}': ${reason}`, node.location);
+            return;
+        }
+        /*
+        The body reaches the parameter through a HANDLE (`slice`) or through
+        its storage (`s[i]`). Either way the call cannot be inlined as a plain
+        array alias: the alias would become a block/offset pair while the body
+        still reads a packed handle. Record it for `canInlineArrayArguments`.
+        */
+        if (source.kind === 'parameter') source.slicedByBody = true;
+        const element = this.innermostArrayElementOf(sourceType) ?? sourceType;
+        const elementLayout = element ? registerElementLayoutOf(element) : null;
+        if (elementLayout?.kind === 'struct') {
+            this.addError(
+                `Cannot slice '${source.name}': its elements occupy several registers, `
+                + `and a handle reaches one cell at a time`,
+                node.location);
+            return;
+        }
+        const literal = value => (value?.type === 'NumericLiteral'
+            && Number.isFinite(Number(value.value))) ? Number(value.value) : null;
+        const start = literal(startNode);
+        const end = endNode ? literal(endNode) : null;
+        /*
+        A length is a compile-time number only when both ends are. An open
+        (`slice(h, i)`) length rides in the packed handle and is asked for at
+        run time, exactly like `&a[i]`.
+        */
+        const dims = this.arrayDimensionsOf(sourceType);
+        const knownTotal = (!isHandle && dims.length > 0
+            && dims.every(value => Number.isFinite(Number(value)) && Number(value) > 0))
+            ? dims.reduce((product, value) => product * Number(value), 1)
+            : null;
+        if (start !== null) {
+            if (start < 0) {
+                this.addError(`'slice': the start must not be negative`, startNode.location);
+                return;
+            }
+            if (start > HANDLE_OFFSET_MASK) {
+                this.addError(
+                    `'slice': a handle can start at most ${HANDLE_OFFSET_MASK} elements `
+                    + `into an array`, startNode.location);
+                return;
+            }
+            if (knownTotal !== null && start > knownTotal) {
+                this.addError(
+                    `'slice': start ${start} is past the end of '${source.name}' `
+                    + `(${knownTotal} element(s))`, startNode.location);
+                return;
+            }
+        }
+        if (start !== null && end !== null) {
+            if (end < start) {
+                this.addError(`'slice': end ${end} is before start ${start}`,
+                    endNode.location);
+                return;
+            }
+            if (knownTotal !== null && end > knownTotal) {
+                this.addError(
+                    `'slice': end ${end} is past the end of '${source.name}' `
+                    + `(${knownTotal} element(s))`, endNode.location);
+                return;
+            }
+        }
+        let length = null;
+        if (start !== null) {
+            if (end !== null) length = end - start;
+            else if (knownTotal !== null) length = knownTotal - start;
+        }
+        let type = this.flatArrayTypeOf(sourceType,
+            length === null ? NaN : length);
+        if (source.handleReadonly === true || source.isConst === true
+            || this.isReadonlyArrayType(sourceType)) {
+            type = this.readonlyArrayType(type);
+        }
+        node.dataType = type;
+        /*
+        Only the SOURCE is remembered: the bounds are read from
+        `node.arguments` when the handle is built, because the optimizer may
+        replace an expression there with its constant value (and a cached node
+        would then be a detached copy of the old tree).
+        */
+        node.setAttribute?.('sliceCall', {
+            source,
+            isHandle,
+            length
+        });
+        /*
+        The helper of the ROOT reaches the slice. A memory root has to keep the
+        numeric block ABI the helper walks; a register root stays in registers
+        (an explicit request already outranks the automatic layout choice).
+        */
+        if (!isHandle) this.markArrayReachableByHandle(source);
+    }
+
+    /**
+     * The storage root of a SLICE of a memory array, or null when `node` is
+     * not a slice this dialect supports.
+     *
+     * A slice starts at an element and runs to the end of the flattened array:
+     *
+     *     g[i]        one dimension taken out of a multi-dimensional array
+     *     g[i][j]     ... however many dimensions are taken out
+     *     &g[i]       a pointer into the array, read as an array
+     *     g + i       the same, through pointer arithmetic
+     *
+     * What the forms have in common is that the storage is a NAMED memory
+     * array and the start is an element index. The handle cannot carry a
+     * block/offset pair of its own, so the helper of the root array is what
+     * reaches it; the packed value carries the start offset instead.
+     *
+     * @param {any} node
+     * @param {TypeInfo?} type the expression's type
+     * @param {(message: string, location: any) => void} [report]
+     * @returns {{root: any, symbol: SymbolEntry, kind: 'array'|'pointer',
+     *            length: number|null, depth: number}?}
+     */
+    sliceOfArrayExpression(node, type, report = null) {
+        if (!node) return null;
+        /*
+        `slice(x, start[, end])` is already described by `prepareSliceCall`:
+        it is a handle view of the element sequence, not an address inside the
+        root, so it does not go through the subscript forms below.
+        */
+        if (node.type === 'BuiltinCall' && node.functionName === 'slice') {
+            const call = node.getAttribute?.('sliceCall') ?? null;
+            if (!call) return null;
+            return {
+                root: null,
+                symbol: call.source,
+                kind: call.isHandle ? 'handle' : 'array',
+                length: call.length,
+                depth: 0,
+                call
+            };
+        }
+        /*
+        Only an array or a pointer can be a slice. `a[0] + 1` is a scalar sum
+        that merely LOOKS like pointer arithmetic; without this guard the `+`
+        form below would try to slice `a` and report layout errors on a plain
+        arithmetic assignment.
+        */
+        if (!type || (type.kind !== 'array' && type.kind !== 'pointer')) return null;
+        let cursor = node;
+        let pointerForm = false;
+        let pointerIndex = null;
+        /*
+        `&a[i]` and `a + i`: both hand out an address inside the array. The
+        tail is read as an array by the declaration/parameter it is given to.
+        */
+        if (cursor.type === 'UnaryExpression' && cursor.operator === '&') {
+            pointerForm = true;
+            cursor = cursor.argument;
+        } else if (cursor.type === 'BinaryExpression' && cursor.operator === '+') {
+            pointerForm = true;
+            const left = cursor.left, right = cursor.right;
+            const leftIsArray = left?.type === 'Identifier'
+                || left?.type === 'MemberExpression';
+            cursor = leftIsArray ? left : right;
+            pointerIndex = leftIsArray ? right : left;
+        }
+        const indices = [];
+        while (cursor?.type === 'MemberExpression') {
+            if (cursor.getAttribute?.('computed') !== true) {
+                // `.member`: a struct member, not a slice of an array.
+                return null;
+            }
+            indices.unshift(cursor.children?.[1] ?? null);
+            cursor = cursor.children?.[0] ?? null;
+        }
+        if (cursor?.type !== 'Identifier') return null;
+        const root = cursor;
+        const symbol = root.symbol
+            ?? this.currentScope?.lookup?.(root.name)
+            ?? this.globalScope?.lookup?.(root.name)
+            ?? null;
+        const rootType = symbol?.myType?.() ?? null;
+        if (!symbol || rootType?.kind !== 'array') return null;
+        const dims = this.arrayDimensionsOf(rootType);
+        if (dims.length === 0
+            || dims.some(value => !Number.isFinite(Number(value)) || Number(value) <= 0)) {
+            return null;
+        }
+        /*
+        A pointer form with no subscript (`&a`, `a + 0`) is the whole array,
+        which is not a slice -- the ordinary array path already handles it.
+        */
+        const depth = indices.length;
+        if (pointerForm) {
+            if (depth > dims.length) return null;
+            if (depth === 0 && node.type !== 'BinaryExpression') return null;
+        } else {
+            if (depth === 0 || depth >= dims.length) return null;
+        }
+        /*
+        A parameter that is sliced reaches its storage through a handle even
+        when the caller passed a plain array, so the call must not be inlined
+        as a plain alias.
+        */
+        if (symbol.kind === 'parameter') symbol.slicedByBody = true;
+        const fail = message => {
+            if (report) report(message, node.location);
+            return null;
+        };
+        if (symbol.isRemote === true || this.typeHasRemoteQualifier(rootType)) {
+            return fail(
+                `Cannot slice '${root.name}': it is remote, and a handle packs helper `
+                + `entry points of THIS processor`);
+        }
+        /*
+        `g[i]` takes a dimension off the element SEQUENCE, so a register layout
+        can carry it too: the root's helper is an index -> register select, and
+        the slice offset is simply added to the index. The ADDRESS forms
+        (`&e[i]`, `e + i`) have nowhere to start from, because an embedded
+        element is its own register and name pointers cannot be stepped.
+        */
+        const requested = symbol.requestedArrayImplementation ?? null;
+        if (requested && requested !== 'traditional') {
+            const registerSlice = requested === 'embedded'
+                || requested === 'embedded_divided';
+            if (pointerForm) {
+                return fail(
+                    `Cannot take an address into '${root.name}': its layout is `
+                    + `'${requested}', and the elements are separate registers. `
+                    + `Use 'slice(${root.name}, i)' for a view`);
+            }
+            if (!registerSlice) {
+                return fail(
+                    `Cannot slice '${root.name}': '${requested}' is not an element `
+                    + `sequence that can be viewed`);
+            }
+        }
+        const total = dims.reduce((product, value) => product * Number(value), 1);
+        if (!pointerForm) {
+            const length = dims.slice(depth)
+                .reduce((product, value) => product * Number(value), 1);
+            return { root, symbol, kind: 'array', length, depth };
+        }
+        /*
+        A pointer tail runs from the start to the end of the flattened array.
+        Its length is a compile-time number only when every subscript is one;
+        a dynamic start leaves the length to the packed handle.
+        */
+        let offset = 0;
+        let known = true;
+        const strideAt = k => dims.slice(k + 1)
+            .reduce((product, value) => product * Number(value), 1);
+        indices.forEach((index, k) => {
+            if (index?.type === 'NumericLiteral' && Number.isFinite(Number(index.value))) {
+                offset += Number(index.value) * strideAt(k);
+            } else {
+                known = false;
+            }
+        });
+        if (depth === 0) {
+            // `a + i` walks whole elements: `i * sizeof(*a)`.
+            const step = pointerIndex?.type === 'NumericLiteral'
+                ? Number(pointerIndex.value) : null;
+            if (step === null) known = false;
+            else offset = step * strideAt(0);
+        }
+        const length = known ? total - offset : null;
+        if (known && (offset < 0 || length < 0)) return null;
+        return { root, symbol, kind: 'pointer', length, depth };
+    }
+
+    /**
+     * The 1D type a handle gives a slice: the remaining dimensions flattened,
+     * with the innermost element type (`int[2][3]` sliced once is `int[3]`).
+     *
+     * @param {TypeInfo} type
+     * @param {number?} length
+     * @returns {TypeInfo}
+     */
+    flatArrayTypeOf(type, length = null) {
+        const dimensions = this.arrayDimensionsOf(type);
+        const total = dimensions.length > 0
+            ? dimensions.reduce((product, value) => product * Number(value), 1)
+            : NaN;
+        const element = this.innermostArrayElementOf(type) ?? type;
+        const size = length !== null ? Number(length)
+            : (type?.kind === 'array' && Number.isFinite(total) && total > 0 ? total : NaN);
+        const flat = new TypeInfo('', 'array', size);
+        flat.arraySize = [size];
+        flat.pointerTo = element;
+        flat.qualifiers = [...(type?.qualifiers ?? [])];
+        return flat;
+    }
+
+    /**
+     * Whether an array type describes storage this program may not write:
+     * a `const` element, or a handle whose branch was a constant table.
+     *
+     * @param {TypeInfo?} type
+     * @returns {boolean}
+     */
+    isReadonlyArrayType(type) {
+        if (!type || type.kind !== 'array') return false;
+        if (type.isConst?.() === true) return true;
+        const element = this.innermostArrayElementOf(type);
+        return element?.isConst?.() === true;
+    }
+
+    /**
+     * The same array type, made read-only.
+     *
+     * The ELEMENT is what a write checks (`h[i] = v` asks about the element
+     * type), so the qualifier is added there; the array itself carries it too
+     * for `sizeof`/`lenof`-style questions and for another copy.
+     *
+     * @param {TypeInfo} type
+     * @returns {TypeInfo}
+     */
+    readonlyArrayType(type) {
+        const copy = type?.duplicate?.() ?? type;
+        if (!copy || copy.kind !== 'array') return copy;
+        copy.qualifiers = [...new Set([...(copy.qualifiers ?? []), 'const'])];
+        if (copy.pointerTo) {
+            copy.pointerTo = copy.pointerTo.duplicate?.() ?? copy.pointerTo;
+            copy.pointerTo.qualifiers = [...new Set([
+                ...(copy.pointerTo.qualifiers ?? []), 'const'
+            ])];
+        }
+        return copy;
+    }
+
+    /**
+     * Make an existing handle symbol read-only in place (also for a handle
+     * whose type was declared earlier by an assignment or a conditional).
+     *
+     * @param {SymbolEntry} symbol
+     * @returns {void}
+     */
+    makeSymbolReadonly(symbol) {
+        if (!symbol) return;
+        symbol.handleReadonly = true;
+        const wrapper = symbol.type;
+        const inner = (wrapper && typeof wrapper === 'object' && 'type' in wrapper)
+            ? wrapper.type : wrapper;
+        const readonly = this.readonlyArrayType(inner);
+        symbol.type = (wrapper && typeof wrapper === 'object' && 'type' in wrapper)
+            ? { ...wrapper, type: readonly } : readonly;
+    }
+
+    /**
+     * Bind an open-dimension declaration to a slice of a memory array.
+     *
+     * @param {any} declarator
+     * @param {SymbolEntry} symbol
+     * @param {{root: any, symbol: SymbolEntry, kind: string, length: number?}} slice
+     * @param {TypeInfo} initType
+     * @param {TypeInfo} type
+     * @returns {void}
+     */
+    bindSliceHandle(declarator, symbol, slice, type) {
+        if (symbol.isConst === true || this.isReadonlyArrayType(type)
+            || slice.symbol.isConst === true
+            || this.isReadonlyArrayType(slice.symbol.myType?.())) {
+            type = this.readonlyArrayType(type);
+            symbol.handleReadonly = true;
+        }
+        const wrapper = symbol.type;
+        symbol.type = (wrapper && typeof wrapper === 'object' && 'type' in wrapper)
+            ? { ...wrapper, type } : type;
+        symbol.isUnboundHandle = true;
+        symbol.arrayParamRep = 'handle';
+        symbol.hasSliceOffset = true;
+        /*
+        The helper of the ROOT reaches the slice, so a memory root's storage has
+        to stay where the helper can name it: a numeric block id and a stable
+        position. A handle source has no root of its own -- its packed value is
+        re-sliced at run time -- and must not be mistaken for one.
+        */
+        if (slice.kind !== 'handle') this.markArrayReachableByHandle(slice.symbol);
+        declarator.setAttribute('handleBinding', symbol);
+    }
+
+    /**
+     * Record that `symbol`'s storage may be reached through a handle.
+     *
+     * The handle is a value with a helper, and a write through it is a write
+     * the optimizer never sees in the AST. The flag has to land on the array
+     * that OWNS the storage: `int w[] = s;` is an alias, so marking `w` would
+     * leave `s` free to become a constant table -- and then a write through a
+     * slice of `w` would find no set helper at all.
+     *
+     * @param {SymbolEntry?} symbol
+     * @returns {void}
+     */
+    markArrayReachableByHandle(symbol) {
+        const root = this.arrayRootOf(symbol ?? null) ?? symbol ?? null;
+        if (!root) return;
+        root.arrayEscapes = true;
+        root.nativeBlockUnsafe = true;
     }
 
     /**
@@ -5971,6 +6949,13 @@ export class SemanticAnalyzer extends ASTVisitor {
             return;
         }
         const cellImpl = this.arrayImplementationOf(cell);
+        if (cell.handleReadonly === true || this.isReadonlyArrayType(cellType)) {
+            this.addError(
+                `Cannot vecalias into '${nameOf(cell)}': it is a read-only handle, so the `
+                + `elements it names cannot be written`,
+                destination.location);
+            return;
+        }
         if (cellImpl === 'remote') {
             this.addError(
                 `Cannot vecalias into '${nameOf(cell)}': a remote array is an element of ANOTHER `
@@ -6021,8 +7006,19 @@ export class SemanticAnalyzer extends ASTVisitor {
         */
         const aliasSource = this.symbolOfArrayExpression(source);
         if (aliasSource) aliasSource.nativeBlockUnsafe = true;
+        /*
+        A SLICE source (`vecalias(&h, g[i])`) is reached through the root's
+        helper plus the offset in the packed value, exactly like `h = g[i]`.
+        The destination has to add that offset on every access.
+        */
+        const slice = this.sliceOfArrayExpression(source, source.dataType, null);
+        if (slice) {
+            if (slice.kind !== 'handle') this.markArrayReachableByHandle(slice.symbol);
+            cell.hasSliceOffset = true;
+        }
         if (this.arrayImplementationOf(aliasSource) === 'remote'
-            || this.typeHasRemoteQualifier(source.dataType)) {
+            || this.typeHasRemoteQualifier(source.dataType)
+            || (slice && this.typeHasRemoteQualifier(slice.symbol.myType?.()))) {
             this.addError(
                 `Cannot bind a remote array by vecalias: a handle packs helper entry points `
                 + `of THIS processor, which mean nothing there. Copy the elements with `
@@ -6069,6 +7065,15 @@ export class SemanticAnalyzer extends ASTVisitor {
         }
         const destinationSymbol = this.symbolOfArrayExpression(destination);
         if (destinationSymbol) destinationSymbol.nativeBlockUnsafe = true;
+        if (destinationSymbol?.handleReadonly === true
+            || this.isReadonlyArrayType(destination.dataType)
+            || this.isReadonlyArrayType(destinationSymbol?.myType?.())) {
+            this.addError(
+                `Cannot veccpy into '${destinationSymbol?.name ?? 'it'}': it is read-only, so `
+                + `the elements cannot be written`,
+                destination.location ?? node.location);
+            return;
+        }
         const destinationImpl = this.arrayImplementationOf(destinationSymbol);
         if (destinationImpl === 'handle') {
             this.addError(
@@ -6192,6 +7197,18 @@ export class SemanticAnalyzer extends ASTVisitor {
                     `Cannot assign to '${alias.name}': it is an alias of '${target.name}', which is `
                     + `an encoded constant table with no cells for the write to land in. Give `
                     + `'${alias.name}' its own storage instead of aliasing a constant`,
+                    node.location);
+                return;
+            }
+            /*
+            `const int s[] = b;` makes the VIEW read-only, but the element's
+            type is the target's, so a write through the alias used to slip
+            through. The alias is the thing that was declared const; ask it.
+            */
+            if (aliasWrite?.alias?.isConst === true) {
+                this.addError(
+                    `Cannot assign to '${aliasWrite.alias.name}': it is a read-only alias of `
+                    + `'${aliasWrite.target?.name ?? 'another array'}'`,
                     node.location);
                 return;
             }
@@ -6721,6 +7738,34 @@ export class SemanticAnalyzer extends ASTVisitor {
 	}
 
 	/**
+	 * Whether this expression is a RUNTIME HANDLE value.
+	 *
+	 * Such a value is ONE cell: a declared handle cell (`int h[];`), an
+	 * open-dimension parameter, or a conditional over arrays. A compile-time
+	 * alias (`int s[] = mem;`) is deliberately not one -- `sizeof(s)` is the
+	 * array's own cell count.
+	 *
+	 * @param {ASTNode?} arg
+	 * @param {TypeInfo?} type
+	 * @returns {boolean}
+	 */
+	isRuntimeHandleExpression(arg, type) {
+		if (!arg) return false;
+		if (arg.getAttribute?.('isRuntimeHandle') === true) return true;
+		if (arg.type === 'Identifier') {
+			const symbol = this.currentScope?.lookup?.(arg.name)
+				?? this.globalScope?.lookup?.(arg.name) ?? null;
+			if (symbol) {
+				if (symbol.isUnboundHandle === true) return true;
+				const symbolType = symbol.myType?.() ?? null;
+				if (symbol.kind === 'parameter' && symbolType?.kind === 'array'
+					&& this.hasOpenDimension(symbolType)) return true;
+			}
+		}
+		return type?.kind === 'array' && this.hasOpenDimension(type);
+	}
+
+	/**
 	 * Fold `sizeof(...)` / `lenof(...)` / `widthof(...)`, which are compile
 	 * time questions.
 	 *
@@ -6755,7 +7800,13 @@ export class SemanticAnalyzer extends ASTVisitor {
 					node.setAttribute('vlaSizeof', { type: info, isParameter: false });
 					return true;
 				}
-				value = this.sizeOfTypeInfo(info);
+				/*
+				An open-dimension array is represented as a runtime handle: the
+				value itself is ONE cell, not the unknown number of elements
+				behind it.
+				*/
+				value = this.hasOpenDimension(info)
+					? 1 : this.sizeOfTypeInfo(info);
 				if (value === null) {
 					this.addError(
 						`sizeof() cannot be applied to '${arg.value}': it has no memory representation`,
@@ -6788,7 +7839,13 @@ export class SemanticAnalyzer extends ASTVisitor {
 					});
 					return true;
 				}
-				value = this.sizeOfTypeInfo(type);
+				/*
+				A runtime handle is one cell: `sizeof` answers the size of the
+				VALUE, not the array behind it. A compile-time alias is still
+				the array itself, so it keeps its element count.
+				*/
+				value = this.isRuntimeHandleExpression(arg, type)
+					? 1 : this.sizeOfTypeInfo(type);
 				if (value === null) {
 					this.addError(
 						`sizeof() cannot be applied to this operand: it has no memory representation`,
@@ -6831,10 +7888,33 @@ export class SemanticAnalyzer extends ASTVisitor {
 				}
 			}
 			if (info) value = widthOfType(info);
+			/*
+			A runtime HANDLE is one cell whatever the type says: `int b[] =
+			g[i];` keeps the row's static length for `lenof`, but the value in
+			`b` is a packed handle, not a block/offset pair.
+			*/
+			if (arg.type === 'Identifier') {
+				const symbol = this.symbolOfArrayExpression(arg);
+				if (symbol?.isUnboundHandle === true) value = 1;
+			}
 		} else {
 			if (args.length !== 1) {
 				this.addError(`lenof() takes exactly one operand`, location);
 				return true;
+			}
+			/*
+			`lenof(slice(a, i))`: the length is a run-time question when either
+			bound is. Leave the call for the generator, which knows how to pack
+			the range; folding it here answered 0.
+			*/
+			if (args[0]?.type === 'BuiltinCall' && args[0].functionName === 'slice') {
+				this.visit(args[0]);
+				const call = args[0].getAttribute?.('sliceCall') ?? null;
+				if (call && call.length === null) {
+					node.dataType = this.getTypeInfo('int');
+					node.setAttribute('lenofOfSlice', args[0]);
+					return true;
+				}
 			}
 			/*
 			An array that arrived as a HANDLE: its length is not part of the
@@ -7426,17 +8506,111 @@ export class SemanticAnalyzer extends ASTVisitor {
         const scope = funcSymbol.owningScope ?? null;
         if (!scope) return;
         (callNode.arguments ?? []).forEach((arg, index) => {
+            if (!arg) return;
             const declared = expectedParams[index];
             if (!declared) return;
             const paramSymbol = scope.lookup(declared.name);
             if (!paramSymbol) return;
             const paramType = paramSymbol.myType?.() ?? null;
             if (!paramType) return;
-            if (arg.type !== 'Identifier') return;
-            const argSymbol = this.currentScope.lookup(arg.name);
-            if (!argSymbol) return;
-            const argType = argSymbol.myType?.() ?? null;
-            if (!argType || argType.kind !== 'array') return;
+            /*
+            An argument can be an array without being a bare name: `g[i]` is a
+            slice, and `&g[i]` / `g + i` are pointers into one. The ROOT is
+            what has to be marked, because that is the storage the callee will
+            reach through the helper. Only an ARRAY slot can be handed a slice;
+            the same `&a[i]` given to a pointer parameter is an ordinary
+            address and must keep the building alias it had.
+            */
+            const argSymbol = arg.type === 'Identifier' ? this.currentScope.lookup(arg.name) : null;
+            const argType = argSymbol ? argSymbol.myType?.() : (arg.dataType ?? null);
+            /*
+            `slice(x, ...)` is a HANDLE: one cell with the helper entry points
+            and the length inside it. A pointer slot has nowhere to put that --
+            the callee would read a block/offset pair out of a packed
+            description. `&a[i]` given to a pointer is the ordinary address and
+            must keep going down the pointer path.
+            */
+            if (!argSymbol && arg.type === 'BuiltinCall' && arg.functionName === 'slice'
+                && paramType.kind !== 'array') {
+                this.addError(
+                    `A slice is a handle, not an address: pass it to an array parameter, `
+                    + `or bind it first ('int h[] = slice(...);')`,
+                    arg.location);
+                return;
+            }
+            const slice = (!argSymbol && argType && paramType.kind === 'array')
+                ? this.sliceOfArrayExpression(arg, argType, null) : null;
+            const rootSymbol = argSymbol ?? slice?.symbol ?? null;
+            /*
+            `cond ? a : b` as an argument is a handle VALUE selected at run
+            time, not a pointer pair. The parameter has to arrive as a handle,
+            and it has to add the slice offset when either branch carries one.
+            */
+            if (!argSymbol && arg.type === 'ConditionalExpression'
+                && arg.dataType?.kind === 'array') {
+                const branches = [arg.consequent, arg.alternate];
+                const roots = [];
+                let hasSlice = false;
+                for (const branch of branches) {
+                    const named = this.symbolOfArrayExpression(branch);
+                    if (named) {
+                        roots.push(named);
+                        if (named.hasSliceOffset === true) hasSlice = true;
+                        continue;
+                    }
+                    const branchSlice = this.sliceOfArrayExpression(branch,
+                        branch?.dataType ?? null, null);
+                    if (branchSlice) {
+                        roots.push(branchSlice.symbol);
+                        hasSlice = true;
+                    }
+                }
+                roots.forEach(symbol => this.markArrayReachableByHandle(symbol));
+                const notes = paramSymbol.arrayArgumentNotes
+                    ?? (paramSymbol.arrayArgumentNotes = {
+                        remote: false, register: false, traditional: false,
+                        slice: false, requested: new Set()
+                    });
+                notes.register = true;
+                if (hasSlice) notes.slice = true;
+                const readonlyRoot = roots.some(symbol =>
+                    symbol.handleReadonly === true
+                    || symbol.isConst === true
+                    || symbol.requestedArrayImplementation === 'encoded'
+                    || this.isReadonlyArrayType(symbol.myType?.()));
+                if (readonlyRoot && paramType.kind === 'array'
+                    && !this.isReadonlyArrayType(paramType)
+                    && paramType.isConst?.() !== true) {
+                    this.addError(
+                        `Cannot pass a read-only conditional array to writable parameter `
+                        + `'${paramSymbol.name}': declare it `
+                        + `'const ${this.typeToString(paramType)}' if the callee does not write`,
+                        arg.location);
+                }
+                return;
+            }
+            if (!rootSymbol && !slice) return;
+            if (slice) this.markArrayReachableByHandle(rootSymbol);
+            /*
+            A read-only array (a `const` declaration, an encoded constant
+            table, or a handle that may point at one) must not be handed to a
+            parameter that can write: that would launder the constness away.
+            */
+            const argReadonly = argSymbol?.handleReadonly === true
+                || argSymbol?.isConst === true
+                || rootSymbol?.handleReadonly === true
+                || rootSymbol?.isConst === true
+                || rootSymbol?.requestedArrayImplementation === 'encoded'
+                || this.isReadonlyArrayType(rootSymbol?.myType?.())
+                || (argSymbol !== null && this.isReadonlyArrayType(argType));
+            if (argReadonly && paramType.kind === 'array'
+                && !this.isReadonlyArrayType(paramType) && paramType.isConst?.() !== true) {
+                this.addError(
+                    `Cannot pass read-only '${rootSymbol?.name ?? 'array'}' to writable `
+                    + `parameter '${paramSymbol.name}': declare it `
+                    + `'const ${this.typeToString(paramType)}' if the callee does not write`,
+                    arg.location);
+            }
             /*
             Handed over as a POINTER (`void f(auto int *p)` / `f(arr)`): the
             callee may write into it at any time, so its contents are no longer
@@ -7444,18 +8618,37 @@ export class SemanticAnalyzer extends ASTVisitor {
             folded back to the initial value and the write is lost.
             */
             if (paramType.kind === 'pointer') {
-                argSymbol.arrayEscapes = true;
+                this.markArrayReachableByHandle(rootSymbol);
                 return;
             }
             if (paramType.kind !== 'array') return;
             const notes = paramSymbol.arrayArgumentNotes
                 ?? (paramSymbol.arrayArgumentNotes = {
-                    remote: false, register: false, traditional: false, requested: new Set()
+                    remote: false, register: false, traditional: false,
+                    slice: false, requested: new Set()
                 });
-            const requested = argSymbol.requestedArrayImplementation ?? null;
-            if (argSymbol.isRemote === true) {
+            if (slice) {
+                /*
+                The slice travels as a HANDLE whatever the root is laid out
+                as: the offset plus the length ride in the packed value. The
+                parameter's representation has to agree even when the root is
+                an ordinary memory array, or a sized `int s[3]` would take a
+                pointer and read the packed handle as a block/offset pair.
+                */
+                notes.slice = true;
+                notes.register = true;
+            }
+            const requested = rootSymbol.requestedArrayImplementation ?? null;
+            if (slice) {
+                /*
+                Already decided above: the slice itself is the handle. Reading
+                the ROOT's layout here would add `traditional` beside
+                `register` and make the parameter look passed two layouts at
+                once.
+                */
+            } else if (rootSymbol.isRemote === true) {
                 notes.remote = true;
-            } else if (argSymbol.isUnboundHandle === true) {
+            } else if (rootSymbol.isUnboundHandle === true) {
                 /*
                 A bound unbound-handle (`int h[]; h = someArray;`) holds a PACKED
                 HANDLE in its one cell, whatever it was bound to. Passing it has
@@ -7466,6 +8659,7 @@ export class SemanticAnalyzer extends ASTVisitor {
                 OPEN_WORK §6.
                 */
                 notes.register = true;
+                if (rootSymbol.hasSliceOffset === true) notes.slice = true;
             } else if (requested && requested !== 'traditional') {
                 notes.register = true;
                 notes.requested.add(requested);
@@ -7478,7 +8672,7 @@ export class SemanticAnalyzer extends ASTVisitor {
             without this, `print(a[1])` after a call would be folded back to the
             value the array was initialised with and lose the write.
             */
-            argSymbol.arrayEscapes = true;
+            this.markArrayReachableByHandle(rootSymbol);
         });
     }
 
@@ -8515,6 +9709,17 @@ export class SemanticAnalyzer extends ASTVisitor {
             */
             const bound_ = boundBy(node);
             if (bound_) { bound.add(bound_.name); boundEverywhere.add(bound_); }
+            /*
+            `int h[] = cond ? a : b;` binds h at its declaration. The
+            attribute is set by `bindRuntimeHandle`, because a declarator does
+            not carry its SymbolEntry.
+            */
+            const declaredBinding = (node.type === 'VariableDeclarator' || node.type === 'Declarator')
+                ? (node.getAttribute?.('handleBinding') ?? null) : null;
+            if (declaredBinding) {
+                bound.add(declaredBinding.name);
+                boundEverywhere.add(declaredBinding);
+            }
         };
 
         const walk = node => {
@@ -8543,7 +9748,7 @@ export class SemanticAnalyzer extends ASTVisitor {
         walk(ast);
 
         for (const sym of unbound) {
-            if (!boundEverywhere.has(sym)) {
+            if (!boundEverywhere.has(sym) && sym.initialized !== true) {
                 this.addError(
                     `Array '${sym.name}' is an unbound handle that is never bound: write `
                     + `'${sym.name} = someArray;' somewhere before using it`, sym.location);
@@ -8571,6 +9776,14 @@ export class SemanticAnalyzer extends ASTVisitor {
             }
             for (const symbol of scope.symbols.values()) {
                 const notes = symbol.arrayArgumentNotes;
+                /*
+                A SLICE argument (`f(g[i])`) reaches its elements through the
+                root's helper plus the offset packed into the handle. That
+                offset is part of the ABI, so the parameter has to add it in
+                every access -- decide it here, from the call sites, exactly
+                like the representation below.
+                */
+                if (notes?.slice === true) symbol.hasSliceOffset = true;
                 /*
                 A version emitted for one representation already knows it:
                 re-deciding from the call-site notes would mix them back
@@ -9104,6 +10317,17 @@ export class SemanticAnalyzer extends ASTVisitor {
 			return;
 		}
 
+		/*
+		`slice(x, start[, end])`: the first argument is an ARRAY, not a value to
+		evaluate. Visiting it would turn a row (`g[1]`) into one element and a
+		whole array into its first cell; the source is described by the helper
+		below and the bounds are visited from there.
+		*/
+		if (node.functionName === 'slice') {
+			this.prepareSliceCall(node);
+			return;
+		}
+
 		// 检查参数
 		node.arguments.forEach(arg => this.visit(arg));
 		this.rejectRemovedOutputPointerCasts(node);
@@ -9221,7 +10445,19 @@ export class SemanticAnalyzer extends ASTVisitor {
 		if (!this.isTypeCompatible(consequentType, alternateType)) {
 			this.addError(`Conditional expression must return the same type`, node.consequent.location);
 		}
-		node.dataType = consequentType;
+		/*
+		`cond ? a : b` over arrays is a RUNTIME HANDLE, even when the two sides
+		happen to have the same length: which one is chosen is not known here.
+		Common known shapes keep their static length for `lenof` and constant
+		subscript checks; different or unknown lengths become an open dimension
+		and the packed handle supplies the answer at run time.
+		*/
+		if (consequentType?.kind === 'array' && alternateType?.kind === 'array') {
+			node.setAttribute('isRuntimeHandle', true);
+			node.dataType = this.conditionalArrayType(consequentType, alternateType);
+		} else {
+			node.dataType = consequentType;
+		}
 	}
 
     /**

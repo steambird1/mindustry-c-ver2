@@ -2929,7 +2929,7 @@ export class Parser {
 			argument-delivery machinery, which would otherwise alias a caller's
 			array to a parameter that does not exist.
 			*/
-			'vecalias', 'veccpy', ...(this.extraFunctions.map(func => func.name))
+			'vecalias', 'veccpy', 'slice', ...(this.extraFunctions.map(func => func.name))
 		];
         return builtins.includes(name);
     }

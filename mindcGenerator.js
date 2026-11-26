@@ -23,9 +23,9 @@ import { makeDiagnostic } from "./mindcDiagnostics.js";
 
 import { ensureMemspHelper, remoteDeviceRegOf, remoteNameRegOf, RemotePointerRet, RemoteArrayRet, RemoteStoredPointerRet, RemoteStructRet, RemoteNamePointerRet, PackedStructRet, LookupArrayRet, NameStructPointerRet, NameStructDerefRet,
 	RemoteStructPointerRet,
-	NameArrayRet, ArrayHandleRet, ensureArrayHandle, arrayLengthOfType, componentCountOf, isFlatComponentType, CATEGORY_ALIASES, Globals, VariableRet, ImmediateRet, BasicRet, IntRet, BitfieldRet, BoolRet, FloatRet, ContentRet, packHandle, HANDLE_MASK, HANDLE_FIELD_BITS, HANDLE_LENGTH_MASK, HANDLE_LENGTH_SHIFT,
+	NameArrayRet, ArrayHandleRet, ensureArrayHandle, arrayLengthOfType, componentCountOf, isFlatComponentType, CATEGORY_ALIASES, Globals, VariableRet, ImmediateRet, BasicRet, IntRet, BitfieldRet, BoolRet, FloatRet, ContentRet, packHandle, resliceHandle, HANDLE_MASK, HANDLE_FIELD_BITS, HANDLE_LENGTH_MASK, HANDLE_LENGTH_SHIFT, HANDLE_OFFSET_MASK,
 	isNamePointerType, registerElementLayoutOf, structStorageLeafPathsOf, packedStructLookupCompatible,
-	TraditionalArrayRet,
+	TraditionalArrayRet, ArrayRet,
 	PointerRet, RefPointerRet, MemPointerRet, VolatilePointerRet, MemoryRefRet, StructRefRet,
 	symbolRef, ExportRet, valueClassOf, readThrough, writeThrough, pointerStep,
 	RegistryStructRet, NamePointerRet, MemoryNamePointerRet,
@@ -2544,7 +2544,14 @@ export class CodeGenerator extends ASTVisitor {
 
 		// TODO if it is a single operation, then directly use 'select':
 		// currently we use sth else
+		/*
+		The test must be selectable too. `visitToCondition` on a short-circuit
+		`&&` / `||` produces an instruction GROUP (branches and a temporary),
+		not a comparison that `select` can take; feeding it to `select` used
+		to crash inside `raw_replace_all`.
+		*/
 		if (this.targetVersion >= 152
+			&& this.isCheapAndPure(node.test)
 			&& this.isCheapAndPure(node.consequent)
 			&& this.isCheapAndPure(node.alternate)) {
 			const tester = this.visitToCondition(node.test, false);
@@ -3905,6 +3912,14 @@ export class CodeGenerator extends ASTVisitor {
 			return this.emitRemoteBinding(symbol, node);
 		}
 		let finalize = new Instruction();
+		/*
+		A runtime handle cell (`int h[];`) has no elements and no address of its
+		own. Its initializer -- another handle, or a conditional choosing one --
+		is a packed value written into that one cell.
+		*/
+		if (symbol.isUnboundHandle === true && node.initializer) {
+			return finalize.concat(this.emitArrayHandleBind(symbol, node.initializer));
+		}
 		/*
 		The address assignment is emitted once per symbol: some paths reach this
 		declarator twice, and writing `X_block` / `X_pos` again only repeats the
@@ -5277,8 +5292,379 @@ export class CodeGenerator extends ASTVisitor {
 	}
 
 	/**
-	 * `a = b;` where `a` is an unbound handle (`int a[];` declared with no
-	 * initializer): BIND a to b.
+	 * Describe `g[i]` / `g[i][j]` / `&a[i]` / `a + i` as a flat slice of a
+	 * MEMORY array.
+	 *
+	 * The handle cannot carry a block/offset of its own, so the slice is
+	 * reached through the ROOT array's helper; the packed value carries the
+	 * element it starts at. The length is the dimensions left after the
+	 * subscripts (a row of `int[2][3]` is 3), or the rest of the array for a
+	 * pointer tail (`&a[i]`).
+	 *
+	 * @param {ASTNode?} node
+	 * @returns {{rootSymbol: SymbolEntry, rootView: any, offset: number|string,
+	 *            length: number|string, setup: Instruction}?}
+	 */
+	sliceInfoOf(node) {
+		if (!node) return null;
+		/*
+		`slice(x, start[, end])` is a VIEW of an element sequence, not an
+		address: it may re-slice a handle, whose packed value is all that is
+		left of the root.
+		*/
+		if (node.type === 'BuiltinCall' && node.functionName === 'slice') {
+			return this.sliceCallInfoOf(node);
+		}
+		/*
+		Only an array value or a pointer can be a slice. A scalar sum such as
+		`a[0] + 1` must not be read as pointer arithmetic on `a`.
+		*/
+		const nodeType = node.dataType ?? null;
+		if (!nodeType || (nodeType.kind !== 'array' && nodeType.kind !== 'pointer')) {
+			return null;
+		}
+		const glob = this.glob;
+		let cursor = node;
+		let pointerForm = false;
+		let pointerIndex = null;
+		if (cursor.type === 'UnaryExpression' && cursor.operator === '&') {
+			pointerForm = true;
+			cursor = cursor.argument;
+		} else if (cursor.type === 'BinaryExpression' && cursor.operator === '+') {
+			pointerForm = true;
+			const left = cursor.left, right = cursor.right;
+			const leftIsArray = left?.type === 'Identifier'
+				|| left?.type === 'MemberExpression';
+			cursor = leftIsArray ? left : right;
+			pointerIndex = leftIsArray ? right : left;
+		}
+		const indices = [];
+		while (cursor?.type === 'MemberExpression') {
+			if (cursor.getAttribute?.('computed') !== true) return null;
+			indices.unshift(cursor.children?.[1] ?? null);
+			cursor = cursor.children?.[0] ?? null;
+		}
+		if (cursor?.type !== 'Identifier') return null;
+		const root = cursor;
+		const rootSymbol = this.currentScope?.lookup?.(root.name)
+			?? this.semantic?.globalScope?.lookup?.(root.name) ?? null;
+		const rootType = rootSymbol?.myType?.() ?? null;
+		if (!rootSymbol || rootType?.kind !== 'array') return null;
+		/*
+		A register layout has no block / position pair for the helper to name,
+		but it does have an INDEX -> element description (`select`, or lookup),
+		which is exactly what a handle is. The slice offset is added to the
+		index at the call site, so `e[i]` works for an embedded array too.
+		*/
+		const traditionalRoot = this.arrayStyleFor(rootSymbol)?.type === 'traditional';
+		const dims = this.semantic?.arrayDimensionsOf?.(rootType) ?? [];
+		if (dims.length === 0
+			|| dims.some(value => !(Number(value) > 0) || !Number.isFinite(Number(value)))) {
+			return null;
+		}
+		const depth = indices.length;
+		if (!pointerForm) {
+			if (depth === 0 || depth >= dims.length) return null;
+		} else if (depth > dims.length) {
+			return null;
+		}
+		const total = dims.reduce((product, value) => product * Number(value), 1);
+		const strideAt = k => dims.slice(k + 1)
+			.reduce((product, value) => product * Number(value), 1);
+
+		const setup = new Instruction();
+		let constant = 0;
+		let runtime = null;
+		const addTerm = (indexNode, stride) => {
+			if (!indexNode) return;
+			if (indexNode.type === 'NumericLiteral') {
+				constant += Number(indexNode.value) * stride;
+				return;
+			}
+			const operand = this.visitAndRead(indexNode);
+			setup.concat(operand);
+			let register = operand.instructionReturn;
+			if (stride !== 1) {
+				const scaled = this.getTempVariable();
+				setup.concat(InstructionBuilder.op('mul', scaled, register, String(stride)));
+				register = scaled;
+			}
+			if (runtime === null) {
+				runtime = register;
+				return;
+			}
+			const summed = this.getTempVariable();
+			setup.concat(InstructionBuilder.op('add', summed, runtime, register));
+			runtime = summed;
+		};
+		indices.forEach((indexNode, k) => addTerm(indexNode, strideAt(k)));
+		if (pointerForm && depth === 0) addTerm(pointerIndex, strideAt(0));
+
+		let offset = runtime;
+		if (runtime !== null && constant !== 0) {
+			const summed = this.getTempVariable();
+			setup.concat(InstructionBuilder.op('add', summed, runtime, String(constant)));
+			offset = summed;
+		} else if (runtime === null) {
+			offset = constant;
+		}
+		/*
+		The start offset is 12 bits (the old element-size field). A slice that
+		starts further in cannot be described, and `handleTailOf` would throw.
+		*/
+		if (typeof offset === 'number' && offset > HANDLE_OFFSET_MASK) {
+			this.addError(
+				`Cannot slice at element ${offset}: a handle can start at most `
+				+ `${HANDLE_OFFSET_MASK} elements into an array`, node.location);
+			return null;
+		}
+
+		let length;
+		if (pointerForm) {			length = (runtime === null) ? total - constant : null;
+			if (runtime !== null) {
+				const rest = this.getTempVariable();
+				setup.concat(InstructionBuilder.op('sub', rest, String(total), runtime));
+				length = rest;
+			}
+			if (typeof length === 'number' && length < 0) return null;
+		} else {
+			length = dims.slice(depth)
+				.reduce((product, value) => product * Number(value), 1);
+		}
+
+		let rootView;
+		if (traditionalRoot) {
+			const rootValue = ExportRet(glob, this.visit(root), rootType);
+			if (!(rootValue instanceof PointerRet)) return null;
+			const flatType = this.flatArrayViewTypeOf(rootType) ?? rootType;
+			rootView = new TraditionalArrayRet(glob, rootValue, flatType, total);
+		} else {
+			rootView = this.arrayViewOf(rootSymbol);
+			if (!rootView) return null;
+		}
+		return { kind: 'array', rootSymbol, rootView, offset, length, setup };
+	}
+
+	/**
+	 * Describe `slice(x, start[, end])` for the packers below.
+	 *
+	 * Two shapes come out of here:
+	 *
+	 *   - `{kind: 'array', rootView, offset, length}` for a named array. The
+	 *     bounds are numbers when they were written as literals, registers
+	 *     otherwise.
+	 *   - `{kind: 'handle', name, instructions}` for a source that is already
+	 *     a packed handle. The get / set entry points cannot be recovered, so
+	 *     the two range fields are rewritten in place (`resliceHandle`).
+	 *
+	 * @param {ASTNode} node A `slice` BuiltinCall
+	 * @returns {any?}
+	 */
+	sliceCallInfoOf(node) {
+		const info = node.getAttribute?.('sliceCall') ?? null;
+		if (!info) return null;
+		const glob = this.glob;
+		const setup = new Instruction();
+		const bound = boundNode => {
+			if (!boundNode) return null;
+			if (boundNode.type === 'NumericLiteral'
+				&& Number.isFinite(Number(boundNode.value))) {
+				return Number(boundNode.value);
+			}
+			const read = this.visitAndRead(boundNode);
+			setup.concat(read);
+			return read.instructionReturn;
+		};
+		const args = node.arguments ?? [];
+		const start = bound(args[1]);
+		const end = bound(args[2]);
+		if (start === null) return null;
+		if (typeof start === 'number' && start > HANDLE_OFFSET_MASK) {
+			this.addError(
+				`Cannot slice at element ${start}: a handle can start at most `
+				+ `${HANDLE_OFFSET_MASK} elements into an array`, node.location);
+			return null;
+		}
+		const source = info.source;
+		if (!info.isHandle) {
+			const rootView = (this.arrayStyleFor(source)?.type === 'traditional')
+				? (() => {
+					const value = ExportRet(glob, this.visit(args[0]),
+						source.myType?.());
+					if (!(value instanceof PointerRet)) return null;
+					const length = this.arrayLengthOf(source);
+					const type = this.flatArrayViewTypeOf(source.myType?.())
+						?? source.myType?.();
+					return new TraditionalArrayRet(glob, value, type, length);
+				})()
+				: this.arrayViewOf(source);
+			if (!rootView) return null;
+			const total = this.arrayLengthOf(source);
+			let length;
+			if (end !== null) {
+				if (typeof start === 'number' && typeof end === 'number') {
+					length = end - start;
+				} else {
+					const rest = this.getTempVariable();
+					setup.concat(InstructionBuilder.op('sub', rest,
+						String(end), String(start)));
+					length = rest;
+				}
+			} else if (typeof start === 'number') {
+				length = total - start;
+			} else {
+				const rest = this.getTempVariable();
+				setup.concat(InstructionBuilder.op('sub', rest,
+					String(total), String(start)));
+				length = rest;
+			}
+			return { kind: 'array', rootSymbol: source, rootView, offset: start, length, setup };
+		}
+		/*
+		Resolve the source from the symbol semantic analysis recorded: a
+		PARAMETER may not be visible in the generator's current scope while an
+		initializer is generated.
+		*/
+		const view = this.arrayViewOf(source) ?? this.arrayViewForArgument(args[0]);
+		if (!(view instanceof ArrayHandleRet)) {
+			/*
+			A handle symbol that the generator resolved to an ordinary array
+			view can still be sliced; only the packed form needs re-slicing.
+			*/
+			if (view instanceof ArrayRet) {
+				const total = Number(view.length) || this.arrayLengthOf(source);
+				let length;
+				if (end !== null) {
+					if (typeof start === 'number' && typeof end === 'number') {
+						length = end - start;
+					} else {
+						const rest = this.getTempVariable();
+						setup.concat(InstructionBuilder.op('sub', rest,
+							String(end), String(start)));
+						length = rest;
+					}
+				} else if (typeof start === 'number') {
+					length = total - start;
+				} else {
+					const rest = this.getTempVariable();
+					setup.concat(InstructionBuilder.op('sub', rest,
+						String(total), String(start)));
+					length = rest;
+				}
+				return {
+					kind: 'array', rootSymbol: source, rootView: view,
+					offset: start, length, setup
+				};
+			}
+			return null;
+		}
+		setup.concat(view.instructions ?? []);
+		const temp = this.getTempVariable();
+		const unchanged = typeof start === 'number' && start === 0
+			&& end === null && view.hasOffset !== true;
+		if (unchanged) {
+			// `slice(h, 0)` of a whole-array handle is the handle itself.
+			setup.concat(InstructionBuilder.set(temp, view.name));
+		} else {
+			setup.concat(resliceHandle(glob, temp, view.name, start, end));
+		}
+		const length = (typeof start === 'number' && typeof end === 'number')
+			? end - start : null;
+		return {
+			kind: 'handle', name: temp, instructions: setup, length,
+			hasOffset: !unchanged
+		};
+	}
+
+	/**
+	 * Pack a slice into `target`: either the root's helper plus the range, or
+	 * a re-sliced handle copied in.
+	 *
+	 * @param {string} target
+	 * @param {any} slice
+	 * @param {any} [location=null]
+	 * @returns {Instruction?}
+	 */
+	packSliceInto(target, slice, location = null) {
+		if (!slice) return null;
+		const glob = this.glob;
+		if (slice.kind === 'handle') {
+			return new Instruction([
+				slice.instructions,
+				InstructionBuilder.set(target, slice.name)
+			], target, new Map([['disallowReplacement', true]]));
+		}
+		const handle = ensureArrayHandle(glob, slice.rootView);
+		if (!handle) return null;
+		return new Instruction([
+			slice.setup,
+			...(handle.instructions ?? []),
+			...packHandle(glob, target, {
+				...handle,
+				length: slice.length,
+				offset: slice.offset
+			})
+		], target, new Map([['disallowReplacement', true]]));
+	}
+
+	/**
+	 * `lenof(slice(...))` when the semantic pass could not fold it: the
+	 * length is a run-time number. A static length is answered directly; a
+	 * packed handle is asked for the field; an array view already has the
+	 * register the pack computed.
+	 *
+	 * @param {ASTNode} node A `slice` BuiltinCall
+	 * @returns {IntRet?}
+	 */
+	emitSliceLength(node) {
+		const glob = this.glob;
+		const intType = this.semantic.getTypeInfo('int') ?? null;
+		const slice = this.sliceInfoOf(node);
+		if (!slice) return null;
+		if (typeof slice.length === 'number') {
+			return new IntRet(glob,
+				slice.kind === 'handle' ? slice.instructions : slice.setup,
+				String(slice.length), intType, false);
+		}
+		if (slice.kind === 'handle') {
+			const tmp = this.getTempVariable();
+			return new IntRet(glob, [
+				slice.instructions,
+				InstructionBuilder.op('shr', tmp, slice.name,
+					String(HANDLE_LENGTH_SHIFT)),
+				InstructionBuilder.op('and', tmp, tmp, String(HANDLE_LENGTH_MASK))
+			], tmp, intType, false);
+		}
+		return new IntRet(glob, slice.setup, String(slice.length), intType, false);
+	}
+
+	/**
+	 * `slice(x, start[, end])` evaluated as a value: a packed handle in a
+	 * temporary, for the contexts that want the VALUE rather than the slice
+	 * description (an element copy, or a call argument that is visited).
+	 *
+	 * @param {ASTNode} node A `slice` BuiltinCall
+	 * @returns {Instruction|ArrayHandleRet}
+	 */
+	emitSliceValue(node) {
+		const glob = this.glob;
+		const slice = this.sliceCallInfoOf(node);
+		if (!slice) {
+			this.addError(`'slice' cannot describe this source as a handle`, node.location);
+			return new Instruction();
+		}
+		const target = this.getTempVariable();
+		const packed = this.packSliceInto(target, slice, node.location);
+		if (!packed) return new Instruction();
+		const length = Number(slice.length);
+		return new ArrayHandleRet(glob, target, node.dataType ?? null,
+			Number.isFinite(length) && length > 0 ? length : 0,
+			packed.instructions, true);
+	}
+
+	/**
+	 * `a = b;` where `a` is an unbound handle
+	 * (`int a[];` declared with no initializer): BIND a to b.
 	 *
 	 * The binding writes b's PACKED HANDLE into a's ONE cell -- the get / set
 	 * helper entry points plus the length, exactly what `packHandle` builds for
@@ -5297,9 +5683,30 @@ export class CodeGenerator extends ASTVisitor {
 	 */
 	emitArrayHandleBind(leftSymbol, rightNode) {
 		const glob = this.glob;
+		if (rightNode?.type === 'ConditionalExpression') {
+			return this.emitConditionalArrayHandleBind(leftSymbol, rightNode);
+		}
 		/* The ONE cell this handle is: what `a = b;` writes into, and what
 		`&a` names. */
 		const cell = leftSymbol.getAssemblySymbol();
+		/*
+		A SLICE (`h = g[i];`, `h = &a[i];`) is reached through the ROOT's
+		helper: the handler is shared by every slice of the array, and the
+		element it starts at rides in the packed value.
+		*/
+		const slice = this.sliceInfoOf(rightNode);
+		if (slice) {
+			const packed = this.packSliceInto(cell, slice, rightNode.location);
+			if (!packed) {
+				this.addError(
+					`Cannot bind '${leftSymbol.name}': '${rightNode.name ?? 'the slice'}' has `
+					+ `no handle form`, rightNode.location);
+				return new Instruction([], 'null',
+					new Map([['disallowReplacement', true]]));
+			}
+			leftSymbol.hasSliceOffset = true;
+			return packed;
+		}
 		const argSym = (rightNode.type === 'Identifier')
 			? (this.currentScope?.lookup?.(rightNode.name)
 				?? this.semantic?.globalScope?.lookup?.(rightNode.name) ?? null)
@@ -5355,6 +5762,107 @@ export class CodeGenerator extends ASTVisitor {
 	}
 
 	/**
+	 * Pack one branch of a conditional array value into a fresh handle cell.
+	 *
+	 * A branch may be a handle (its cell travels as-is), a concrete array
+	 * (packed with its own helper), or a slice (the root's helper plus the
+	 * start offset). The caller selects between the two results.
+	 *
+	 * @param {ASTNode} branch
+	 * @returns {{instructions: any[], name: string, hasOffset: boolean}?}
+	 */
+	packConditionalArrayBranch(branch) {
+		const glob = this.glob;
+		const slice = this.sliceInfoOf(branch);
+		if (slice) {
+			if (slice.kind === 'handle') {
+				// The re-sliced handle already IS the branch value.
+				return {
+					instructions: slice.instructions,
+					name: slice.name,
+					hasOffset: slice.hasOffset !== false
+				};
+			}
+			const sliceHandle = ensureArrayHandle(glob, slice.rootView);
+			if (!sliceHandle) return null;
+			const temp = this.getTempVariable();
+			return {
+				instructions: [
+					slice.setup,
+					...(sliceHandle.instructions ?? []),
+					...packHandle(glob, temp, {
+						...sliceHandle,
+						length: slice.length,
+						offset: slice.offset
+					})
+				],
+				name: temp,
+				hasOffset: true
+			};
+		}
+		const view = this.arrayViewForArgument(branch);
+		if (!view) return null;
+		if (view instanceof ArrayHandleRet) {
+			return {
+				instructions: view.instructions ?? [],
+				name: view.name,
+				hasOffset: view.hasOffset === true
+			};
+		}
+		const handle = ensureArrayHandle(glob, view);
+		if (!handle) return null;
+		const temp = this.getTempVariable();
+		return {
+			instructions: [
+				...(handle.instructions ?? []),
+				...packHandle(glob, temp, {
+					...handle,
+					length: view.length || handle.length || 0
+				})
+			],
+			name: temp,
+			hasOffset: view.hasOffset === true
+		};
+	}
+
+	/**
+	 * `int b[] = cond ? a : a2;` / `b = cond ? h1 : h2;`
+	 *
+	 * A handle is a VALUE, so the conditional is a runtime choice between two
+	 * packed handles. A branch that is already a handle contributes its cell
+	 * directly; a concrete array is packed into a temporary first.
+	 *
+	 * @param {SymbolEntry} leftSymbol
+	 * @param {ConditionalExpressionNode} node
+	 * @returns {Instruction}
+	 */
+	emitConditionalArrayHandleBind(leftSymbol, node) {
+		const glob = this.glob;
+		const cell = leftSymbol.getAssemblySymbol();
+		const packBranch = branch => this.packConditionalArrayBranch(branch);
+		const consequent = packBranch(node.consequent);
+		const alternate = packBranch(node.alternate);
+		if (!consequent || !alternate) {
+			this.addError(
+				`Cannot bind '${leftSymbol.name}': a conditional array handle must choose `
+				+ `between arrays that have a handle form`,
+				node.location);
+			return new Instruction([], 'null', new Map([['disallowReplacement', true]]));
+		}
+		if (consequent.hasOffset || alternate.hasOffset) {
+			leftSymbol.hasSliceOffset = true;
+		}
+		const tester = this.visitToCondition(node.test, false);
+		return new Instruction([
+			tester,
+			consequent.instructions,
+			alternate.instructions,
+			InstructionBuilder.selectx(cell, tester.instructionReturn,
+				consequent.name, alternate.name)
+		], cell, new Map([['disallowReplacement', true]]));
+	}
+
+	/**
 	 * `vecalias(&a, b)`: the same binding as `a = b;`, reached through a NAME
 	 * pointer instead of a symbol.
 	 *
@@ -5387,6 +5895,16 @@ export class CodeGenerator extends ASTVisitor {
 				`vecalias: the first argument is not the name of a handle cell, so there is `
 				+ `nowhere to put the handle`, node.location);
 			return new Instruction();
+		}
+		const slice = this.sliceInfoOf(args[1]);
+		if (slice) {
+			const packed = this.packSliceInto(cell, slice, args[1]?.location ?? node.location);
+			if (!packed) {
+				this.addError(`vecalias: this slice's root has no handle form`,
+					args[1]?.location ?? node.location);
+				return new Instruction();
+			}
+			return packed;
 		}
 		const view = this.arrayViewForArgument(args[1]);
 		if (!view) {
@@ -5421,18 +5939,49 @@ export class CodeGenerator extends ASTVisitor {
 	 */
 	arrayViewForArgument(node) {
 		if (!node) return null;
-		const symbol = (node.type === 'Identifier')
+		/*
+		A slice is not an expression to evaluate: it is the root's helper plus
+		the start offset. Packing it here is what makes an ELEMENT COPY from a
+		slice (`int b[3] = g[1];`, `b = slice(a, 1, 4);`) read the elements the
+		slice names instead of whatever the bare address meant.
+		*/
+		const slice = this.sliceInfoOf(node);
+		if (slice) {
+			const glob = this.glob;
+			const temp = this.getTempVariable();
+			const packed = this.packSliceInto(temp, slice, node.location ?? null);
+			if (!packed) return null;
+			const length = Number(slice.length);
+			return new ArrayHandleRet(glob, temp, node.dataType ?? null,
+				Number.isFinite(length) && length > 0 ? length : 0,
+				packed.instructions, true);
+		}
+		/*
+		`node.symbol` is what semantic analysis resolved. It matters here for
+		a PARAMETER: the generator's scope stack does not always have the
+		function's parameters when a declaration initializer is visited, and
+		looking the name up again then threw "Unknown identifier".
+		*/
+		const symbol = node.symbol ?? ((node.type === 'Identifier')
 			? (this.currentScope?.lookup?.(node.name)
 				?? this.semantic?.globalScope?.lookup?.(node.name) ?? null)
-			: null;
+			: null);
 		if (symbol && symbol.myType?.()?.kind === 'array'
 			&& this.arrayStyleFor(symbol)?.type !== 'traditional') {
 			return this.arrayViewOf(symbol);
 		}
 		const value = ExportRet(this.glob, this.visit(node), node.dataType);
+		/*
+		A row of an array that is not in memory is itself an array view: no
+		pointer exists to rebuild it from, but the view already knows its
+		elements. A memory row arrives as a pointer and is rebuilt below.
+		*/
+		if (value instanceof ArrayRet) return value;
 		if (value instanceof PointerRet) {
+			const length = arrayLengthOfType(node.dataType)
+				|| (symbol ? this.arrayLengthOf(symbol) : 0) || 0;
 			return new TraditionalArrayRet(this.glob, value,
-				symbol?.myType?.() ?? node.dataType, this.arrayLengthOf(symbol) || 0);
+				node.dataType ?? symbol?.myType?.(), length);
 		}
 		return null;
 	}
@@ -5492,6 +6041,17 @@ export class CodeGenerator extends ASTVisitor {
 		};
 		const destinationLength = lengthOf(destination);
 		const result = new Instruction();
+		/*
+		A handle VALUE (`veccpy(b, slice(a, 1, 4))`) must be packed before its
+		length or its elements can be read. The instructions that build it live
+		on the view; without this the loop measured an uninitialised register
+		and copied nothing.
+		*/
+		const build = source?.instructions;
+		if (source instanceof ArrayHandleRet && build
+			&& (build.instructions ?? build).length > 0) {
+			result.concat(build);
+		}
 		/*
 		A HANDLE's length is whatever the binding put in it, so it is a run time
 		question and the bound has to be a register. Every other layout carries a
@@ -5853,7 +6413,7 @@ export class CodeGenerator extends ASTVisitor {
 	 * @returns {number}
 	 */
 	arrayLengthOf(symbol) {
-		const type = symbol.myType();
+		const type = symbol?.myType?.() ?? null;
 		if (!type || type.kind !== 'array') return 0;
 		/*
 		A multidimensional array is one flat sequence when it travels as a
@@ -6454,7 +7014,8 @@ export class CodeGenerator extends ASTVisitor {
 			knows which processor to talk to.
 			*/
 			const length = this.arrayLengthOf(symbol) || 0;
-			return new ArrayHandleRet(glob, symbol.getAssemblySymbol(), flatType, length);
+			return new ArrayHandleRet(glob, symbol.getAssemblySymbol(), flatType, length,
+				[], symbol.hasSliceOffset === true);
 		}
 		const style = this.arrayStyleFor(symbol);
 		const type = flatType;
@@ -6647,6 +7208,22 @@ export class CodeGenerator extends ASTVisitor {
 			return new BasicRet(glob, reading.instructions, reading.instructionReturn, node.dataType, true);
 		}
 
+		/*
+		`slice(a, 1, 4)[0]`: the object is a view, not storage. Build the
+		packed handle and index through it -- the same slot access a bound
+		handle gets.
+		*/
+		if (node.children[0]?.type === 'BuiltinCall'
+			&& node.children[0].functionName === 'slice') {
+			const view = this.arrayViewForArgument(node.children[0]);
+			if (view instanceof ArrayRet) {
+				const indexNode = node.children[1];
+				const index = (indexNode.type === 'NumericLiteral'
+					&& Number.isInteger(Number(indexNode.value)))
+					? Number(indexNode.value) : this.visitAndRead(indexNode);
+				return view.element(index);
+			}
+		}
 		let objectRoot = node.children[0];	// Altered if a total offset is known
 		const object = this.getLValue(objectRoot);
 
@@ -6777,7 +7354,15 @@ export class CodeGenerator extends ASTVisitor {
 		}
 
 		/* From here on the object lives in memory and we need its address. */
-		const isNearPointerHere = object.isNear === true;
+		/*
+		The `near` promise can arrive on the Ret that was just read, or only on
+		the object's type (an explicit `near` declaration). Both mean the same
+		thing -- the object cannot cross a block -- and both have to reach the
+		address below, or a member offset falls back to `__pointerForward`.
+		*/
+		const isNearPointerHere = object.isNear === true
+			|| object.type?.isNear?.() === true
+			|| objectRoot?.dataType?.isNear?.() === true;
 		let knownTotalOffset = null;
 		let index = null;
 		let setup = new Instruction();
@@ -6858,6 +7443,7 @@ export class CodeGenerator extends ASTVisitor {
 		 */
 		const objectAddress = (objectValue instanceof PointerRet) ? objectValue
 			: new RefPointerRet(glob, [], objectValue.name, objectValue.type, objectValue.temporary);
+		objectAddress.setAttribute('isNearPointer', isNearPointerHere);
 
 		/**
 		 * How far to move: either a constant (struct member) or `index * size`.
@@ -7304,12 +7890,13 @@ export class CodeGenerator extends ASTVisitor {
 		return null;
 	}
 
-	deliverArgument(slotName, slotType, argument, paramSymbol = null, argNode = null) {
+	deliverArgument(slotName, slotType, argument, paramSymbol = null, argNode = null,
+		slice = null, conditionalHandle = false) {
 		const glob = this.glob;
 		// `get()` + `materialize()`: the argument ends up in a temporary symbol of
 		// its own, so that evaluating the *next* argument (which may call a function,
 		// possibly this very one) cannot clobber it.
-		const value = argument.get().materialize();
+		const value = (slice || conditionalHandle) ? null : argument.get().materialize();
 		/*
 		An array handed to a parameter that takes NAMES: store the NAME of every
 		element (see NameArrayRet). This is what makes an access inside the
@@ -7321,7 +7908,9 @@ export class CodeGenerator extends ASTVisitor {
 			? (this.currentScope?.lookup?.(argNode.name)
 				?? this.semantic?.globalScope?.lookup?.(argNode.name) ?? null)
 			: null;
-		const argIsArray = !!argSymbol && argSymbol.myType?.()?.kind === 'array';
+		const argIsArray = (!!argSymbol && argSymbol.myType?.()?.kind === 'array')
+			|| (slice !== null && !!slotType && slotType.kind === 'array')
+			|| (conditionalHandle && !!slotType && slotType.kind === 'array');
 		/*
 		How an array travels is decided by the SLOT it goes into, not by the call
 		site -- an indirect call has no call-site information at all, since the
@@ -7358,6 +7947,59 @@ export class CodeGenerator extends ASTVisitor {
 
 		if (wantsHandle) {
 			/*
+			A slice: reach the elements through the ROOT's helper and let the
+			packed value carry where the slice starts.
+			*/
+			if (slice) {
+				const length = slice.length;
+				if (paramSymbol) paramSymbol.hasSliceOffset = true;
+				if (slice.kind === 'handle') {
+					return new ArrayHandleRet(glob, slotName, slotType,
+						Number.isFinite(Number(length)) ? Number(length) : 0,
+						[slice.instructions,
+							InstructionBuilder.set(slotName, slice.name)], true);
+				}
+				const handle = ensureArrayHandle(glob, slice.rootView);
+				if (!handle) {
+					throw new InternalGenerationFailure(
+						`Slice of '${slice.rootSymbol?.name ?? 'array'}' cannot be handed `
+						+ `to a function: its root has no handle form`,
+						argNode?.location ?? null);
+				}
+				const instructions = [
+					slice.setup,
+					...(handle.instructions ?? []),
+					...packHandle(glob, slotName, { ...handle, length, offset: slice.offset })
+				];
+				return new ArrayHandleRet(glob, slotName, slotType,
+					Number.isFinite(Number(length)) ? Number(length) : 0,
+					instructions, true);
+			}
+			/*
+			`f(cond ? a[i] : b[j])`: pack each branch's handle and select between
+			them into the slot. The parameter adds the offset exactly when one of
+			the branches carries one.
+			*/
+			if (conditionalHandle) {
+				const tester = this.visitToCondition(argNode.test, false);
+				const consequent = this.packConditionalArrayBranch(argNode.consequent);
+				const alternate = this.packConditionalArrayBranch(argNode.alternate);
+				if (!consequent || !alternate) {
+					throw new InternalGenerationFailure(
+						`Conditional array argument cannot be handed to a function: `
+						+ `a branch has no handle form`, argNode.location);
+				}
+				const hasOffset = consequent.hasOffset || alternate.hasOffset;
+				if (hasOffset && paramSymbol) paramSymbol.hasSliceOffset = true;
+				return new ArrayHandleRet(glob, slotName, slotType, 0, [
+					tester,
+					consequent.instructions,
+					alternate.instructions,
+					InstructionBuilder.selectx(slotName, tester.instructionReturn,
+						consequent.name, alternate.name)
+				], hasOffset);
+			}
+			/*
 			`arrayViewOf` cannot describe a MEMORY array (it has no pointer to
 			build the view from), so one is built from the value that was just
 			materialised -- for an array that value IS its address.
@@ -7384,9 +8026,11 @@ export class CodeGenerator extends ASTVisitor {
 			program, and there is no array behind the value to ask about.
 			*/
 			if (array instanceof ArrayHandleRet) {
+				if (paramSymbol && array.hasOffset === true) paramSymbol.hasSliceOffset = true;
 				return new ArrayHandleRet(glob, slotName, slotType, array.length,
 					[value.instructions, array.instructions,
-						InstructionBuilder.set(slotName, array.name)]);
+						InstructionBuilder.set(slotName, array.name)],
+					array.hasOffset === true);
 			}
 
 			const handle = array ? ensureArrayHandle(glob, array) : null;
@@ -7409,7 +8053,8 @@ export class CodeGenerator extends ASTVisitor {
 			const length = arrayLengthOfType(slotType) || array.length || 0;
 			const instructions = [value.instructions, handle.instructions,
 				packHandle(glob, slotName, { ...handle, length })];
-			return new ArrayHandleRet(glob, slotName, slotType, length, instructions);
+			return new ArrayHandleRet(glob, slotName, slotType, length, instructions,
+				array.hasOffset === true);
 		}
 		/*
 		An indirect call whose slot expects a POINTER: a memory array has one, so
@@ -7589,6 +8234,11 @@ export class CodeGenerator extends ASTVisitor {
 			];
 			return new IntRet(glob, instrs, tn, this.semantic.getTypeInfo('int'), true);
 		}
+		const sliceLenof = node.getAttribute?.('lenofOfSlice') ?? null;
+		if (sliceLenof) {
+			const ret = this.emitSliceLength(sliceLenof);
+			if (ret) return ret;
+		}
 		const callee = this.resolveCallee(node);
 		let result = new Instruction();
 		// Warning: function pointer does NOT care about this
@@ -7600,13 +8250,37 @@ export class CodeGenerator extends ASTVisitor {
 		for (let i = 0; i < callee.type.parameters.length && i < node.arguments.length; i++) {
 			const slot = this.parameterSlot(i, callee.symbol, callee.type, callee.isFunctionPointer);
 			const argument = node.arguments[i];
-			let value = ExportRet(glob, this.visit(argument), argument.dataType);
-			if (this.semantic.isSameType(slot.type, contentType)) {
-				value = value.convertTo(contentType,
-					contentTypeOf(argument.dataType ? argument.dataType.name : null));
+			/*
+			A slice is not evaluated as an expression: `g[i]` here means "the
+			root's helper plus the start offset", and the offset is the one part
+			the helper cannot know. Visiting it would compute a row pointer that
+			the handle cannot keep.
+			*/
+			const slotWantsHandle = slot.type?.kind === 'array'
+				&& ((slot.type.qualifiers ?? []).includes('remote')
+					|| (slot.type.pointerTo?.qualifiers ?? []).includes('remote')
+					|| arrayLengthOfType(slot.type) <= 0
+					|| slot.parameter?.arrayParamRep === 'handle');
+			/*
+			`cond ? a : b` is a handle VALUE chosen at run time: the branch
+			cells are packed and `select`ed into the slot. Visiting it as an
+			expression would produce an array of values instead.
+			*/
+			const conditionalHandle = slotWantsHandle
+				&& argument?.type === 'ConditionalExpression'
+				&& argument.dataType?.kind === 'array';
+			const slice = slotWantsHandle && !conditionalHandle
+				? this.sliceInfoOf(argument) : null;
+			let value = null;
+			if (!slice && !conditionalHandle) {
+				value = ExportRet(glob, this.visit(argument), argument.dataType);
+				if (this.semantic.isSameType(slot.type, contentType)) {
+					value = value.convertTo(contentType,
+						contentTypeOf(argument.dataType ? argument.dataType.name : null));
+				}
 			}
 			result.concat(this.deliverArgument(slot.name, slot.type, value,
-				slot.parameter ?? null, argument));
+				slot.parameter ?? null, argument, slice, conditionalHandle));
 		}
 
 		// Pre-call ended. Calling
@@ -7705,7 +8379,13 @@ export class CodeGenerator extends ASTVisitor {
 			}
 			return constant;
 		}
-		const symbol = this.currentScope.lookup(node.name);
+		/*
+		The SCOPE is the first answer, because an inlined body renames its
+		parameters. `node.symbol` is the fallback for the one place the scope
+		stack does not reach: a parameter referenced from a declaration
+		initializer while the containing function's body is being generated.
+		*/
+		const symbol = this.currentScope.lookup(node.name) ?? node.symbol ?? null;
 		if (!symbol) {
 			throw new InternalGenerationFailure(`Unknown identifier ${node.name}`, node);
 		}
@@ -7797,6 +8477,15 @@ export class CodeGenerator extends ASTVisitor {
 				InstructionBuilder.op('shr', tn, handleLen, String(HANDLE_LENGTH_SHIFT)),
 				InstructionBuilder.op('and', tn, tn, String(HANDLE_LENGTH_MASK))
 			], tn, this.semantic.getTypeInfo('int') ?? null, true);
+		}
+		/*
+		`lenof(slice(a, i))`: the semantic pass left the call here because the
+		length is not a compile-time number. Packing the range produces it.
+		*/
+		const sliceLenof = node.getAttribute?.('lenofOfSlice') ?? null;
+		if (sliceLenof) {
+			const ret = this.emitSliceLength(sliceLenof);
+			if (ret) return ret;
 		}
 
 		/**
@@ -8555,6 +9244,16 @@ export class CodeGenerator extends ASTVisitor {
 			*/
 			veccpy: ast => {
 				return this.emitVecCopy(ast);
+			},
+			/*
+			`slice(x, start[, end])` in a position that wants the VALUE: pack
+			the view into one temporary and let the caller treat it as a handle.
+			The contexts that only need the description (`int h[] = ...`,
+			assignment, argument delivery, `cond ? ... : ...`) take the
+			`sliceInfoOf` path and never get here.
+			*/
+			slice: ast => {
+				return this.emitSliceValue(ast);
 			}
 		};
 

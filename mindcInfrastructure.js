@@ -1329,19 +1329,28 @@ export class PointerRet extends VariableRet {
 			within it is just an offset addition -- no block-chain walk and no
 			`getlink`.
 			*/
-			return new RefPointerRet(glob, [
+			const result = new RefPointerRet(glob, [
 				this.instructions,
 				InstructionBuilder.set(`${target}_block`, `${this.name}_block`),
 				InstructionBuilder.set(`${target}_pos`, `${this.name}_pos`),
 				InstructionBuilder.op('add', `${target}_pos`, `${target}_pos`, step)
 			], target, this.type, true, this.buildingAlias, true);
+			result.setAttribute('isNearPointer', true);
+			return result;
 		}
-		return new RefPointerRet(glob, [
+		const result = new RefPointerRet(glob, [
 			this.instructions,
 			InstructionBuilder.set(`${target}_block`, `${this.name}_block`),
 			InstructionBuilder.set(`${target}_pos`, `${this.name}_pos`),
 			pointerStep(glob, target, step, this.isNear, backward)
 		], target, this.type, true, this.buildingAlias);
+		/*
+		`near` is a property of WHERE this pointer points, so every stepped
+		copy inherits it. Losing it here made a second offset on a near array
+		or struct member walk the block chain again.
+		*/
+		result.setAttribute('isNearPointer', this.isNear === true);
+		return result;
 	}
 
 	address() {
@@ -1484,14 +1493,18 @@ export class MemPointerRet extends PointerRet {
 		const target = glob.tmp(this.type, 'pointer');
 		if (isSharedPointerType(this.type)) {
 			const id = glob.tmp(glob.semantic.getTypeInfo('int'));
-			return new RefPointerRet(glob,
+			const result = new RefPointerRet(glob,
 				[this.instructions, referenceRead(glob, this, target, 2),
 					InstructionBuilder.set(id.name ?? id, `${target}_block`),
 					stableIdToBuilding(glob, id.name ?? id, `${target}_block`)],
 				target, this.type, true, null, true);
+			result.setAttribute('isNearPointer', this.isNear === true);
+			return result;
 		}
-		return new RefPointerRet(glob,
+		const result = new RefPointerRet(glob,
 			[this.instructions, referenceRead(glob, this, target, 2)], target, this.type, true);
+		result.setAttribute('isNearPointer', this.isNear === true);
+		return result;
 	}
 
 	/**
@@ -5107,6 +5120,22 @@ function handleShapeOf(array) {
 		return { length: array.length, device: '@this', names, dynamic: false };
 	}
 	/*
+	A CONSTANT table -- `array("encoded")`, `array("packed")`, or a formula
+	array. The values are known at compile time, so a handle can read an
+	element by selecting the literal. There is nowhere to write: these layouts
+	have no cells, which is why the shape is marked read-only and no set helper
+	is built.
+	*/
+	if (Array.isArray(array.values)) {
+		return {
+			length: array.length,
+			device: '@this',
+			names: array.values.map(value => String(value)),
+			dynamic: false,
+			readonly: true
+		};
+	}
+	/*
 	A MEMORY array has no element NAMES, but it does have an address -- and an
 	address is enough: the helper computes `base + i * size`, turns the block
 	number into the building and reads through it. No `select` chain is needed,
@@ -5118,12 +5147,29 @@ function handleShapeOf(array) {
 	if (array instanceof TraditionalArrayRet) {
 		const pointer = array.pointer ?? null;
 		if (!pointer) return null;
+		/*
+		`getlink` and `__pointerForward` both want the NUMERIC block id. A
+		fixed array may keep the building itself in `_block`, which is useful
+		for direct read/write but is not a link index.
+		*/
+		let block = `${pointer.name}_block`;
+		try {
+			block = pointer.storageBlockName?.() ?? block;
+		} catch (e) {
+			// A shared pointer has no serialisable block here; keep the register.
+		}
 		return {
 			length: array.length,
 			kind: 'memory',
-			block: pointer.blockOperand?.() ?? `${pointer.name}_block`,
+			block,
 			pos: `${pointer.name}_pos`,
 			size: array.elementSize ?? 1,
+			/*
+			A near array fits entirely inside one block, so its helper can add
+			the offset directly. Any other memory array has to walk the block
+			chain, exactly as `arr[i]` does.
+			*/
+			near: pointer.isNear === true,
 			names: [], dynamic: false
 		};
 	}
@@ -5157,16 +5203,32 @@ function handleShapeOf(array) {
  * @param {ArrayRet} array
  * @returns {{instructions: any[], get: string?, set: string?}?}
  *          null when this array cannot be described by a handle at all
+ *
+ *          A constant table's ret name is generic (`__encoded`), so each
+ *          instance gets an id of its own for the helper key.
  */
+const constantArrayHandleIds = new WeakMap();
+let constantArrayHandleIdCounter = 0;
+
 export function ensureArrayHandle(glob, array) {
 	const shape = handleShapeOf(array);
 	if (!shape || shape.length <= 0) return null;
 	const reg = glob?.funcReg;
 	if (!reg) return null;
+	/*
+	A constant table's ret has a generic name (`__encoded`), so two different
+	tables would share one helper -- and the helper is built from the first
+	one's values. Give each instance its own key.
+	*/
+	if (!constantArrayHandleIds.has(array)) {
+		constantArrayHandleIds.set(array, ++constantArrayHandleIdCounter);
+	}
 	const keyOf = kind => {
 		const suffix = shape.kind === 'lookup'
 			? `${shape.category}_${String(shape.device).replace(/[^A-Za-z0-9_]/g, '_')}`
-			: String(array.name).replace(/[^A-Za-z0-9_]/g, '_');
+			: shape.readonly === true
+				? `const${constantArrayHandleIds.get(array)}`
+				: String(array.name).replace(/[^A-Za-z0-9_]/g, '_');
 		return `__arr${kind}_${suffix}`;
 	};
 	const build = kind => {
@@ -5186,17 +5248,42 @@ export function ensureArrayHandle(glob, array) {
 		because only there is the offset known.
 		*/
 		if (shape.kind === 'memory') {
+			/*
+			The offset is the same either way: element `__arridx` is
+			`__arridx * size` cells past the base. How the address is formed
+			depends on whether the array can cross a block boundary.
+			*/
 			if (shape.size > 1) {
-				body.concat(InstructionBuilder.op('mul', '__arrsel', '__arridx', shape.size));
-				body.concat(InstructionBuilder.op('add', '__arrsel', shape.pos, '__arrsel'));
+				body.concat(InstructionBuilder.op('mul', '__arrstep', '__arridx', shape.size));
 			} else {
-				body.concat(InstructionBuilder.op('add', '__arrsel', shape.pos, '__arridx'));
+				body.concat(InstructionBuilder.set('__arrstep', '__arridx'));
 			}
-			body.concat(InstructionBuilder.getlink('__arrblk', shape.block));
-			if (kind === 'get') {
-				body.concat(InstructionBuilder.read('__arrret', '__arrblk', '__arrsel'));
+			let blockRegister = '__arrblk';
+			let posRegister = '__arrsel';
+			if (shape.near === true) {
+				body.concat(InstructionBuilder.op('add', '__arrsel', shape.pos, '__arrstep'));
+				body.concat(InstructionBuilder.getlink('__arrblk', shape.block));
 			} else {
-				body.concat(InstructionBuilder.write('__arrval', '__arrblk', '__arrsel'));
+				/*
+				A memory array may span blocks. Reuse the same walker ordinary
+				pointer arithmetic uses; doing `base + index * size` here read
+				past the end of the first block. `__ptrblock` comes back as a
+				link id, so it still has to be turned into the building.
+				*/
+				body.concat(InstructionBuilder.set('__arrsel', shape.pos));
+				body.concat(InstructionBuilder.set('__arrblk', shape.block));
+				body.concat(reg.getFunctionCall('__pointerForward', new Map([
+					['__ptrpos', '__arrsel'],
+					['__ptrblock', '__arrblk'],
+					['__step', '__arrstep']
+				]), null));
+				body.concat(InstructionBuilder.getlink('__arrblk', '__ptrblock'));
+				posRegister = '__ptrpos';
+			}
+			if (kind === 'get') {
+				body.concat(InstructionBuilder.read('__arrret', blockRegister, posRegister));
+			} else {
+				body.concat(InstructionBuilder.write('__arrval', blockRegister, posRegister));
 			}
 			reg.addFunction(key, body, null, [], true, false, true);
 			reg.functionCollection.get(key).calls++;
@@ -5258,7 +5345,12 @@ export function ensureArrayHandle(glob, array) {
 	return {
 		instructions: array.instructions ?? [],
 		get: helperAddressOf(build('get')),
-		set: helperAddressOf(build('set')),
+		/*
+		A constant table has no cells, so there is no set helper to pack. The
+		semantic pass refuses every write to a read-only handle; `packHandle`
+		leaves the set field at 0.
+		*/
+		set: shape.readonly === true ? null : helperAddressOf(build('set')),
 		length: shape.length ?? 0,
 		size: shape.size ?? 1
 	};
@@ -5284,40 +5376,60 @@ export const HANDLE_MASK = (1 << HANDLE_FIELD_BITS) - 1;	// 4095
 export const HANDLE_LENGTH_BITS = 16;
 export const HANDLE_LENGTH_MASK = (1 << HANDLE_LENGTH_BITS) - 1;	// 65535
 export const HANDLE_LENGTH_SHIFT = HANDLE_FIELD_BITS * 2;	// 24
-export const HANDLE_SIZE_SHIFT = HANDLE_LENGTH_SHIFT + HANDLE_LENGTH_BITS;	// 40
+/*
+The fourth field used to be the element size. Nothing ever read it: the get
+and set helpers bake the stride of their array into their own body, and
+`sizeof` of a handle is 1 whatever it points at. It now carries the SLICE
+OFFSET -- the flat element index the handle starts at -- which is the one
+thing a handle cannot ask its helper to remember, because the helper is
+shared by every handle of the same array.
+*/
+export const HANDLE_OFFSET_BITS = 12;
+export const HANDLE_OFFSET_MASK = (1 << HANDLE_OFFSET_BITS) - 1;	// 4095
+export const HANDLE_OFFSET_SHIFT = HANDLE_LENGTH_SHIFT + HANDLE_LENGTH_BITS;	// 40
 
-/** The constant `len << 24 | size << 40`, folded at compile time. */
-export function handleTailOf(length = 0, size = 1) {
+/** The constant `len << 24 | offset << 40`, folded at compile time. */
+export function handleTailOf(length = 0, offset = 0) {
 	const elementCount = Math.trunc(Number(length) || 0);
-	const elementSize = Math.trunc(Number(size) || 0);
+	const elementOffset = Math.trunc(Number(offset) || 0);
 	if (elementCount < 0 || elementCount > HANDLE_LENGTH_MASK) {
 		throw new Error(
 			`array handle length ${elementCount} exceeds the ${HANDLE_LENGTH_MASK}-element field`);
 	}
-	if (elementSize < 0 || elementSize > HANDLE_MASK) {
+	if (elementOffset < 0 || elementOffset > HANDLE_OFFSET_MASK) {
 		throw new Error(
-			`array handle element size ${elementSize} exceeds the ${HANDLE_MASK}-cell field`);
+			`array handle slice offset ${elementOffset} exceeds the `
+			+ `${HANDLE_OFFSET_MASK}-element field`);
 	}
 	/*
 	NOT `<<`: JavaScript's shift truncates to 32 bits, so `1 << 40` came out
-	as ... -- the size field silently landed on top of other fields. BigInt
+	as ... -- the offset field silently landed on top of other fields. BigInt
 	keeps the full width, which is what the machine's own 64-bit numbers do.
 	*/
 	return Number((BigInt(elementCount) << BigInt(HANDLE_LENGTH_SHIFT))
-		| (BigInt(elementSize) << BigInt(HANDLE_SIZE_SHIFT)));
+		| (BigInt(elementOffset) << BigInt(HANDLE_OFFSET_SHIFT)));
 }
 
 /**
  * Instructions that build the packed handle in `target`.
  *
+ * `length` and `offset` are either compile-time numbers or register names.
+ * The constant parts are folded into one literal; a runtime part costs a
+ * shift and an OR. A handle built from a slice (`g[i]`) needs the runtime
+ * form; everything else stays three instructions.
+ *
  * @param {Globals} glob
  * @param {string} target the register to hold the handle
- * @param {{get: string, set: string?, length: number, size: number}} handle
+ * @param {{get: string, set: string?, length: number|string, offset?: number|string}} handle
  * @returns {any[]}
  */
 export function packHandle(glob, target, handle) {
 	const out = [];
-	const tail = handleTailOf(handle.length, handle.size);
+	const isConstant = value => value === null || value === undefined
+		|| typeof value === 'number' || (typeof value === 'string' && Number.isFinite(Number(value)));
+	const constantLength = isConstant(handle.length) ? Number(handle.length) || 0 : null;
+	const constantOffset = isConstant(handle.offset ?? 0) ? Number(handle.offset ?? 0) || 0 : null;
+	const tail = handleTailOf(constantLength ?? 0, constantOffset ?? 0);
 	/*
 	The get helper is already in the low bits, so it is copied straight in; the
 	set helper is shifted up. The two constant fields are OR'd in as one
@@ -5331,6 +5443,77 @@ export function packHandle(glob, target, handle) {
 		out.push(InstructionBuilder.op('or', target, target, name));
 	}
 	if (tail) out.push(InstructionBuilder.op('or', target, target, String(tail)));
+	if (constantLength === null) {
+		const shifted = glob?.tmp?.(null, 'handle') ?? `${target}__len`;
+		const name = typeof shifted === 'string' ? shifted : nameOf(shifted);
+		out.push(InstructionBuilder.op('shl', name, String(handle.length),
+			String(HANDLE_LENGTH_SHIFT)));
+		out.push(InstructionBuilder.op('or', target, target, name));
+	}
+	if (constantOffset === null) {
+		const shifted = glob?.tmp?.(null, 'handle') ?? `${target}__off`;
+		const name = typeof shifted === 'string' ? shifted : nameOf(shifted);
+		out.push(InstructionBuilder.op('shl', name, String(handle.offset),
+			String(HANDLE_OFFSET_SHIFT)));
+		out.push(InstructionBuilder.op('or', target, target, name));
+	}
+	return out;
+}
+
+/**
+ * Instructions that build, in `target`, a handle that is a sub-range of the
+ * handle already packed in `source`.
+ *
+ * A slice of a slice cannot go back to the ROOT: the packed value is all there
+ * is, and its helper may belong to an array this program only knows through a
+ * parameter. The two fields the new view needs are therefore read out of the
+ * packed value and written back:
+ *
+ *     offset' = offset(source) + start
+ *     length' = (end ?? length(source)) - start
+ *
+ * The get / set entry points (the low 24 bits) travel unchanged. `start` and
+ * `end` are numbers or register names; `end === null` means "to the end".
+ *
+ * @param {Globals} glob
+ * @param {string} target
+ * @param {string} source register holding the packed handle
+ * @param {number|string} start
+ * @param {number|string|null} [end=null]
+ * @returns {any[]}
+ */
+export function resliceHandle(glob, target, source, start, end = null) {
+	const out = [];
+	const scratch = suffix => {
+		const tmp = glob?.tmp?.(null, 'handle');
+		return tmp ? nameOf(tmp) : `${target}__${suffix}`;
+	};
+	const base = scratch('base');
+	const offset = scratch('off');
+	const length = scratch('len');
+	const asOperand = value => typeof value === 'string' ? value : String(value);
+	out.push(InstructionBuilder.op('and', base, source,
+		String((1 << HANDLE_LENGTH_SHIFT) - 1)));
+	out.push(InstructionBuilder.op('shr', offset, source, String(HANDLE_OFFSET_SHIFT)));
+	out.push(InstructionBuilder.op('and', offset, offset, String(HANDLE_OFFSET_MASK)));
+	out.push(InstructionBuilder.op('add', offset, offset, asOperand(start)));
+	if (end !== null) {
+		out.push(InstructionBuilder.op('sub', length, asOperand(end), asOperand(start)));
+	} else {
+		out.push(InstructionBuilder.op('shr', length, source, String(HANDLE_LENGTH_SHIFT)));
+		out.push(InstructionBuilder.op('and', length, length, String(HANDLE_LENGTH_MASK)));
+		out.push(InstructionBuilder.op('sub', length, length, asOperand(start)));
+	}
+	/*
+	A run-time start can be past the end. The compiler does not check that (it
+	is a program error, like an out-of-range subscript), but a negative length
+	would corrupt every field shifted next to it, so clamp it.
+	*/
+	out.push(InstructionBuilder.op('max', length, length, '0'));
+	out.push(InstructionBuilder.op('shl', length, length, String(HANDLE_LENGTH_SHIFT)));
+	out.push(InstructionBuilder.op('or', base, base, length));
+	out.push(InstructionBuilder.op('shl', offset, offset, String(HANDLE_OFFSET_SHIFT)));
+	out.push(InstructionBuilder.op('or', target, base, offset));
 	return out;
 }
 
@@ -5348,11 +5531,14 @@ export class ArrayHandleRet extends ArrayRet {
 	 * @param {TypeInfo?} type
 	 * @param {number} length
 	 * @param {any} [instructions=[]]
+	 * @param {boolean} [hasOffset=false] Whether the packed value carries a
+	 *        slice offset the element access must add to the index.
 	 */
-	constructor(glob, baseName, type, length, instructions = []) {
+	constructor(glob, baseName, type, length, instructions = [], hasOffset = false) {
 		super(glob, instructions, baseName, type, false, length);
 		this.setAttribute('isArrayHandle', true);
 		this.setAttribute('disallowReplacement', true);
+		this.hasOffset = hasOffset === true;
 	}
 
 	/*
@@ -5361,7 +5547,7 @@ export class ArrayHandleRet extends ArrayRet {
 	    bits  0..11  the get helper's line number
 	    bits 12..23  the set helper's line number
 	    bits 24..39  lenof, i.e. the element count
-	    bits 40..51  sizeof, i.e. the size of one element
+	    bits 40..51  the slice offset, i.e. the flat element index it starts at
 
 	Two registers would be simpler, but a function pointer carries its
 	arguments in fixed `__param_N` slots and cannot know anything about the
@@ -5386,7 +5572,26 @@ export class ArrayHandleRet extends ArrayRet {
 	 * @returns {VariableRet}
 	 */
 	element(index) {
-		return new ArrayHandleSlotRet(this.glob, this, operandOf(this.glob, index));
+		const operand = operandOf(this.glob, index);
+		/*
+		A handle that is a VALUE (`slice(a, 1, 4)`) carries the instructions
+		that BUILD the packed cell. They have to run before the element is
+		asked for; the cell is a temporary, so every access to the view needs
+		them.
+		*/
+		/*
+		`instructions` may be an `Instruction` or the bare list an array
+		value carries; a view built by `slice(...)` uses the latter.
+		*/
+		const build = this.instructions?.isInstructionGroup
+			? this.instructions : (this.instructions ?? []);
+		if ((build.instructions ?? build).length > 0) {
+			const merged = new Instruction();
+			merged.concat(build);
+			merged.concat(operand.instructions);
+			operand.instructions = merged;
+		}
+		return new ArrayHandleSlotRet(this.glob, this, operand);
 	}
 
 	/*
@@ -5419,8 +5624,38 @@ class ArrayHandleSlotRet extends VariableRet {
 		super(glob, operand.instructions, array.name, array.elementTypeInfo, false);
 		this.array = array;
 		this.operand = operand;
+		this.hasOffset = array.hasOffset === true;
 		this.packed = packedStructLookupCompatible(array.elementTypeInfo);
 		if (this.packed) this.setAttribute('isPackedStructSlot', true);
+	}
+
+	/**
+	 * The value to pass as `__arridx`.
+	 *
+	 * A handle built from a slice carries the flat element index it starts at
+	 * in its top 12 bits. The helper is shared by every handle of the same
+	 * array, so it cannot bake that in: the caller adds it before the call.
+	 * Ordinary handles carry 0 and pay nothing.
+	 *
+	 * @returns {{name: string, instructions: any[]}}
+	 */
+	indexOperand() {
+		if (!this.hasOffset) return { name: this.operand.name, instructions: [] };
+		const glob = this.glob;
+		const offset = glob.tmp(null, 'handle');
+		const offsetName = nameOf(offset);
+		const index = glob.tmp(null, 'handle');
+		const indexName = nameOf(index);
+		return {
+			instructions: [
+				InstructionBuilder.op('shr', offsetName, this.array.name,
+					String(HANDLE_OFFSET_SHIFT)),
+				InstructionBuilder.op('and', offsetName, offsetName,
+					String(HANDLE_OFFSET_MASK)),
+				InstructionBuilder.op('add', indexName, this.operand.name, offsetName)
+			],
+			name: indexName
+		};
 	}
 
 	packedRef() {
@@ -5434,20 +5669,24 @@ class ArrayHandleSlotRet extends VariableRet {
 		const target = glob.tmp(type ?? glob.semantic.getTypeInfo('int'));
 		const tn = nameOf(target);
 		const got = this.extractGet();
+		const index = this.indexOperand();
 		const call = glob.funcReg.getRawFunctionCall(got.name,
-			new Map([['__arridx', this.operand.name]]), false, null);
+			new Map([['__arridx', index.name]]), false, null);
 		return new BasicRet(glob, [
-			this.instructions, got.instruction, call, InstructionBuilder.set(tn, '__arrret')
+			this.instructions, index.instructions, got.instruction, call,
+			InstructionBuilder.set(tn, '__arrret')
 		], tn, type ?? glob.semantic.getTypeInfo('int'), true);
 	}
 
 	rawSet(value, type = null) {
 		const glob = this.glob;
 		const got = this.extractSet();
+		const index = this.indexOperand();
 		const call = glob.funcReg.getRawFunctionCall(got.name,
-			new Map([['__arridx', this.operand.name], ['__arrval', value.name]]), false, null);
-		return new BasicRet(glob, [this.instructions, got.instructions, value.instructions, call],
-			value.name, type ?? glob.semantic.getTypeInfo('int'), false);
+			new Map([['__arridx', index.name], ['__arrval', value.name]]), false, null);
+		return new BasicRet(glob, [
+			this.instructions, index.instructions, got.instructions, value.instructions, call
+		], value.name, type ?? glob.semantic.getTypeInfo('int'), false);
 	}
 
 	/** `op and <tmp> <handle> 4095` -- the get helper sits in the low bits. */
@@ -5481,10 +5720,12 @@ class ArrayHandleSlotRet extends VariableRet {
 		function does not know which array it was handed.
 		*/
 		const got = this.extractGet();
+		const index = this.indexOperand();
 		const call = glob.funcReg.getRawFunctionCall(got.name,
-			new Map([['__arridx', this.operand.name]]), false, null);
+			new Map([['__arridx', index.name]]), false, null);
 		const instructions = [
-			this.instructions, got.instruction, call, InstructionBuilder.set(tn, '__arrret')
+			this.instructions, index.instructions, got.instruction, call,
+			InstructionBuilder.set(tn, '__arrret')
 		];
 		if (isNamePointerType(this.type)) {
 			return new NamePointerRet(glob, instructions, tn, this.type, true);
@@ -5500,9 +5741,12 @@ class ArrayHandleSlotRet extends VariableRet {
 		const value = isNamePointerType(this.type)
 			? rawValue : rawValue.convertTo(this.type ?? other.type);
 		const got = this.extractSet();
+		const index = this.indexOperand();
 		const call = glob.funcReg.getRawFunctionCall(got.name,
-			new Map([['__arridx', this.operand.name], ['__arrval', value.name]]), false, null);
-		const instructions = [this.instructions, got.instructions, value.instructions, call];
+			new Map([['__arridx', index.name], ['__arrval', value.name]]), false, null);
+		const instructions = [
+			this.instructions, index.instructions, got.instructions, value.instructions, call
+		];
 		if (isNamePointerType(this.type)) {
 			return new NamePointerRet(glob, instructions, value.name, this.type, false);
 		}

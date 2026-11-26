@@ -13,9 +13,9 @@
 
 | 命令（从 `testers/unit_tests` 执行） | 读哪个目录 | 当前结果 | 判定标准 |
 |---|---|---|---|
-| `node ..\tools\check.mjs` | `check/` | **304 passed, 0 failed**（235 shape assertions, 1346 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
-| `node ..\tools\negative.mjs` | `negative/` | **114 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
-| `node ..\tools\nomem.mjs` | `nomem/` | **16 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
+| `node ..\tools\check.mjs` | `check/` | **321 passed, 0 failed**（250 shape assertions, 1431 pragma-invariance runs） | 编译后在模拟器里真跑一遍，输出逐行比对 |
+| `node ..\tools\negative.mjs` | `negative/` | **125 passed, 0 failed** | 必须编译失败，**且给出说得清的理由** |
+| `node ..\tools\nomem.mjs` | `nomem/` | **18 passed, 0 failed** | 不链接任何内存块时仍能正确工作 |
 | `node ..\tools\loadorder.mjs` | 仓库根的 `mindc*.js` | **14 passed, 0 failed, 2 exempt** | 每个入口单独起一个 `node` 进程导入，不得有循环依赖 |
 | `node ..\tools\runall.mjs` | 14 个目录：`suite/` `mem/` `arr/` `arr2/` `ptr2/` `stack/` `tests/` `uc/` `cases/` `exttests/` `hdr/` `t/` `big/` `u/` | **267/275**（8 个已知坏例以 KNOWN-GAP 如实上报，不算失败） | 能编译、能跑完不崩；带 `EXPECT:` 的还比对输出 |
 
@@ -76,13 +76,13 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 
 ## 目录地图
 
-`testers/unit_tests/` 下共 **721 个 `.c`，全部有 runner**（304 + 12 + 114 + 16 + 275 = 721）：
+`testers/unit_tests/` 下共 **751 个 `.c`，全部有 runner**（321 + 12 + 125 + 18 + 275 = 751）：
 
 | 目录 | 文件数 | 谁来跑 |
 |---|---|---|
-| `check/` | 304 | `check.mjs`（同时驱动 `check/peers/` 的 12 个对端，见下文） |
+| `check/` | 321 | `check.mjs`（同时驱动 `check/peers/` 的 12 个对端，见下文） |
 | `t/` | 98 | `runall.mjs`（早期按主题分的用例，`2dc683e` 起纳入） |
-| `negative/` | 114 | `negative.mjs` |
+| `negative/` | 125 | `negative.mjs` |
 | `suite/` | 50 | `runall.mjs` |
 | `mem/` | 25 | `runall.mjs` |
 | `tests/` | 25 | `runall.mjs`（另有手工的 `batch.mjs [baseline]`） |
@@ -92,7 +92,7 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 | `arr2/` | 11 | `runall.mjs` |
 | `peers/` | 12 | 不是独立用例：由 `check.mjs` 代它们的属主跑 |
 | `big/` | 8 | `runall.mjs` |
-| `nomem/` | 16 | `nomem.mjs` |
+| `nomem/` | 18 | `nomem.mjs` |
 | `u/` | 6 | `runall.mjs` |
 | `exttests/` | 4 | `runall.mjs` |
 | `cases/` | 3 | `runall.mjs` |
@@ -104,7 +104,7 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 
 ## check/ 的编号约定
 
-`check/` 用 `tNN_主题.c` 命名，**编号 1–291 已用满，没有空号**，下一个用例是 `t292`。
+`check/` 用 `tNN_主题.c` 命名，**编号 1–308 已用满，没有空号**，下一个用例是 `t309`。
 另有 13 个不带编号的（`m1`–`m3`、`n1`–`n2`、`rw1`–`rw2`、`seq1`、`memsp2`–`memsp3`），
 它们早于编号制，保留原名。
 
@@ -266,6 +266,23 @@ t214、t216 和 t221 声明 `NO-INVARIANT`：它们固定用 148 编译，而 `p
 | `t256` | **§7.47**：`packed.h` 访问 lookup 数组——一个 content 名字对应 6 个 8-bit 值；输出 `200 -56` |
 | `t257` | **§7.48**：推荐的 remote 绑定——字符串目标 + layout，不生成 `r_0` 本地元素符号；输出 `7 7` |
 | `t258` | **§7.48**：同名 remote 绑定用真实其他设备——自动 `g:.safety_data`，不生成 `safety_data_0`；输出 `0` |
+| `t292` | **优化器**：`int b = a++;` / `++a` / `a--` 的增量值必须被使用；全局与局部初始化器都覆盖；输出 `6 5 6 5 6 6 4 5` |
+| `t293` | **条件 handle**：`int h[] = cond ? a : b;`、不同长度、运行时 `lenof`、`sizeof(h) == 1`、handle 给 handle 声明复制、handle 之间的条件选择、具体数组与 handle 混用、重新绑定；输出 `1 5 1 42 6 3 1 2 1 6 3 1 5 42 8 2 1` |
+| `t294` | **跨块 memory handle**：`int a[70]` 跨 bank1/bank2，经 handle 读写第 65/68 个元素；输出 `65 42` |
+| `t295` | **near 成员直接偏移**：`near struct` 的数组成员用运行时下标时不得调用 `__pointerForward`，`EMIT-NOT` 钉住；输出 `1 2 7` |
+| `t296` | **memory 切片**：`g[i]` 取一维/多维展平、`&a[i]`/`a + i` 取到结尾、运行时起点、条件切片、复制后重新绑定仍保持起点、切片作为数组参数；`op shr … 40` 钉住起点解包；输出 `4 3 9 1 3 40 4 30 9 3 9 1 3 9 2 50 3 1 12 9` |
+| `t297` | **只读 handle**：encoded 参与条件选择生成只读句柄，读/`lenof`/`sizeof` 正常，`const` 别名保持数组长度；输出 `4 3 1 1 3 7 3 4 3 1 3`（写入/`veccpy`/`vecalias`/传给可写参数见 negatives） |
+| `t298` | **`slice()` 内建**：`slice(a,1,4)` 闭区间、运行时起点、省略终点到结尾、条件视图、`vecalias`、数组参数、`slice(...)[i]` 直接下标、`lenof`/`sizeof` 折叠；别名根上的写入必须落到真实数组（防常量表化）；输出 `3 20 40 99 3 99 3 40 3 20 3 99 3 99 20 3 7` |
+| `t299` | **embedded 切片**：`e[i]` 取行、`slice(e,1,4)` 区间、经视图写入寄存器、运行时行下标、作为数组参数、条件行；`&e[i]`/`e + i` 见 negatives；输出 `3 4 40 3 20 99 3 40 3 1 3 40 3 1` |
+| `t300` | **优化器**：未被调用的 `inline` 函数不得生成（`main` 不调用任何函数、调用图为空时也一样）；`EMIT-NOT: _unused_inline_helper`；输出 `1` |
+| `t301` | **优化器**：调用图为空时，未调用的普通函数同样要被删除；`EMIT-NOT: _unused_plain_helper`；输出 `1` |
+| `t302` | **优化器/逻辑值**：`&&`/`||` 的常量折叠结果必须是 0/1（`1 && 5` 为 1、`0 \|\| 5` 为 1），运行时分支同样归一化；输出 `1 1 1 1 0 0 0 1 1 1 1 0` |
+| `t303` | **优化器/短路副作用**：`0 && (x=7)`、`1 \|\| (x=11)` 不执行右侧，`1 && (x=5)`、`0 \|\| (x=9)` 执行右侧，`(x=13) && 0`、`(x=15) \|\| 1` 保留左侧赋值；输出 `5 1 5 0 9 1 9 1 13 0 15 1` |
+| `t304` | **优化器/编译期条件**：`0 && @tick`、`1 \|\| @tick` 在编译期决定，生成的代码里不得出现 `@tick`；`EMIT-NOT: @tick`；输出 `2` |
+| `t305` | **优化器/三元**：`&&`/`\|\|` 作为 `?:` 的条件不再让生成器崩溃；选中分支的副作用保留（`(a<b) ? (a=7) : 9`）；输出 `42 42 0 7 7` |
+| `t306` | **优化器/循环短路条件**：`i<5 && sum<100`、`!(j>=5)`、`k<3 \|\| u==99` 都能在编译期算完；`EMIT-NOT: op lessThan`；输出 `10 5 10 5 3 3` |
+| `t307` | **优化器/累加器赋值**：`sum = sum + i` 与 `sum += i` 一样完全折叠，while/for/do-while 三种形式都覆盖；`EMIT-NOT: op lessThan`；输出 `10 5 10 10 5` |
+| `t308` | **优化器/综合管道**：确定性循环 → 逻辑判断 → 三元选择 → 第二个循环，逐级常量传播；`EMIT: print 39`、`EMIT-NOT: op lessThan`；输出 `39 1 40 39` |
 
 设计背景见 `docs/PLAN_array_layout.md`。
 

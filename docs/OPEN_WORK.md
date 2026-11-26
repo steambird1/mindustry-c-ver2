@@ -114,6 +114,7 @@ open. What remains is the known gaps recorded in §6 and `testers/INFO.md`.
 | qualifier/type matrix (§7.57) | **done**; shared scalar/array decay, aggregate pointer members, and aggregate array elements keep their fixed-storage building, including dynamic indices | §7.57 |
 | unified byname name packets (§7.58) | **partial**; register structs (flat or nested, including device/string_t), ordinary/shared pointer members and `byname` pointer members use name packets, arrays still rejected | §7.58 |
 | C99 VLA (§7.59) | **partial**; parameter and recursive function-scope VLAs, `[*]` prototype parameters, function-scope VLA typedefs, multidimensional runtime strides, runtime stack allocation, runtime `sizeof`/`lenof`; block/loop VLAs and inner `[*]` remain out of scope | §7.59 |
+| slice views (§7.60) | **done**; `g[i]` for memory and embedded, `slice(x,start[,end])` intrinsic, handle reslicing, direct subscripts, read-only propagation; `&a[i]`/`a+i` remain memory-only; tests t298/t299 + 8 negatives | §7.60 |
 | `m = remote(@this, r)` (§6) | **done** �?`be3aeb8`, `negative/remote_as_value_refused.c`; `remote()` is a binding form and is refused as a value | §7.3, §6 |
 | §4 harness debt | **closed** — `2dc683e` fixed the roots; §4.4's note was stale | §4 |
 
@@ -1822,8 +1823,10 @@ called `f` even when `a` was false.
   1D flat parameter is the total element count; a fixed multidimensional
   parameter still answers its outermost dimension.
 - The handle length field grew from 12 to 16 bits by reallocating the 52-bit
-  cell: get/set remain 12 bits each, length is 16 bits (max 65535), element
-  size stays 12 bits (max 4095). `handleTailOf` now refuses field overflow
+  cell: get/set remain 12 bits each, length is 16 bits (max 65535). The fourth
+  12-bit field was the element size, which nothing ever read (the helper bakes
+  its own stride); it now carries the SLICE START OFFSET, so a view of a memory
+  array can reuse the root's helper. `handleTailOf` refuses field overflow
   instead of silently corrupting neighbouring fields.
 - Encoded arrays remain constant tables and do not travel as writable handles.
   Multidimensional `remote()` arrays are covered separately in §7.35.
@@ -2454,3 +2457,141 @@ check that no internal compiler error is reported.
   typedefs share the same function-scope restriction (negative/
   vla_typedef_global.c). Inner `[*]`, VLA typedefs in nested blocks, pointer-to-
   VLA arithmetic and call-site bound evaluation remain out of scope.
+
+### 7.60 Slice views: `g[i]`, `&a[i]`, `slice()`
+
+- A slice is a VIEW of an element sequence, not an address. The handle packs
+  the root's get/set helper entry points, the length and the flat start
+  offset (the fourth 12-bit field; see §7.34). Every access adds the offset
+  to the index in `ArrayHandleSlotRet.indexOperand`, so ordinary handles pay
+  nothing and slice handles pay `shr`/`and`/`add`.
+- Three spellings, three meanings:
+  - `g[i]` drops one dimension and flattens the rest (`int[2][3]` → `int[3]`).
+  - `&a[i]` / `a + i` are ADDRESS forms, and only a memory array has one.
+  - `slice(x, start[, end])` is the explicit `[start, end)` range; `end` is
+    exclusive and may be omitted ("to the end").
+- `slice()` is a parser builtin lowered by the generator, not a library call:
+  building a handle needs the helper entry points and the 52-bit packing, so
+  a header could not implement it. It accepts a named array or a handle, and
+  the result is an array value: it can be bound (`int b[] = ...`), assigned to
+  a handle cell, passed to an array parameter, chosen by a conditional, used
+  as a `vecalias` source, tested with `lenof`/`sizeof`, and indexed directly
+  (`slice(a, 1, 4)[i]`).
+- `embedded` arrays can be sliced: their helper is already an
+  index-to-element description (`select`, or `lookup` + `sensor`), so a range
+  is an index bias. The address forms stay refused there (`&e[i]`, `e + i`),
+  with a message pointing at `slice`.
+- A handle source is re-sliced in place: `offset' = offset + start`,
+  `length' = (end ?? length) - start`, with the low 24 bits (the helpers)
+  copied through. `slice(h, i)` therefore composes with an offset `h` already
+  carries. A runtime start is packed at bind time; the result is clamped to a
+  non-negative length.
+- Static bounds fold to one packed literal; a runtime bound costs a `sub`
+  and/or a `shl`/`or`. `lenof` folds when the length is static and emits a
+  length-field read otherwise; `sizeof` of a run-time-length view is the
+  handle's own width (`1`), so bind it first when the cell count is wanted.
+- Read-only (const) sources produce read-only handles, so writes, `veccpy`
+  targets, `vecalias` targets and writable parameters are refused as usual.
+  `encoded` / `lookup` tables and remote arrays are not slice roots.
+- A concrete array has storage of its own, so `int b[3] = slice(...)` and
+  `b = slice(...)` are refused: the spelling is a binding, not a copy. Use
+  `veccpy(b, slice(...))`, which now packs a slice SOURCE before reading its
+  length.
+- The optimizer learns that a sliced root is reachable by a handle
+  (`markArrayReachableByHandle`, following `arrayAliasOf` to the storage
+  owner), so an alias root is not folded into a constant table behind a
+  write. A PARAMETER that the body slices is marked `slicedByBody`, and
+  `canInlineArrayArguments` keeps the real call: inlining would hand the body
+  a block/offset alias while it reads a packed handle. Slice bounds are read
+  from `node.arguments` at codegen, never cached, because constant
+  propagation may replace an argument node.
+- Limits: the start offset is 12 bits (4095 elements); a constant beyond it
+  is refused, a run-time one is not checked. Struct member arrays
+  (`int b[] = s.m;`) and `encoded`/`lookup` roots remain out of scope. The
+  first argument of `slice` must be a name or handle, not a pointer.
+- Cases: t298 (ranges, runtime bounds, handle reslicing, conditional,
+  `vecalias`, direct subscript, alias-root write), t299 (`embedded` rows and
+  ranges, writes through the view, a row at a runtime index, argument and
+  conditional), nomem n17 (embedded views without a memory block). Negatives: `slice_of_remote`, `slice_of_encoded`,
+  `slice_pointer_source`, `slice_bad_bounds`, `slice_into_pointer_param`,
+  `slice_into_concrete_array`, `embedded_address_refused`,
+  `embedded_pointer_arith_refused`.
+
+### 7.61 Uncalled functions are not part of the program
+
+- The name-pointer analysis and the builtin-output pass walk the scope tree,
+  which holds every function body, not only the ones the program can reach.
+  An unused `inline` helper in a header therefore reported requirements the
+  program never had: with no memory block linked, merely including `stdio.h`
+  failed on `puts`'s `char*` parameter.
+- `optimizationPass` now fixes a live set per round
+  (`liveFunctionNames`: `main`, addressed functions, pragma handlers and their
+  transitive callees). Both walks skip a whole function scope subtree when its
+  owner is not in that set. Skipping only the `FunctionDeclaration` node is not
+  enough: the body and its nested blocks are scopes of their own, and
+  `walkScope` reaches them directly.
+- `removeUnusedFunctions` uses the same set. The old "empty call graph means
+  the bodies were not analyzed yet" guard is gone -- when `main` calls nothing,
+  an empty graph is the correct answer -- and `inline` is no longer a reason to
+  keep an uncalled function. A removed function also loses its scope, so later
+  rounds do not collect it again.
+- `protectedHandlerNames` now includes `checkRemote`, and pragma handlers are
+  analyzed as roots so the functions they call stay live. Without that,
+  removing the empty-graph guard deleted `t249`'s `fail()` handler.
+- Effect: including `stdio.h`, `string.h`, `stdlib.h`, `inttypes.h` or
+  `memory.h` no longer changes a program that does not call them (41 lines
+  with memory, the same as no include; no memory requirement without one).
+  Pointers in reachable functions still report as before.
+- Cases: t300 (an uncalled `inline` is not emitted), t301 (an uncalled ordinary
+  function is removed when the call graph is empty), nomem n18 (the standard
+  headers compile with no memory). Full runners: check 314, negative 125,
+  nomem 18, runall 267/275 (same eight known gaps).
+
+### 7.62 Logical folding and compile-time loop conditions
+
+Two classes of optimizer bugs shared one cause: the constant evaluator was
+treated as if evaluating an expression had no effect, and as if `&&` / `||`
+returned an operand.
+
+- **Value.** `evaluateBinaryOperation` returned `left && right` (the operand),
+  so `1 && 5` folded to 5 and `0 || 5` to 5. C yields 0 or 1; the constant
+  result is now normalised, matching the runtime `notEqual` that
+  `emitShortCircuitLogical` already emitted.
+- **Short circuit.** `evaluateConstantExpression` evaluated both sides before
+  applying the operator. It now dispatches `&&` / `||` to
+  `evaluateLogicalExpression`: the left side decides when it can, and the
+  right side is only read when C would read it.
+- **Side effects.** `hasSideEffects` asks whether a loop body is worth keeping
+  and deliberately ignores writes to loop-local variables, so it cannot guard
+  a fold. `hasFoldSideEffects` (assignment, call, `++`/`--`, asm, dereference,
+  volatile read) and `isSafeConstantReplacement` (understands the lazy
+  operators) now gate every
+  fold: `replaceConstantsAt` (whole expression, sub-expressions,
+  declarator/assignment right sides, `if`/`while` tests),
+  `simplifyBinaryExpression`'s identities, and the `if` / `for` / `while`
+  constant-condition pruning. `0 && (x = 5)` still folds (the right side never
+  runs); `(x = 5) && 0` does not (the store would be lost).
+- **`?:`.** A constant test now replaces the conditional with the SELECTED
+  BRANCH EXPRESSION, not its value, so the branch's side effects survive.
+  The v152+ `select` fast path also requires a cheap, pure test: a
+  short-circuit test produces an instruction group, not a comparison, and
+  feeding it to `select` crashed inside `raw_replace_all`.
+- **Loops.** The simulator already evaluated the whole test each round; only
+  the shape recogniser (`identifier op constant`) reached it. A fallback
+  (`tryOptimizeComplexWhileCondition`, reused by `tryOptimizeDoWhile`) accepts
+  any pure condition whose entry value is known and lets the simulation stop
+  itself, so `i < 5 && sum < 100`, `!(i >= 5)` and `k < 3 || u == 99` are
+  computed in full without unrolling. The pre-loop values of every written
+  variable are snapshotted before the body is analysed
+  (`loopInitConstants`), so `sum = sum + i` folds like `sum += i`; the
+  pessimistic write-recording branch no longer erases a value that just
+  folded.
+- A leftover inlining temporary whose scope was removed with its loop is a
+  dead store: when the name is compiler-generated and unreachable, the
+  assignment is dropped (only if evaluating its right side does nothing).
+- Cases: t302 (logical value), t303 (short-circuit effects), t304
+  (`0 && @tick` / `1 || @tick`), t305 (ternary with a logical test), t306
+  (loop short-circuit conditions), t307 (`sum = sum + i`), t308 (a
+  loop → logical → ternary → loop pipeline). Full runners: check 321,
+  negative 125, nomem 18, runall 267/275 (same eight known gaps),
+  loadorder 14 + 2 exempt.
